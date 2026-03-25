@@ -70,7 +70,7 @@ _oceansim_isaacsim = os.path.join(OCEANSIM_DIR, "isaacsim")
 if _oceansim_isaacsim not in _isaacsim_pkg.__path__:
     _isaacsim_pkg.__path__.append(_oceansim_isaacsim)
 
-from isaacsim.oceansim.sensors.UW_Camera import UW_Camera
+from isaacsim.oceansim.sensors.UW_Camera_light import UW_Camera
 from omni.isaac.sensor import Camera
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -97,7 +97,7 @@ def build_rock(stage) -> None:
 
     xform_prim = UsdGeom.Xform.Define(stage, rock_xform_path)
     xf = UsdGeom.Xformable(xform_prim)
-    xf.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, -2.5))
+    xf.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, -3.0))
     q = euler_angles_to_quat(np.array([0.0, 0.0, 45.0]), degrees=True)
     xf.AddOrientOp().Set(Gf.Quatf(float(q[0]), float(q[1]), float(q[2]), float(q[3])))
 
@@ -105,33 +105,64 @@ def build_rock(stage) -> None:
     print(f"[Scene] Rock @ (0, 0, -2.5)m")
 
 
+# def build_light(stage) -> None:
+#     # 주 조명: 수중 인공 조명 (카메라 옆에 위치)
+#     light_path = "/World/UnderwaterLight"
+#     light = UsdLux.SphereLight.Define(stage, light_path)
+#     light.GetIntensityAttr().Set(10000000.0)
+#     light.GetRadiusAttr().Set(0.05)
+#     xf = UsdGeom.Xformable(light)
+#     xf.AddTranslateOp().Set(Gf.Vec3d(0.00, 0.0, -0.15))
+#     print("[Scene] UnderwaterLight @ (0.00, 0, -0.15)m  baseline=0.15m")
+
+#     # 환경광: 씬 전체 확인용 약한 ambient
+#     # dome_path = "/World/AmbientDome"
+#     # dome = UsdLux.DomeLight.Define(stage, dome_path)
+#     # dome.GetIntensityAttr().Set(100.0)
+#     # print("[Scene] AmbientDome added (intensity=200)")
 def build_light(stage) -> None:
-    # 주 조명: 수중 인공 조명 (카메라 옆에 위치)
+    # 1. 조명 경로 및 기본 SphereLight 생성
     light_path = "/World/UnderwaterLight"
     light = UsdLux.SphereLight.Define(stage, light_path)
-    light.GetIntensityAttr().Set(10000000.0)
-    light.GetRadiusAttr().Set(0.05)
-    xf = UsdGeom.Xformable(light)
-    xf.AddTranslateOp().Set(Gf.Vec3d(0.00, 0.0, -0.15))
-    print("[Scene] UnderwaterLight @ (0.00, 0, -0.15)m  baseline=0.15m")
+    
+    # 기본 물리적 속성 설정
+    light.GetIntensityAttr().Set(15000000.0) # 콘 조명은 에너지가 집중되므로 필요시 강도 조절
+    light.GetRadiusAttr().Set(0.05)           # 광원 자체의 크기
+    light.GetColorAttr().Set(Gf.Vec3f(0.8, 0.9, 1.0)) # 약간의 수중 푸른빛 추가 (선택사항)
 
-    # 환경광: 씬 전체 확인용 약한 ambient
-    # dome_path = "/World/AmbientDome"
-    # dome = UsdLux.DomeLight.Define(stage, dome_path)
-    # dome.GetIntensityAttr().Set(100.0)
-    # print("[Scene] AmbientDome added (intensity=200)")
+    # 2. ShapingAPI 적용 (중요: 여기서 Cone 형태를 만듭니다)
+    # ShapingAPI를 적용하면 일반 점조명이 스포트라이트(Cone)로 변합니다.
+    shaping = UsdLux.ShapingAPI.Apply(light.GetPrim())
+    
+    # 원뿔의 각도 (Degree). 값이 커질수록 빛이 퍼지는 범위가 넓어집니다.
+    shaping.GetShapingConeAngleAttr().Set(45.0) 
+    
+    # 원뿔 경계면의 부드러움 (0.0 ~ 1.0). 0에 가까울수록 경계가 날카롭습니다.
+    shaping.GetShapingConeSoftnessAttr().Set(0.1) 
+    
+    # 3. 위치 및 방향 설정
+    xf = UsdGeom.Xformable(light)
+    
+    # 카메라 위치 근처로 이동 (카메라가 z=-0.5에서 하방 -Z를 주시하므로 조명도 위치 조정)
+    xf.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, -0.15))
+    
+    # 기본적으로 SphereLight는 모든 방향으로 쏘지만, 
+    # ShapingAPI가 적용되면 기본 축(보통 -Z 또는 Isaac Sim 기준 전방)을 기준으로 제한됩니다.
+    # 만약 빛의 방향을 특정 객체(Rock) 쪽으로 돌려야 한다면 아래와 같이 회전을 추가하세요.
+    # 예: 하방(-Z)을 향하도록 설정 (이미 기본값이 -Z일 수 있으나 명시적 제어 필요 시)
+    # q = euler_angles_to_quat(np.array([0.0, 0.0, 0.0]), degrees=True)
+    # xf.AddOrientOp().Set(Gf.Quatf(float(q[0]), float(q[1]), float(q[2]), float(q[3])))
+
+    print(f"[Scene] Underwater Cone Light (Spotlight) @ z=-0.15m, Angle=45deg")
 
 
 def build_camera_uw() -> UW_Camera:
-    """
-    UW_Camera 생성.
-    위치 (0, 0, -0.5), orientation 미지정 → 기본값(-Z 하방 주시).
-    """
     cam = UW_Camera(
         prim_path="/World/UW_Camera",
         name="UW_Camera",
         resolution=(640, 480),
         position=np.array([-1.0, -0.16, -2.85]),
+        light_prim_path="/World/UnderwaterLight"
     )
     cam.set_focal_length(2.1)
     cam.set_clipping_range(0.05, 50.0)
