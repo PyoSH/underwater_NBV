@@ -76,6 +76,7 @@ from omni.isaac.sensor import Camera
 # ─────────────────────────────────────────────────────────────────────────────
 # 씬 구성
 # ─────────────────────────────────────────────────────────────────────────────
+from pxr import UsdGeom, UsdLux, UsdPhysics, Gf, Usd  # Usd 추가
 
 def build_seafloor(stage) -> None:
     path = "/World/Seafloor"
@@ -104,22 +105,6 @@ def build_rock(stage) -> None:
     add_reference_to_stage(usd_path=rock_usd, prim_path=rock_mesh_path)
     print(f"[Scene] Rock @ (0, 0, -2.5)m")
 
-
-# def build_light(stage) -> None:
-#     # 주 조명: 수중 인공 조명 (카메라 옆에 위치)
-#     light_path = "/World/UnderwaterLight"
-#     light = UsdLux.SphereLight.Define(stage, light_path)
-#     light.GetIntensityAttr().Set(10000000.0)
-#     light.GetRadiusAttr().Set(0.05)
-#     xf = UsdGeom.Xformable(light)
-#     xf.AddTranslateOp().Set(Gf.Vec3d(0.00, 0.0, -0.15))
-#     print("[Scene] UnderwaterLight @ (0.00, 0, -0.15)m  baseline=0.15m")
-
-#     # 환경광: 씬 전체 확인용 약한 ambient
-#     # dome_path = "/World/AmbientDome"
-#     # dome = UsdLux.DomeLight.Define(stage, dome_path)
-#     # dome.GetIntensityAttr().Set(100.0)
-#     # print("[Scene] AmbientDome added (intensity=200)")
 def build_light(stage) -> None:
     # 1. 조명 경로 및 기본 SphereLight 생성
     light_path = "/World/UnderwaterLight"
@@ -145,7 +130,13 @@ def build_light(stage) -> None:
     
     # 카메라 위치 근처로 이동 (카메라가 z=-0.5에서 하방 -Z를 주시하므로 조명도 위치 조정)
     xf.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, -0.15))
-    
+
+    marker_path = f"{light_path}/VisualMarker"
+    marker = UsdGeom.Sphere.Define(stage,marker_path)
+    marker.GetRadiusAttr().Set(0.1)
+    marker.GetDisplayColorAttr().Set([Gf.Vec3f(1.0,1.0,0.0)])
+    marker.GetPurposeAttr().Set(UsdGeom.Tokens.guide)
+
     # 기본적으로 SphereLight는 모든 방향으로 쏘지만, 
     # ShapingAPI가 적용되면 기본 축(보통 -Z 또는 Isaac Sim 기준 전방)을 기준으로 제한됩니다.
     # 만약 빛의 방향을 특정 객체(Rock) 쪽으로 돌려야 한다면 아래와 같이 회전을 추가하세요.
@@ -156,9 +147,11 @@ def build_light(stage) -> None:
     print(f"[Scene] Underwater Cone Light (Spotlight) @ z=-0.15m, Angle=45deg")
 
 
-def build_camera_uw() -> UW_Camera:
+def build_camera_uw(parent_path) -> UW_Camera:
+    cam_path = f"{parent_path}/UW_Camera"
+
     cam = UW_Camera(
-        prim_path="/World/UW_Camera",
+        prim_path=cam_path,
         name="UW_Camera",
         resolution=(640, 480),
         position=np.array([-1.0, -0.16, -2.85]),
@@ -166,46 +159,82 @@ def build_camera_uw() -> UW_Camera:
     )
     cam.set_focal_length(2.1)
     cam.set_clipping_range(0.05, 50.0)
-    print("[Scene] UW_Camera @ (0, 0, -0.5)m  주시:-Z(하방)")
+
+    stage = omni.usd.get_context().get_stage()
+    marker_path = f"{cam_path}/VisualMarker"
+    marker = UsdGeom.Cube.Define(stage, marker_path)
+    
+    # 크기 조절 (0.05m 크기의 큐브)
+    marker_xf = UsdGeom.Xformable(marker)
+    marker_xf.AddScaleOp().Set(Gf.Vec3d(0.1, 0.2, 0.1))
+    marker.GetDisplayColorAttr().Set([Gf.Vec3f(0.0, 0.5, 1.0)]) # 파란색
+    
     return cam
 
-# def build_camera() -> Camera:
-#     cam = Camera(
-#         prim_path="/World/StandardCamera",
-#         name="StandardCamera",
-#         position=np.array([-1.0, -0.16, -2.85]),
-#         resolution=(320, 240),
-#     )
-#     # 필요한 경우 focal_length 등을 설정
-#     cam.set_focal_length(2.1)
-#     cam.set_clipping_range(0.05, 50.0)
-#     print("[Scene] Standard Camera @ (0, 0, -0.5)m  주시:-Z(하방)")
-#     return cam
+def build_camera_with_body(stage, initial_pos) -> tuple:
+    """
+    직육면체 바디를 생성하고, 카메라를 그 자식으로 등록합니다.
+    """
+    # 1. 부모가 될 Xform (빈 상자) - 움직임의 주체
+    rig_path = "/World/MovingCameraRig"
+    rig_prim = UsdGeom.Xform.Define(stage, rig_path)
+    xf_rig = UsdGeom.Xformable(rig_prim)
+    xf_rig.AddTranslateOp().Set(Gf.Vec3d(*initial_pos.tolist()))
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 메인
-# ─────────────────────────────────────────────────────────────────────────────
+    # 2. 시각적 형태 (직육면체 모델) - rig 하위에 생성
+    body_path = f"{rig_path}/VisualBody"
+    cube = UsdGeom.Cube.Define(stage, body_path)
+    cube.GetSizeAttr().Set(1.0)
+    
+    # 큐브를 스케일링하여 직육면체(x방향으로 긴)로 만듦
+    xf_cube = UsdGeom.Xformable(cube)
+    # 가로 0.2m, 세로 0.1m, 높이 0.1m의 직육면체
+    xf_cube.AddScaleOp().Set(Gf.Vec3d(0.2, 0.1, 0.1)) 
+    
+    # 색상 설정 (시안색, 뷰포트에서 보임)
+    cube.GetDisplayColorAttr().Set([Gf.Vec3f(0.0, 1.0, 1.0)])
+    # *중요*: Purpose guide를 설정하지 않아 렌더링/뷰포트에서 보이게 함
+
+    # 3. 카메라 프림 생성 (rig 하위에 'Camera'라는 이름으로 생성)
+    cam_child_path = f"{rig_path}/Camera"
+    
+    # 4. OceanSim UW_Camera 인스턴스화
+    # 주의: 부모(rig) 하위 경로를 전달하고, position은 Gf.Vec3d(0)을 주어
+    # 부모 좌표계 기준 로컬 오프셋이 없도록 설정 (완벽 부착)
+    cam = UW_Camera(
+        prim_path=cam_child_path,
+        name="UW_Camera",
+        resolution=(640, 480),
+        # 부모 rig 좌표계를 그대로 사용 (로컬 0,0,0)
+        position=np.array([initial_pos[0]+0.1, initial_pos[1], initial_pos[2]]), 
+        light_prim_path="/World/UnderwaterLight" # 고정된 조명 참조
+    )
+    cam.set_focal_length(2.1)
+    cam.set_clipping_range(0.05, 50.0)
+
+    print(f"[Scene] Camera coupled with Rectangular parallelepiped at {rig_path}")
+    return rig_path, cam
+
 
 def main():
     print("=" * 60)
-    print("OceanSim 수중 씬 초기화 (GUI 모드)")
+    print("OceanSim 수중 씬 초기화 및 병진 운동 시작")
     print("=" * 60)
 
     create_new_stage()
     stage = omni.usd.get_context().get_stage()
 
-    # Physics scene (수중 = 무중력 근사)
+    # Physics scene 설정
     phys_scene = UsdPhysics.Scene.Define(stage, "/World/PhysicsScene")
-    phys_scene.GetGravityDirectionAttr().Set(Gf.Vec3f(0.0, 0.0, -1.0))
     phys_scene.GetGravityMagnitudeAttr().Set(0.0)
 
     build_seafloor(stage)
     build_rock(stage)
     build_light(stage)
-    # cam = build_camera()
-    cam_uw = build_camera_uw()
+    # cam_uw = build_camera_uw("/World")
+    initial_cam_pos = np.array([-3.0, -0.0, -2.85])
+    cam_rig_path, cam_uw = build_camera_with_body(stage, initial_cam_pos)
 
-    # Isaac Sim 기본 뷰포트 시점: 씬 전체가 보이는 위치로 설정
     set_camera_view(
         eye=np.array([3.0, -3.0, 1.5]),
         target=np.array([0.0, 0.0, -2.0]),
@@ -216,36 +245,58 @@ def main():
         simulation_app.update()
 
     # UW_Camera 초기화
-    # UW_param [0:3]=backscatter_value, [3:6]=backscatter_coeff, [6:9]=atten_coeff
-    # (구현 기준 — docstring과 [3:6]/[6:9] 순서 반전 주의)
     UW_param = np.array([
-        0.0,  0.31, 0.24,   # backscatter_value (청록색 배경)
-        0.05, 0.05, 0.2,    # [3:6] → backscatter_coeff
-        0.05, 0.05, 0.05,   # [6:9] → atten_coeff
+        0.06,  0.61, 0.34,   
+        0.05, 0.05, 0.2,    
+        0.05, 0.05, 0.05,   
     ])
-    cam_uw.initialize(
-        UW_param=UW_param,
-        viewport=True,          # GUI: UW Camera 전용 뷰포트 창 생성
-        # writing_dir=OUTPUT_DIR, # 렌더 결과 저장
-    )
-    # cam.initialize()
-
-    # ── 실행 루프 ─────────────────────────────────────────────────────────────
+    cam_uw.initialize(UW_param=UW_param, viewport=True)
     timeline = omni.timeline.get_timeline_interface()
+
+    # ── 병진 운동을 위한 설정 ──────────────────────────────────────────
+    rig_path = cam_rig_path
+    rig_prim = stage.GetPrimAtPath(rig_path)
+    xf_rig = UsdGeom.Xformable(rig_prim)
+
+    # 2. 조명 프림 (조명은 Rig 외부에 있으므로 별도 제어 혹은 Rig 자식으로 이동 필요)
+    light_prim = stage.GetPrimAtPath("/World/UnderwaterLight")
+    xf_light = UsdGeom.Xformable(light_prim)
+
+    # 속도 및 초기 위치
+    velocity = np.array([0.05, 0.0, 0.0]) 
+    current_rig_pos = initial_cam_pos.copy() # Rig의 초기 위치
+    current_light_pos = np.array([0.0, 0.0, -0.15])
+    dt = 1.0 / 60.0
+
     timeline.play()
 
     while simulation_app.is_running():
+        # 루프 내부에서 매번 프림 유효성 검사 (안전장치)
+        if not rig_prim.IsValid():
+            break
+
+        # 1. 위치 계산
+        current_rig_pos += velocity * dt
+        current_light_pos += 0.5*velocity * dt
+
+        # 2. USD 속성 업데이트
+        # Rig만 움직이면 그 안의 카메라와 직육면체는 알아서 따라감
+        rig_ops = xf_rig.GetOrderedXformOps()
+        if rig_ops:
+            rig_ops[0].Set(Gf.Vec3d(*current_rig_pos.tolist()))
+        
+        light_ops = xf_light.GetOrderedXformOps()
+        if light_ops:
+            light_ops[0].Set(Gf.Vec3d(*current_light_pos.tolist()))
+
         simulation_app.update()
+        
         try:
             cam_uw.render()
-            # rgba = cam.get_rgba()
         except RuntimeError as e:
-            # timeline pause 등으로 depth annotator CUDA 버퍼가 무효화될 수 있음
             print(f"[render skip] {e}")
 
     cam_uw.close()
-    # cam.close()
-
     print("[완료]")
 
 
