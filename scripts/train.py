@@ -128,6 +128,7 @@ def run_random_policy(env: OceanNBVEnv, steps: int = 100) -> None:
 if __name__ == "__main__":
     cfg = OceanNBVEnvCfg()
     cfg.scene.num_envs = args.num_envs
+    cfg.scene.env_spacing = 10.0
 
     env = OceanNBVEnv(cfg)
 

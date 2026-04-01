@@ -31,6 +31,10 @@ ROCK_USD     = os.path.join(ASSET_DIR, "collected_rock/rock.usd")
 # rock 45° Z 회전 쿼터니언 [w, x, y, z]
 _ROT_45Z = (math.cos(math.radians(22.5)), 0.0, 0.0, math.sin(math.radians(22.5)))
 
+floorDepth = -3.25
+wallHeight = 5.0
+wallWidth = 0.01
+wallLength = 10.0
 
 @configclass
 class OceanSceneCfg(InteractiveSceneCfg):
@@ -44,7 +48,44 @@ class OceanSceneCfg(InteractiveSceneCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.15, 0.15, 0.15)),
         ),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -3.25)),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, floorDepth)),
+    )
+
+    # 북쪽 벽 (Y+)
+    wall_north: AssetBaseCfg = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/Wall1",
+        spawn=sim_utils.CuboidCfg(
+            size=(wallLength, wallWidth, wallHeight),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.05, 0.05, 0.05)), # 어두운 색이 빛 반사 억제에 유리
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, wallLength/2, floorDepth + wallHeight/2))
+    )
+    # 남쪽 벽 (Y-)
+    wall_south: AssetBaseCfg = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/Wall2",
+        spawn=sim_utils.CuboidCfg(
+            size=(wallLength, wallWidth, wallHeight),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.05, 0.05, 0.05)),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, -wallLength/2, floorDepth + wallHeight/2))
+    )
+    # 동쪽 벽 (X+)
+    wall_east: AssetBaseCfg = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/Wall3",
+        spawn=sim_utils.CuboidCfg(
+            size=(wallWidth, wallLength, wallHeight),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.05, 0.05, 0.05)),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(wallLength/2, 0.0, floorDepth + wallHeight/2))
+    )
+    # 서쪽 벽 (X-)
+    wall_west: AssetBaseCfg = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/Wall4",
+        spawn=sim_utils.CuboidCfg(
+            size=(wallWidth, wallLength, wallHeight),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.05, 0.05, 0.05)),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(-wallLength/2, 0.0, floorDepth + wallHeight/2))
     )
 
     # ── 대상 물체 (시각 전용) ───────────────────────────────────────────────
