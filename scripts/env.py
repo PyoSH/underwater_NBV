@@ -1,27 +1,3 @@
-"""
-env.py
-------
-OceanNBVEnv: DirectRLEnv 기반 수중 카메라·조명 탐색 RL 환경.
-
-씬 구성 (OceanSceneCfg → InteractiveScene 자동 생성):
-    {ENV_REGEX_NS}/Seafloor     - 정적 해저면
-    {ENV_REGEX_NS}/Rock         - 대상 물체
-    {ENV_REGEX_NS}/CameraRig    - 카메라 강체 (RigidObject)
-      └── Camera                - Pinhole 카메라 (_setup_scene 에서 추가)
-    {ENV_REGEX_NS}/LightRig     - 조명 강체 (RigidObject)
-      └── SphereLight           - 스포트라이트 (_setup_scene 에서 추가)
-omni.isaac.debug_draw           - 카메라·조명 3축 화살표 (뷰포트 오버레이, 센서 이미지 미포함)
-
-행동 적용 방식:
-    action ∈ [-1, 1]^12  → RigidObject.write_root_velocity_to_sim()
-    물리 엔진이 위치를 적분 → 충돌 자동 처리
-    RigidObject.data.root_pos_w / root_quat_w 로 상태 읽기
-
-병렬 환경:
-    InteractiveSceneCfg 의 {ENV_REGEX_NS} 패턴으로 num_envs 개 자동 복제
-    rock_pos_w = scene.env_origins + (0, 0, -3)
-"""
-
 from __future__ import annotations
 
 import math
@@ -29,6 +5,7 @@ from typing import Sequence
 
 import numpy as np
 import torch
+import os
 
 import omni.usd
 from pxr import Gf, UsdGeom, UsdLux
@@ -37,6 +14,15 @@ from isaaclab.envs import DirectRLEnv
 import isaaclab.sim as sim_utils
 
 from envCfg import OceanNBVEnvCfg
+from sceneCfg import OCEANSIM_DIR
+
+import isaacsim as _isaacsim_pkg
+_oceansim_isaacsim = os.path.join(OCEANSIM_DIR, "isaacsim")
+if _oceansim_isaacsim not in _isaacsim_pkg.__path__:
+    _isaacsim_pkg.__path__.append(_oceansim_isaacsim)
+
+from isaacsim.oceansim.sensors.ImagingSonarSensor import ImagingSonarSensor
+from isaacsim.oceansim.sensors.UW_Camera_parallel import UWCamera
 
 
 class OceanNBVEnv(DirectRLEnv):
@@ -93,53 +79,20 @@ class OceanNBVEnv(DirectRLEnv):
         self._camera = Camera(cam_cfg)
         self.scene.sensors["camera"] = self._camera   # scene.update() 에 편입
 
-    def _show_camera_realtime(self) -> None:
-        """cv2.imshow 로 카메라 이미지를 실시간 표시.
+    def _setup_sonar_sensor(self) -> None:
+        prim_path = "/World/envs/env_0/SonarRig/Sonar"
 
-        Isaac Sim GUI 모드에서만 동작. 헤드리스 모드에서는 자동 비활성화.
-        센서 픽셀 데이터 (OceanSim 수중 렌더링 포함) 를 그대로 표시.
-        """
-        try:
-            import cv2
-        except ImportError:
-            print("[Camera] cv2 없음 → cam_realtime_vis 비활성화")
-            self.cfg.cam_realtime_vis = False
-            return
+        self._sonar = ImagingSonarSensor(
+            prim_path=prim_path,
+            name="ImagingSonar",
+            min_range=self.cfg.sonar_min_range,
+            max_range=self.cfg.sonar_max_range,
+            hori_fov =self.cfg.hori_fov,
+            vert_fov =self.cfg.vert_fov,
+            hori_res =self.cfg.hori_res
+        )
 
-        rgb = self._camera.data.output["rgb"]
-        if rgb is None or rgb.shape[0] == 0:
-            return
-
-        img_np  = rgb[0, :, :, :3].cpu().numpy().astype(np.uint8)  # (H,W,3) RGB
-        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)           # OpenCV BGR
-        try:
-            cv2.imshow("OceanNBV - Camera Sensor", img_bgr)
-            cv2.waitKey(1)  # 이벤트 루프 유지 (non-blocking)
-        except cv2.error:
-            print("[Camera] cv2.imshow 미지원 (GUI 없는 빌드) → cam_realtime_vis 비활성화")
-            self.cfg.cam_realtime_vis = False
-
-    def _save_camera_image(self) -> None:
-        """env_0 카메라 이미지를 PNG 로 저장.
-
-        data.output["rgb"]: (num_envs, H, W, 4) uint8 (RGBA)
-        OceanSim 수중 렌더링이 포함된 실제 센서 출력.
-        """
-        import os
-        import numpy as np
-        from PIL import Image
-
-        rgb = self._camera.data.output["rgb"]          # (N, H, W, 4) uint8
-        if rgb is None or rgb.shape[0] == 0:
-            return
-
-        save_dir = self.cfg.cam_save_dir
-        os.makedirs(save_dir, exist_ok=True)
-
-        img_np = rgb[0, :, :, :3].cpu().numpy().astype(np.uint8)   # (H, W, 3)
-        path   = os.path.join(save_dir, f"step_{self._step_count:06d}.png")
-        Image.fromarray(img_np).save(path)
-        print(f"[Camera] 저장: {path}")
+        self._sonar.sonar_initialize(viewport=self.cfg.debug_vis)
 
     # ── 방향 시각화 마커 ──────────────────────────────────────────────────────
 
@@ -214,6 +167,8 @@ class OceanNBVEnv(DirectRLEnv):
             cq = self.cam_orient[i:i+1]
             lp = self.light_pos[i].cpu()
             lq = self.light_orient[i:i+1]
+            # sp = self.sonar_pos[i].cpu()
+            # sq = self.sonar_orient[i:i+1]
 
             for ax, col in zip(AXES, AXIS_COLS):
                 # 카메라 축
@@ -227,6 +182,11 @@ class OceanNBVEnv(DirectRLEnv):
                 starts.append(lp.tolist())
                 ends.append((lp + aw * L).tolist())
                 colors.append(col); widths.append(W)
+
+                # aw = self._rotate_vec_by_quat(sq, ax)[0].cpu()
+                # starts.append(sp.tolist())
+                # ends.append((sp + aw * L).tolist())
+                # colors.append(col); widths.append(W)
 
         if starts:
             self._draw.draw_lines(starts, ends, colors, widths)
@@ -244,11 +204,13 @@ class OceanNBVEnv(DirectRLEnv):
         for env_idx in range(self.num_envs):
             env_ns = f"/World/envs/env_{env_idx}"
             self._add_camera_child(stage, f"{env_ns}/CameraRig")
+            # self._add_sonar_child(stage, f"{env_ns}/SonarRig")
             self._add_light_children(stage, f"{env_ns}/LightRig")
 
         # Camera 센서를 _setup_scene() 에서 등록해야 sim.reset() (PLAY 이벤트) 전에
         # _initialize_callback 이 등록됨 → _is_initialized = True 보장
         self._setup_camera_sensor()
+        # self._setup_sonar_sensor()
 
     def _add_camera_child(self, stage, rig_path: str) -> None:
         """CameraRig 아래에 Pinhole 카메라 프림 추가 (ROS 관례).
@@ -273,6 +235,30 @@ class OceanNBVEnv(DirectRLEnv):
         cam = UsdGeom.Camera(cam_prim)
         cam.GetFocalLengthAttr().Set(24.0)                        # mm
         cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.01, 100.0))    # near/far [m]
+
+    def _add_sonar_child(self, stage, rig_path: str) -> None:
+        """SonarRig 아래에 Sonar 프림 추가 (ROS 관례).
+
+        ROS body frame: +X = 전방, +Y = 좌, +Z = 상
+        USD Camera:     -Z = 전방 (기본값)
+
+        USD -Z 를 body +X 에 정렬하려면 Y축 -90° 회전 필요:
+          R_y(-90°) · (0,0,-1) = (1,0,0)  →  카메라가 body +X 방향을 바라봄
+
+        위치: SonarRig X 반폭(0.05m) + 여유(0.01m) = +X 앞면 바깥
+        """
+        sonar_prim = stage.DefinePrim(f"{rig_path}/Sonar", "Sonar")
+        # standardize_xform_ops: XformPrimView 가 요구하는 [translate, orient, scale] 정규화
+        # translation: +X 앞면 바깥 (CameraRig X 반폭 0.05m + 여유 0.01m)
+        # orientation: Y축 -90°  USD -Z 전방 → body +X (ROS 전방)  [w, x, y, z]
+        sim_utils.standardize_xform_ops(
+            sonar_prim,
+            translation=(0.06, 0.0, 0.0),
+            orientation=(0.7071, 0.0, -0.7071, 0.0),
+        )
+        sonar = UsdGeom.Camera(sonar_prim)
+        sonar.GetFocalLengthAttr().Set(24.0)                        # mm
+        sonar.GetClippingRangeAttr().Set(Gf.Vec2f(0.01, 100.0))    # near/far [m]
 
     def _add_light_children(self, stage, rig_path: str) -> None:
         """LightRig 아래에 SphereLight 추가 (ROS 관례).
@@ -304,19 +290,6 @@ class OceanNBVEnv(DirectRLEnv):
             orientation= (0.7071, 0.0, -0.7071, 0.0)
         )
 
-        # # ── 방향 시각화 원뿔 (흰색, guide 용도) ──────────────────────────
-        # cone_half_angle_deg = 20.0
-        # cone_h = 0.15
-        # cone_r = cone_h * math.tan(math.radians(cone_half_angle_deg))
-        # cone = UsdGeom.Cone.Define(stage, f"{rig_path}/DirectionCone")
-        # cone.GetHeightAttr().Set(cone_h)
-        # cone.GetRadiusAttr().Set(cone_r)
-        # cone.GetAxisAttr().Set("Z")
-        # cone.GetDisplayColorAttr().Set([Gf.Vec3f(1.0, 1.0, 1.0)])
-        # cone.GetPurposeAttr().Set(UsdGeom.Tokens.guide)
-        # cone_xf = UsdGeom.Xformable(cone)
-        # cone_xf.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, cone_h / 2))
-
     # ── 행동 적용 ─────────────────────────────────────────────────────────────
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
@@ -339,12 +312,18 @@ class OceanNBVEnv(DirectRLEnv):
             self._actions[:, 0:3] * lv,
             self._actions[:, 3:6] * av,
         ], dim=-1)
+        # sonar_vel = torch.cat([
+        #     self._actions[:, 0:3] * lv,
+        #     self._actions[:, 3:6] * av,
+        # ], dim=-1)
         light_vel = torch.cat([
             self._actions[:, 6:9]  * lv,
-            self._actions[:, 9:12] * av,
+            torch.zeros_like(self._actions[:, 9:10]),
+            self._actions[:, 10:12] * av, # roll은 안하고자 함.
         ], dim=-1)
 
         self._cam_rig.write_root_velocity_to_sim(cam_vel)
+        # self._sonar_rig.write_root_velocity_to_sim(sonar_vel)
         self._light_rig.write_root_velocity_to_sim(light_vel)
 
     # ── 상태 프로퍼티 ─────────────────────────────────────────────────────────
@@ -368,18 +347,28 @@ class OceanNBVEnv(DirectRLEnv):
     def light_orient(self) -> torch.Tensor:
         """조명 리그 월드 자세 쿼터니언 [w,x,y,z] (num_envs, 4)."""
         return self._light_rig.data.root_quat_w
+    
+    # @property
+    # def sonar_pos(self) -> torch.Tensor:
+    #     """sonar 리그 월드 위치 (num_envs, 3)."""
+    #     return self._sonar_rig.data.root_pos_w
+
+    # @property
+    # def sonar_orient(self) -> torch.Tensor:
+    #     """sonar 리그 월드 자세 쿼터니언 [w,x,y,z] (num_envs, 4)."""
+    #     return self._sonar_rig.data.root_quat_w
 
     # ── 관측 ─────────────────────────────────────────────────────────────────
 
     def _get_observations(self) -> dict:
         """
-        관측 벡터 (17차원):
-            cam_pos(3) | cam_orient(4) | light_pos(3) | light_orient(4) | cam_to_rock(3)
+        관측 벡터
         """
         cam_to_rock = self.rock_pos - self.cam_pos
         obs = torch.cat(
             [self.cam_pos, self.cam_orient,
              self.light_pos, self.light_orient,
+            #  self.sonar_pos, self.sonar_orient,
              cam_to_rock],
             dim=-1,
         )
@@ -387,14 +376,6 @@ class OceanNBVEnv(DirectRLEnv):
         # 방향 마커 실시간 업데이트 (PhysX runtime 데이터 사용)
         if self.cfg.debug_vis:
             self._update_vis_markers()
-
-        # 카메라 이미지 실시간 표시 / 주기적 저장
-        # self._step_count += 1
-        # if self.cfg.cam_realtime_vis:
-        #     self._show_camera_realtime()
-        # interval = self.cfg.cam_save_interval
-        # if interval > 0 and self._step_count % interval == 0:
-        #     self._save_camera_image()
 
         return {"policy": obs}
 
@@ -443,16 +424,13 @@ class OceanNBVEnv(DirectRLEnv):
     # ── 리셋 ─────────────────────────────────────────────────────────────────
 
     def _reset_idx(self, env_ids: Sequence[int]) -> None:
-        """
-        지정된 환경을 배치 리셋.
-        - 카메라 위치: rock 중심 반구 내 균등 샘플링 (구면 좌표)
-        - 카메라 방향: rock 을 바라보도록 look-at 쿼터니언 적용
-        - 조명 위치:   카메라에서 look-at 수직 방향으로 baseline 오프셋
-        """
         super()._reset_idx(env_ids)
 
         cfg = self.cfg
         n   = len(env_ids)
+
+        if self.cfg.water_dr_enabled:
+            self._randomize_water_params()
 
         # rock 월드 위치 (해당 env 들만)
         rock_np = self.rock_pos[env_ids].cpu().numpy()  # (n, 3)
@@ -503,7 +481,23 @@ class OceanNBVEnv(DirectRLEnv):
         env_ids_t = torch.tensor(list(env_ids), dtype=torch.int64, device=self.device)
         self._cam_rig.write_root_state_to_sim(cam_state,   env_ids=env_ids_t)
         self._light_rig.write_root_state_to_sim(light_state, env_ids=env_ids_t)
+    
+    def _randomize_water_params(self) -> None:
+        dr = self.cfg.water_dr
 
+        def rand_tuple(mn, mx):
+            return tuple(
+                float(np.random.uniform(mn[i], mx[i])) for i in range(3)
+            )
+
+        self._camera.set_water_params(
+            backscatter_value = rand_tuple(dr.backscatter_value_min,
+                                        dr.backscatter_value_max),
+            atten_coeff       = rand_tuple(dr.atten_coeff_min,
+                                        dr.atten_coeff_max),
+            backscatter_coeff = rand_tuple(dr.backscatter_coeff_min,
+                                        dr.backscatter_coeff_max),
+        )
     # ── 유틸리티 ─────────────────────────────────────────────────────────────
 
     @staticmethod

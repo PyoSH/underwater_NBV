@@ -28,6 +28,13 @@ OCEANSIM_DIR = "/isaac-sim/extsUser/OceanSim"
 ASSET_DIR    = os.path.join(OCEANSIM_DIR, "oceansim_asset")
 ROCK_USD     = os.path.join(ASSET_DIR, "collected_rock/rock.usd")
 
+_oceansim_isaacsim = os.path.join(OCEANSIM_DIR, "isaacsim")
+if _oceansim_isaacsim not in _isaacsim_pkg.__path__:
+    _isaacsim_pkg.__path__.append(_oceansim_isaacsim)
+
+# from isaacsim.oceansim.sensors.ImagingSonarSensor import ImagingSonarSensor
+from isaacsim.oceansim.sensors.UW_Camera_parallel import UWCamera
+
 # rock 45° Z 회전 쿼터니언 [w, x, y, z]
 _ROT_45Z = (math.cos(math.radians(22.5)), 0.0, 0.0, math.sin(math.radians(22.5)))
 
@@ -111,6 +118,22 @@ class OceanSceneCfg(InteractiveSceneCfg):
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -0.5)),
     )
+
+    # sonar_rig: RigidObjectCfg = RigidObjectCfg(
+    #     prim_path="{ENV_REGEX_NS}/SonarRig",
+    #     spawn=sim_utils.CuboidCfg(
+    #         size=(0.10, 0.05, 0.05),
+    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(
+    #             disable_gravity=True,
+    #             linear_damping=0.5,
+    #             angular_damping=0.5,
+    #         ),
+    #         mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
+    #         collision_props=sim_utils.CollisionPropertiesCfg(),
+    #         visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
+    #     ),
+    #     init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -0.5)),
+    # )
 
     # ── 조명 리그 (동적 강체, 노란색) ──────────────────────────────────────
     light_rig: RigidObjectCfg = RigidObjectCfg(
