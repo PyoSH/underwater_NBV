@@ -63,15 +63,7 @@ class OceanNBVEnvCfg(DirectRLEnvCfg):
     # ── 카메라 센서 ──────────────────────────────────────────────────────────
     water_dr:           WaterParamRangeCfg = WaterParamRangeCfg()
     water_dr_enabled:   bool = False
-      
-    cam_height:        int  = 480    # 이미지 세로 해상도 [px]
-    cam_width:         int  = 640    # 이미지 가로 해상도 [px]
-
-    sonar_min_range:    float = 0.2
-    sonar_max_range:    float = 10.0
-    sonar_hori_fov:     float = 130.0
-    sonar_vert_fov:     float = 20.0
-    sonar_hori_res:     int = 1024
+    
 
     # ── 디버그 시각화 ─────────────────────────────────────────────────────────
     debug_vis:        bool = True  # 방향 마커 활성화 여부

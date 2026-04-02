@@ -1,39 +1,22 @@
-"""
-sceneCfg.py
------------
-Isaac Lab InteractiveSceneCfg.
-{ENV_REGEX_NS} 패턴으로 num_envs 개의 환경이 자동 복제됨.
-
-프림 트리 (env 당):
-    {ENV_REGEX_NS}/Seafloor         - 정적 해저면 (CollisionAPI)
-    {ENV_REGEX_NS}/Rock             - 대상 물체 (USD 참조)
-    {ENV_REGEX_NS}/CameraRig        - 카메라 강체 (RigidBodyAPI + CollisionAPI)
-      └── Camera                   - Pinhole 카메라 (CameraCfg 자동 생성)
-    {ENV_REGEX_NS}/LightRig         - 조명 강체  (RigidBodyAPI + CollisionAPI)
-
-_setup_scene() 에서 추가되는 자식 프림:
-    LightRig/SphereLight            - 스포트라이트
-"""
-
 import math
 import os
 
+import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import CameraCfg
-import isaaclab.sim as sim_utils
+# from isaaclab.sensors import CameraCfg
 from isaaclab.utils import configclass
 
 OCEANSIM_DIR = "/isaac-sim/extsUser/OceanSim"
 ASSET_DIR    = os.path.join(OCEANSIM_DIR, "oceansim_asset")
 ROCK_USD     = os.path.join(ASSET_DIR, "collected_rock/rock.usd")
 
+import isaacsim as _isaacsim_pkg
 _oceansim_isaacsim = os.path.join(OCEANSIM_DIR, "isaacsim")
 if _oceansim_isaacsim not in _isaacsim_pkg.__path__:
     _isaacsim_pkg.__path__.append(_oceansim_isaacsim)
 
-# from isaacsim.oceansim.sensors.ImagingSonarSensor import ImagingSonarSensor
-from isaacsim.oceansim.sensors.UW_Camera_parallel import UWCamera
+from isaacsim.oceansim.sensors.UW_Camera_cfg import UWCameraCfg
 
 # rock 45° Z 회전 쿼터니언 [w, x, y, z]
 _ROT_45Z = (math.cos(math.radians(22.5)), 0.0, 0.0, math.sin(math.radians(22.5)))
@@ -103,8 +86,8 @@ class OceanSceneCfg(InteractiveSceneCfg):
     )
 
     # ── 카메라 리그 (동적 강체, 하늘색) ────────────────────────────────────
-    camera_rig: RigidObjectCfg = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/CameraRig",
+    sensor_rig: RigidObjectCfg = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/SensorRig",
         spawn=sim_utils.CuboidCfg(
             size=(0.10, 0.05, 0.05),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
@@ -119,21 +102,28 @@ class OceanSceneCfg(InteractiveSceneCfg):
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -0.5)),
     )
 
-    # sonar_rig: RigidObjectCfg = RigidObjectCfg(
-    #     prim_path="{ENV_REGEX_NS}/SonarRig",
-    #     spawn=sim_utils.CuboidCfg(
-    #         size=(0.10, 0.05, 0.05),
-    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(
-    #             disable_gravity=True,
-    #             linear_damping=0.5,
-    #             angular_damping=0.5,
-    #         ),
-    #         mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
-    #         collision_props=sim_utils.CollisionPropertiesCfg(),
-    #         visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
-    #     ),
-    #     init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -0.5)),
-    # )
+    camera: UWCameraCfg = UWCameraCfg(
+        prim_path="{ENV_REGEX_NS}/SensorRig/Camera",
+        update_period=0,
+        height  =480,
+        width   =640,
+        spawn   =sim_utils.PinholeCameraCfg(
+            focal_length=24.0,
+            clipping_range=(0.1, 20.0)
+        ),
+        offset=UWCameraCfg.OffsetCfg(
+            pos=(0.0, 0.0, 0.0),
+            # rot=(0.7071, 0.0, -0.7071, 0.0),   # [w, x, y, z]
+            rot=(0.5, -0.5, 0.5, -0.5),
+            convention="ros",
+        ),
+        # backscatter_value   = (0.00, 0.0, 0.0),
+        # atten_coeff         = (0.00, 0.0, 0.0),
+        # backscatter_coeff   = (0.00, 0.0, 0.0),
+        backscatter_value   = (0.05, 0.31, 0.24),
+        atten_coeff         = (0.05, 0.05, 0.20),
+        backscatter_coeff   = (0.05, 0.05, 0.05),
+    )
 
     # ── 조명 리그 (동적 강체, 노란색) ──────────────────────────────────────
     light_rig: RigidObjectCfg = RigidObjectCfg(
@@ -150,4 +140,17 @@ class OceanSceneCfg(InteractiveSceneCfg):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.9, 0.0)),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.15, 0.0, -0.45)),
+    )
+    
+    sphere_light: AssetBaseCfg = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/LightRig/SphereLight",
+        spawn=sim_utils.SphereLightCfg(
+            intensity=10000000.0,
+            radius=0.05,
+            color=(1.0, 1.0, 1.0),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(0.06, 0.0, 0.0),
+            rot=(0.7071, 0.0, -0.7071, 0.0),   # [w, x, y, z]
+        ),        
     )
