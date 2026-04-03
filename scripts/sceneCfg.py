@@ -1,22 +1,17 @@
 import math
-import os
+import os, sys
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.scene import InteractiveSceneCfg
-# from isaaclab.sensors import CameraCfg
 from isaaclab.utils import configclass
 
 OCEANSIM_DIR = "/isaac-sim/extsUser/OceanSim"
 ASSET_DIR    = os.path.join(OCEANSIM_DIR, "oceansim_asset")
 ROCK_USD     = os.path.join(ASSET_DIR, "collected_rock/rock.usd")
 
-import isaacsim as _isaacsim_pkg
-_oceansim_isaacsim = os.path.join(OCEANSIM_DIR, "isaacsim")
-if _oceansim_isaacsim not in _isaacsim_pkg.__path__:
-    _isaacsim_pkg.__path__.append(_oceansim_isaacsim)
-
-from isaacsim.oceansim.sensors.UW_Camera_cfg import UWCameraCfg
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from sensors.UWCamera.UW_Camera_cfg import UWCameraCfg
 
 # rock 45° Z 회전 쿼터니언 [w, x, y, z]
 _ROT_45Z = (math.cos(math.radians(22.5)), 0.0, 0.0, math.sin(math.radians(22.5)))
@@ -25,6 +20,12 @@ floorDepth = -3.25
 wallHeight = 5.0
 wallWidth = 0.01
 wallLength = 10.0
+
+wall_material = sim_utils.PreviewSurfaceCfg(
+    diffuse_color=(0.01, 0.01, 0.01),  # 난반사(Diffuse)를 0으로 설정 (완전 검정)
+    metallic=0.0,                 # 금속성 제거 (금속성 반사 차단)
+    roughness=1.0,                # 거칠기를 최대화하여 정반사(Specular) 억제
+)
 
 @configclass
 class OceanSceneCfg(InteractiveSceneCfg):
@@ -46,7 +47,7 @@ class OceanSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Wall1",
         spawn=sim_utils.CuboidCfg(
             size=(wallLength, wallWidth, wallHeight),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.05, 0.05, 0.05)), # 어두운 색이 빛 반사 억제에 유리
+            visual_material=wall_material,
         ),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, wallLength/2, floorDepth + wallHeight/2))
     )
@@ -55,7 +56,7 @@ class OceanSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Wall2",
         spawn=sim_utils.CuboidCfg(
             size=(wallLength, wallWidth, wallHeight),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.05, 0.05, 0.05)),
+            visual_material=wall_material,
         ),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, -wallLength/2, floorDepth + wallHeight/2))
     )
@@ -64,7 +65,7 @@ class OceanSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Wall3",
         spawn=sim_utils.CuboidCfg(
             size=(wallWidth, wallLength, wallHeight),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.05, 0.05, 0.05)),
+            visual_material=wall_material,
         ),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(wallLength/2, 0.0, floorDepth + wallHeight/2))
     )
@@ -73,7 +74,7 @@ class OceanSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Wall4",
         spawn=sim_utils.CuboidCfg(
             size=(wallWidth, wallLength, wallHeight),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.05, 0.05, 0.05)),
+            visual_material=wall_material,
         ),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(-wallLength/2, 0.0, floorDepth + wallHeight/2))
     )
@@ -117,9 +118,6 @@ class OceanSceneCfg(InteractiveSceneCfg):
             rot=(0.5, -0.5, 0.5, -0.5),
             convention="ros",
         ),
-        # backscatter_value   = (0.00, 0.0, 0.0),
-        # atten_coeff         = (0.00, 0.0, 0.0),
-        # backscatter_coeff   = (0.00, 0.0, 0.0),
         backscatter_value   = (0.05, 0.31, 0.24),
         atten_coeff         = (0.05, 0.05, 0.20),
         backscatter_coeff   = (0.05, 0.05, 0.05),

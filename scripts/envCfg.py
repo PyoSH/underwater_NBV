@@ -1,7 +1,7 @@
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
-from dataclasses import field
+# from dataclasses import field
 from sceneCfg import OceanSceneCfg
 
 @configclass
@@ -21,7 +21,7 @@ class WaterParamRangeCfg:
     backscatter_coeff_max: tuple = (0.15, 0.12, 0.10)
 
 @configclass
-class OceanNBVEnvCfg(DirectRLEnvCfg):
+class OceanEnvCfg(DirectRLEnvCfg):
     # ── 시뮬레이션 ───────────────────────────────────────────────────────────
     sim: SimulationCfg = SimulationCfg(dt=1 / 60, render_interval=1)
 

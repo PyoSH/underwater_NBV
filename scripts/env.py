@@ -8,29 +8,21 @@ import torch
 import os
 
 import omni.usd
-from pxr import Gf, UsdGeom, UsdLux
+from pxr import UsdLux
 
-from isaaclab.envs import DirectRLEnv
 import isaaclab.sim as sim_utils
-
-from envCfg import OceanNBVEnvCfg
-from sceneCfg import OCEANSIM_DIR
-
-import isaacsim as _isaacsim_pkg
-_oceansim_isaacsim = os.path.join(OCEANSIM_DIR, "isaacsim")
-if _oceansim_isaacsim not in _isaacsim_pkg.__path__:
-    _isaacsim_pkg.__path__.append(_oceansim_isaacsim)
-
-from isaacsim.oceansim.sensors.UW_Camera_parallel import UWCamera
+from isaaclab.envs import DirectRLEnv
 from isaaclab.utils.math import quat_apply
 
-class OceanNBVEnv(DirectRLEnv):
+from envCfg import OceanEnvCfg
+
+class OceanEnv(DirectRLEnv):
     """카메라와 조명을 이동시키며 대상 물체를 탐색하는 병렬 RL 환경."""
 
-    cfg: OceanNBVEnvCfg
+    cfg: OceanEnvCfg
 
     # ── 초기화 ───────────────────────────────────────────────────────────────
-    def __init__(self, cfg: OceanNBVEnvCfg, render_mode: str | None = None):
+    def __init__(self, cfg: OceanEnvCfg, render_mode: str | None = None):
         if cfg.debug_vis:
             cfg.scene.camera.enable_viewport = True
             cfg.scene.camera.viewport_env_id = 0
@@ -97,7 +89,7 @@ class OceanNBVEnv(DirectRLEnv):
         self._draw.clear_lines()
 
         L   = 0.30   # 화살표 길이 [m]
-        W   = 3.0    # 선 굵기
+        W   = 3.0    # 선 굵기 
 
         # 표준 RGB 축 색상: +X=빨강, +Y=초록, +Z=파랑 (카메라·조명 공통)
         AXIS_COLS = [

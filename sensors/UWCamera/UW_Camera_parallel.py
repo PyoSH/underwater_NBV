@@ -5,7 +5,7 @@ import warp as wp
 import omni.ui as ui
 
 from isaaclab.sensors import Camera
-from isaacsim.oceansim.utils.UWrenderer_parallel_utils import UW_render_batch
+from .UWrenderer_parallel_utils import UW_render_batch
 if TYPE_CHECKING:
     from .UW_Camera_cfg import UWCameraCfg
 
