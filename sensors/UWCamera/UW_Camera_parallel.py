@@ -22,7 +22,8 @@ class UWCamera(Camera):
         self._backscatter_value = wp.vec3f(*self.cfg.backscatter_value)
         self._atten_coeff       = wp.vec3f(*self.cfg.atten_coeff)
         self._backscatter_coeff = wp.vec3f(*self.cfg.backscatter_coeff)
-
+        
+        self.data.output["uw_rgb"] = None
         self._provider = None
         if self.cfg.enable_viewport:
             self._make_viewport()
@@ -91,5 +92,5 @@ class UWCamera(Camera):
                                    style={'fill_policy': ui.FillPolicy.PRESERVE_ASPECT_FIT})
 
     def __del__(self):
-        if self._window:
+        if hasattr(self, 'window') and self.window:
             self._window.destroy()

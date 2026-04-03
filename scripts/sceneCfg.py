@@ -12,6 +12,7 @@ ROCK_USD     = os.path.join(ASSET_DIR, "collected_rock/rock.usd")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from sensors.UWCamera.UW_Camera_cfg import UWCameraCfg
+from sensors.ImagingSonar.ImagingSonarCfg import ImagingSonarCfg
 
 # rock 45° Z 회전 쿼터니언 [w, x, y, z]
 _ROT_45Z = (math.cos(math.radians(22.5)), 0.0, 0.0, math.sin(math.radians(22.5)))
@@ -122,6 +123,11 @@ class OceanSceneCfg(InteractiveSceneCfg):
         atten_coeff         = (0.05, 0.05, 0.20),
         backscatter_coeff   = (0.05, 0.05, 0.05),
     )
+
+    # sonar: ImagingSonarCfg = ImagingSonarCfg(
+    #     prim_path="{ENV_REGEX_NS}/SensorRig/ImagingSonar",
+        
+    # )
 
     # ── 조명 리그 (동적 강체, 노란색) ──────────────────────────────────────
     light_rig: RigidObjectCfg = RigidObjectCfg(
