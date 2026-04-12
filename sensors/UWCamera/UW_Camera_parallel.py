@@ -23,7 +23,7 @@ class UWCamera(Camera):
         self._atten_coeff       = wp.vec3f(*self.cfg.atten_coeff)
         self._backscatter_coeff = wp.vec3f(*self.cfg.backscatter_coeff)
         
-        self.data.output["uw_rgb"] = None
+        # self._data.output["uw_rgba"] = None
         self._provider = None
         if self.cfg.enable_viewport:
             self._make_viewport()
@@ -34,8 +34,8 @@ class UWCamera(Camera):
         self._apply_uw_render()
 
     def _apply_uw_render(self):
-        raw_rgba = self.data.output["rgba"]
-        depth = self.data.output["distance_to_camera"]
+        raw_rgba = self.data.output.get("rgba")
+        depth = self.data.output.get("distance_to_camera")
 
         if raw_rgba is None or depth is None:
             return

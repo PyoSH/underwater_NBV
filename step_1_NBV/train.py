@@ -13,6 +13,9 @@ AppLauncher.add_app_launcher_args(parser)  # --headless 등 Isaac Lab 공통 인
 if "--enable_cameras" not in sys.argv:
     sys.argv.append("--enable_cameras")
 
+if "--headless" not in sys.argv:
+    sys.argv.append("--headless")
+    sys.argv.append("--livestream 2")
 args = parser.parse_args()
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app

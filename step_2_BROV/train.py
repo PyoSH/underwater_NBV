@@ -1,7 +1,6 @@
 import argparse
 import sys
 import os
-
 from isaaclab.app import AppLauncher
 
 # 인수 파싱
@@ -23,10 +22,10 @@ import bottom_up  # 분리한 파일 import
 
 if __name__ == "__main__":
     cfg = BROVTrajEnvCfg()
-    cfg.scene.num_envs = 1
+    cfg.scene.num_envs = 4
     cfg.max_bound_x = cfg.max_bound_y = cfg.max_bound_z = 50.0
-
     env = BROVTrajEnv(cfg)
+
 
     try:
         if args.test == "neutral_buoyancy":
@@ -35,6 +34,14 @@ if __name__ == "__main__":
             bottom_up.test_straight_line(env, thrust=args.thrust, duration_s=args.duration)
         elif args.test == "thruster_model":
             bottom_up.test_thruster_model(env, duration_s=args.duration)
+        
+        print("\n[INFO] 모든 테스트가 완료되었습니다.")
+        print("[INFO] WebRTC 접속 유지를 위해 시뮬레이션을 계속 구동합니다. (종료: Ctrl+C)")
+        
+        while simulation_app.is_running():
+            import torch
+            empty_action = torch.zeros(env.action_space.shape, device=env.device)
+            env.step(empty_action)
     finally:
         env.close()
         simulation_app.close()

@@ -122,6 +122,7 @@ class OceanSceneCfg(InteractiveSceneCfg):
         backscatter_value   = (0.05, 0.31, 0.24),
         atten_coeff         = (0.05, 0.05, 0.20),
         backscatter_coeff   = (0.05, 0.05, 0.05),
+        # enable_viewport      = True,
     )
 
     # sonar: ImagingSonarCfg = ImagingSonarCfg(
