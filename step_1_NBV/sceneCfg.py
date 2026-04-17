@@ -82,12 +82,12 @@ class OceanSceneCfg(InteractiveSceneCfg):
 
     # ── 대상 물체 (시각 전용) ───────────────────────────────────────────────
     rock: AssetBaseCfg = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/Rock",
+        prim_path="{ENV_REGEX_NS}/Object",
         spawn=sim_utils.UsdFileCfg(usd_path=ROCK_USD),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -3.0), rot=_ROT_45Z),
     )
 
-    # ── 카메라 리그 (동적 강체, 하늘색) ────────────────────────────────────
+    # ── 센서 리그 (동적 강체, 하늘색) ────────────────────────────────────
     sensor_rig: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/SensorRig",
         spawn=sim_utils.CuboidCfg(
@@ -122,40 +122,33 @@ class OceanSceneCfg(InteractiveSceneCfg):
         backscatter_value   = (0.05, 0.31, 0.24),
         atten_coeff         = (0.05, 0.05, 0.20),
         backscatter_coeff   = (0.05, 0.05, 0.05),
-        # enable_viewport      = True,
-    )
-
-    # sonar: ImagingSonarCfg = ImagingSonarCfg(
-    #     prim_path="{ENV_REGEX_NS}/SensorRig/ImagingSonar",
-        
-    # )
-
-    # ── 조명 리그 (동적 강체, 노란색) ──────────────────────────────────────
-    light_rig: RigidObjectCfg = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/LightRig",
-        spawn=sim_utils.CuboidCfg(
-            size=(0.08, 0.08, 0.08),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=True,
-                linear_damping=0.5,
-                angular_damping=0.5,
-            ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.5),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.9, 0.0)),
-        ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.15, 0.0, -0.45)),
     )
     
-    sphere_light: AssetBaseCfg = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/LightRig/SphereLight",
+    '''
+    SensorRig에 부착된 위치 수정할 것.
+    '''
+    sphere_light_0: AssetBaseCfg = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/SensorRig/SphereLight_0",
         spawn=sim_utils.SphereLightCfg(
             intensity=10000000.0,
             radius=0.05,
             color=(1.0, 1.0, 1.0),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(0.06, 0.0, 0.0),
+            pos=(0.06, 0.5, 0.0),
+            rot=(0.7071, 0.0, -0.7071, 0.0),   # [w, x, y, z]
+        ),        
+    )
+
+    sphere_light_1: AssetBaseCfg = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/SensorRig/SphereLight_1",
+        spawn=sim_utils.SphereLightCfg(
+            intensity=10000000.0,
+            radius=0.05,
+            color=(1.0, 1.0, 1.0),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=(0.06, -0.5, 0.0),
             rot=(0.7071, 0.0, -0.7071, 0.0),   # [w, x, y, z]
         ),        
     )

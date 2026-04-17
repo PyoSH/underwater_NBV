@@ -71,6 +71,7 @@ def run_random_policy(env: OceanEnv, steps: int = 100) -> None:
 
     print(f"[train] 완료. 총 누적 보상: {total_reward:.2f}")
 
+
 if __name__ == "__main__":
     cfg = OceanEnvCfg()
     cfg.scene.num_envs = args.num_envs

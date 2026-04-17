@@ -29,15 +29,36 @@ class OceanEnv(DirectRLEnv):
             
         super().__init__(cfg, render_mode)
 
+        self._image_buffer = torch.zeros((self.num_envs, self.cfg.visual.num_seq_actor, self.cfg.visual.h, self.cfg.visual.w), device=self.device)
+        self._depth_buffer = torch.zeros((self.num_envs, self.cfg.visual.num_seq_critic, self.cfg.visual.h, self.cfg.visual.w), device=self.device)
+
+        self._sph_theta   = torch.zeros(self.num_envs, device=self.device)
+        self._sph_phi     = torch.zeros(self.num_envs, device=self.device)
+        self._sph_psi     = torch.zeros(self.num_envs, device=self.device)
+        self._light_level = torch.full((self.num_envs,), cfg.light_level_init,
+                                       dtype=torch.long, device=self.device)
+        
+        Nx, Ny, Nz          = self.cfg.tsdf.vol_dim
+        self._tsdf_vol      = torch.zeros(self.num_envs, Nx, Ny, Nz, device=self.device)
+        self._weight_vol    = torch.zeros(self.num_envs, Nx, Ny, Nz, device=self.device)
+        self._vol_origin    = torch.zeros(self.num_envs, 3,          device=self.device)
+        self._total_surf_voxels = torch.ones(self.num_envs,          device=self.device)
+
+        
+        self._prev_coverage = torch.zeros(self.num_envs, device=self.device)
+        self._prev_contrast = torch.zeros(self.num_envs, device=self.device)
+        self.curr_coverage  = torch.zeros(self.num_envs, device=self.device)
+        self.curr_contrast  = torch.zeros(self.num_envs, device=self.device)
+
         # RigidObject 핸들 (InteractiveScene 이 자동 생성)
         self._sensor_rig   = self.scene["sensor_rig"]
-        self._light_rig = self.scene["light_rig"]
-
         self._camera = self.scene["camera"]
 
         rock_local = torch.tensor([0.0, 0.0, -3.0], device=self.device)
         self.rock_pos = self.scene.env_origins + rock_local  # (num_envs, 3)
         self._actions = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
+        
+        self._prev_cam_pos = torch.zeros(self.num_envs, 3, device=self.device) # this var doesn't use right now, but it will be in reward function.
 
         self._setup_vis_markers()        
 
@@ -112,8 +133,6 @@ class OceanEnv(DirectRLEnv):
         for i in indices:
             cp = self.cam_pos[i].cpu()
             cq = self.cam_orient[i:i+1]
-            lp = self.light_pos[i].cpu()
-            lq = self.light_orient[i:i+1]
 
             for ax, col in zip(AXES, AXIS_COLS):
                 # 카메라 축
@@ -122,28 +141,18 @@ class OceanEnv(DirectRLEnv):
                 ends.append((cp + aw * L).tolist())
                 colors.append(col); widths.append(W)
 
-                # 조명 축
-                aw = quat_apply(lq, ax)[0].cpu()
-                starts.append(lp.tolist())
-                ends.append((lp + aw * L).tolist())
-                colors.append(col); widths.append(W)
-
         if starts:
             self._draw.draw_lines(starts, ends, colors, widths)
 
     # ── 씬 구성 ──────────────────────────────────────────────────────────────
 
     def _setup_scene(self) -> None:
-        """Camera, SphereLight, DirectionCone 자식 프림을 각 환경에 추가.
-
-        OceanSceneCfg 의 에셋(Seafloor, Rock, CameraRig, LightRig)은
-        InteractiveScene 이 이미 스폰했으므로 추가 자식만 생성.
-        """
         stage = omni.usd.get_context().get_stage()
 
         for env_idx in range(self.num_envs):
             env_ns = f"/World/envs/env_{env_idx}"
-            self._add_light_children(stage, f"{env_ns}/LightRig/SphereLight")
+            for idx in range(2):
+                self._add_light_children(stage, f"{env_ns}/SensorRig/SphereLight_{idx}")
 
     def _add_light_children(self, stage, light_prim_path: str) -> None:
         # ── SphereLight + ShapingAPI ──────────────────────────────────────
@@ -153,35 +162,302 @@ class OceanEnv(DirectRLEnv):
         shaping.GetShapingConeAngleAttr().Set(40.0)   # 반각 [도]
         shaping.GetShapingConeSoftnessAttr().Set(0.1)
 
-    # ── 행동 적용 ─────────────────────────────────────────────────────────────
-
-    def _pre_physics_step(self, actions: torch.Tensor) -> None:
-        """행동 클리핑 후 저장 (물리 스텝 직전)."""
-        self._actions = actions.clamp(-1.0, 1.0)
-
     def _apply_action(self) -> None:
-        """RigidObject GPU tensor API 로 선속도·각속도 설정.
+        pose_idx = self._actions[:, 0:6].argmax(dim=-1) 
+        light_idx= self._actions[:, 6:9].argmax(dim=-1) # 조명은 이렇게 하는게 이해됨. 예시로 6(1), 7(0), 8(0) 이 있으면 6을 하는거니까. 그런데 왜 pose는??
 
-        action[0:3]  = 카메라 선속도  [vx, vy, vz]
-        action[3:6]  = 카메라 각속도  [wx, wy, wz]
-        action[6:9]  = 조명 선속도    [vx, vy, vz]
-        action[9:12] = 조명 각속도    [wx, wy, wz]
+        deltas = torch.tensor([self.cfg.delta_theta, self.cfg.delta_phi, self.cfg.delta_psi],
+                              device = self.device)
+        axis = pose_idx //2
+        sign = torch.where(pose_idx %2 ==0,
+                           torch.ones_like(pose_idx, dtype=torch.float),
+                           torch.full_like(pose_idx, -1.0, dtype=torch.float)) # (num_envs,) 짝수 = +1, 홀수 = -1
+        delta_mat = torch.zeros(self.num_envs, 3, device=self.device)
+        
+        delta_mat.scatter_(1,
+                           axis.unsqueeze(1),
+                           (sign*deltas[axis]).unsqueeze(1))
+        self._sph_theta += delta_mat[:, 0]
+        self._sph_phi   += delta_mat[:, 1]
+        self._sph_psi   += delta_mat[:, 2]
+
+        self._sph_theta = self._sph_theta % (2*math.pi)
+        self._sph_phi.clamp_(self.cfg.phi_min, self.cfg.phi_max)
+        self._sph_psi.clamp_(self.cfg.psi_min, self.cfg.psi_max)
+
+        prev_light_level = self._light_level.clone()
+        delta_light = light_idx.long() - 1
+        self._light_level = (prev_light_level + delta_light).clamp(1, 8)
+
+        # sphere -> cartesian coordinate 변환
+        curr_theta = self._sph_theta
+        curr_phi   = self._sph_phi
+        curr_psi   = self._sph_psi
+
+        offset = torch.stack([
+            curr_psi * torch.sin(curr_phi) * torch.cos(curr_theta),
+            curr_psi * torch.sin(curr_phi) * torch.sin(curr_theta),
+            curr_psi * torch.cos(curr_phi),
+        ], dim=-1)
+        
+        cam_pos_new = self.rock_pos + offset
+
+        forward = -offset / (offset.norm(dim=-1, keepdim=True) + 1e-8)
+        cam_quat_new = self._forward_to_quat(forward)
+                                                                                                                        
+        # sensor_rig 상태 세트                                                                                         
+        state = torch.zeros(self.num_envs, 13, device=self.device)                                                     
+        state[:, 0:3] = cam_pos_new                                                                                    
+        state[:, 3:7] = cam_quat_new
+        self._sensor_rig.write_root_state_to_sim(state)
+                                                                                                                        
+        # 조명 intensity 업데이트
+        self._update_light_intensity(self._light_level) 
+
+    def _update_light_intensity(self, next_light_level:torch.Tensor)->None:
+        stage = omni.usd.get_context().get_stage()
+        for env_idx in range(self.num_envs):
+            intensity = float(next_light_level[env_idx].item() * self.cfg.light_intensity_per_level)
+            env_ns = f"/World/envs/env_{env_idx}"
+            for i in range(2):
+                path = f"{env_ns}/SensorRig/SphereLight_{i}"
+                prim = stage.GetPrimAtPath(path)
+                if prim.IsValid():
+                    prim.GetAttribute("intensity").Set(intensity)
+    
+    def _compute_patch_contrast(self, img: torch.Tensor)->torch.Tensor:
+        patches     = img.unfold(1, 14, 14).unfold(2, 14, 14) # what tensor shape is this?
+        patch_std   = torch.std(patches, dim=(-1, -2))
+        
+        return torch.mean(patch_std, dim=(1,2))
+    
+    def _voxelize_gt_mesh(self, env_ids: Sequence[int]) -> None:
+        vox        = self.cfg.tsdf.voxel_size
+        Nx, Ny, Nz = self.cfg.tsdf.vol_dim
+
+        for env_id in env_ids:
+            verts, faces = self._load_mesh(env_id)             # world-space verts
+
+            r1  = np.random.rand(len(faces), 1).astype(np.float32)
+            r2  = np.random.rand(len(faces), 1).astype(np.float32)
+            a   = 1.0 - np.sqrt(r1)
+            b   = np.sqrt(r1) * (1.0 - r2)
+            c   = np.sqrt(r1) * r2
+
+            v0  = verts[faces[:, 0]]
+            v1  = verts[faces[:, 1]]
+            v2  = verts[faces[:, 2]]
+            pts = a * v0 + b * v1 + c * v2                     # (F, 3)
+
+            obj_min  = pts.min(axis=0)
+            obj_max  = pts.max(axis=0)
+            center   = (obj_min + obj_max) / 2.0
+            half_ext = np.array([Nx, Ny, Nz], dtype=np.float32) * vox / 2.0
+            origin   = center - half_ext
+
+            self._vol_origin[env_id] = torch.tensor(origin, device=self.device)
+
+            pts_t     = torch.tensor(pts, device=self.device)
+            orig_t    = self._vol_origin[env_id]
+            idx       = ((pts_t - orig_t) / vox).long()
+
+            in_bounds = (
+                (idx[:, 0] >= 0) & (idx[:, 0] < Nx) &
+                (idx[:, 1] >= 0) & (idx[:, 1] < Ny) &
+                (idx[:, 2] >= 0) & (idx[:, 2] < Nz)
+            )
+            idx = idx[in_bounds]
+
+            surf_vol = torch.zeros(Nx, Ny, Nz, dtype=torch.bool, device=self.device)
+            surf_vol[idx[:, 0], idx[:, 1], idx[:, 2]] = True
+
+            self._total_surf_voxels[env_id] = surf_vol.sum().float().clamp(min=1.0)
+            self._tsdf_vol  [env_id]        = torch.zeros(Nx, Ny, Nz, device=self.device)
+            self._weight_vol[env_id]        = torch.zeros(Nx, Ny, Nz, device=self.device)
+
+
+    def _load_mesh(self, env_id: int):
+        from pxr import Usd, UsdGeom, Gf
+
+        stage     = omni.usd.get_context().get_stage()
+        prim_path = f"/World/envs/env_{env_id}/Object"
+        root_prim = stage.GetPrimAtPath(prim_path)
+
+        mesh_prim = None
+        for prim in Usd.PrimRange(root_prim):                  # full subtree
+            if prim.IsA(UsdGeom.Mesh):
+                mesh_prim = UsdGeom.Mesh(prim)
+                break
+
+        if mesh_prim is None:
+            raise RuntimeError(f"No UsdGeom.Mesh found under: {prim_path}")
+
+        points  = mesh_prim.GetPointsAttr().Get()
+        verts   = np.array(points, dtype=np.float32)
+
+        indices = np.array(mesh_prim.GetFaceVertexIndicesAttr().Get(), dtype=np.int64)
+        counts  = np.array(mesh_prim.GetFaceVertexCountsAttr().Get(),  dtype=np.int64)
+        faces   = self._triangulate(indices, counts)
+
+        # Local → world space
+        xform_cache = UsdGeom.XformCache()
+        world_xform = xform_cache.GetLocalToWorldTransform(mesh_prim.GetPrim())
+        ones    = np.ones((len(verts), 1), dtype=np.float32)
+        verts_h = np.hstack([verts, ones])
+        mat     = np.array(world_xform).reshape(4, 4).T.astype(np.float32)
+        verts   = (verts_h @ mat.T)[:, :3]
+
+        # Unit conversion (cm → m etc.)
+        stage_mpu = UsdGeom.GetStageMetersPerUnit(stage)
+        verts     = verts * float(stage_mpu)
+
+        return verts, faces
+
+    def _triangulate(self, indices: np.ndarray, counts: np.ndarray) -> np.ndarray:
+        triangles = []
+        offset    = 0
+        for n in counts:
+            v0 = indices[offset]
+            for j in range(1, n - 1):
+                triangles.append([v0, indices[offset + j], indices[offset + j + 1]])
+            offset += n
+        return np.array(triangles, dtype=np.int64)
+    
+    def _integrate_depth(self) -> None:
         """
-        lv = self.cfg.max_velocity
-        av = self.cfg.max_angular_velocity
+        Fuses current depth maps from all envs into the batched TSDF volume.
+        Fully vectorized — no Python loops over envs or voxels.
+        
+        Shapes:
+            vox_world:  (num_envs, Nx*Ny*Nz, 3)
+            vox_cam:    (num_envs, Nx*Ny*Nz, 3)
+            proj_u/v:   (num_envs, Nx*Ny*Nz)
+            sdf:        (num_envs, Nx*Ny*Nz)
+        """
+        cfg        = self.cfg.tsdf
+        vox        = cfg.voxel_size
+        trunc      = cfg.trunc_margin
+        Nx, Ny, Nz = cfg.vol_dim
+        N_vox      = Nx * Ny * Nz
+        E          = self.num_envs
 
-        # (num_envs, 6): [lin_vel(3), ang_vel(3)]
-        cam_vel = torch.cat([
-            self._actions[:, 0:3] * lv,
-            self._actions[:, 3:6] * av,
-        ], dim=-1)
-        light_vel = torch.cat([
-            self._actions[:, 6:9]  * lv,
-            self._actions[:, 9:12] * av, # roll은 안하고자 함.
-        ], dim=-1)
+        fx = self.cfg.camera_intrinsics.fx
+        fy = self.cfg.camera_intrinsics.fy
+        cx = self.cfg.camera_intrinsics.cx
+        cy = self.cfg.camera_intrinsics.cy
 
-        self._sensor_rig.write_root_velocity_to_sim(cam_vel)
-        self._light_rig.write_root_velocity_to_sim(light_vel)
+        # ── 1. Build voxel center grid (shared across envs) ───────────────────
+        # Do this once and cache — grid doesn't change between steps
+        if not hasattr(self, '_vox_local'):
+            xi = torch.arange(Nx, device=self.device)
+            yi = torch.arange(Ny, device=self.device)
+            zi = torch.arange(Nz, device=self.device)
+
+            # (Nx, Ny, Nz, 3) voxel centers in local grid coords (origin = 0)
+            gx, gy, gz = torch.meshgrid(xi, yi, zi, indexing='ij')
+            self._vox_local = torch.stack([
+                gx.flatten().float() * vox + vox / 2.0,
+                gy.flatten().float() * vox + vox / 2.0,
+                gz.flatten().float() * vox + vox / 2.0,
+            ], dim=-1)                                         # (N_vox, 3)
+
+        # ── 2. Shift local grid to world coords per env ────────────────────────
+        # _vol_origin: (E, 3),  _vox_local: (N_vox, 3)
+        vox_world = self._vox_local.unsqueeze(0) + \
+                    self._vol_origin.unsqueeze(1)              # (E, N_vox, 3)
+
+        # ── 3. Transform world → camera space ─────────────────────────────────
+        cam_pose = self._build_cam_pose()                      # (E, 4, 4)
+        R = cam_pose[:, :3, :3]                                # (E, 3, 3)
+        t = cam_pose[:, :3,  3]                                # (E, 3)
+
+        # v_cam = R @ v_world + t
+        # bmm expects (E, 3, 3) @ (E, 3, N_vox) → (E, 3, N_vox)
+        vox_cam = torch.bmm(R, vox_world.permute(0, 2, 1))    # (E, 3, N_vox)
+        vox_cam = vox_cam + t.unsqueeze(-1)                    # (E, 3, N_vox)
+        vox_cam = vox_cam.permute(0, 2, 1)                     # (E, N_vox, 3)
+
+        vox_z = vox_cam[..., 2]                                # (E, N_vox)
+        vox_x = vox_cam[..., 0]
+        vox_y = vox_cam[..., 1]
+
+        # ── 4. Project to pixel coordinates ───────────────────────────────────
+        valid_z = vox_z > 1e-4                                 # in front of camera
+
+        proj_u = (fx * vox_x / vox_z.clamp(min=1e-4) + cx)    # (E, N_vox)
+        proj_v = (fy * vox_y / vox_z.clamp(min=1e-4) + cy)    # (E, N_vox)
+
+        H = self._camera.data.output["distance_to_image_plane"].shape[1]
+        W = self._camera.data.output["distance_to_image_plane"].shape[2]
+
+        proj_u_int = proj_u.long()
+        proj_v_int = proj_v.long()
+
+        in_bounds = (
+            valid_z                        &
+            (proj_u_int >= 0)              &
+            (proj_u_int <  W)              &
+            (proj_v_int >= 0)              &
+            (proj_v_int <  H)
+        )                                                      # (E, N_vox) bool
+
+        # ── 5. Sample depth image at projected pixels ──────────────────────────
+        depth_img = self._camera.data.output["distance_to_image_plane"]
+        if depth_img.dim() == 4:
+            depth_img = depth_img.squeeze(-1)                      # (E, H, W)
+        H, W      = depth_img.shape[1], depth_img.shape[2]        # move here, after squeeze
+        depth_flat = depth_img.reshape(E, -1)
+
+        # Clamp indices for safe gather (out-of-bounds handled by mask)
+        safe_u = proj_u_int.clamp(0, W - 1)
+        safe_v = proj_v_int.clamp(0, H - 1)
+        pixel_idx = safe_v * W + safe_u                        # (E, N_vox)
+
+        sampled_depth = torch.gather(depth_flat, 1, pixel_idx) # (E, N_vox)
+
+        # ── 6. Compute SDF and truncate ────────────────────────────────────────
+        sdf  = sampled_depth - vox_z                           # (E, N_vox)
+        tsdf = (sdf / trunc).clamp(-1.0, 1.0)                  # (E, N_vox)
+
+        # Only update voxels that are:
+        #  - projected inside image (in_bounds)
+        #  - within truncation band (sdf >= -trunc)
+        update_mask = in_bounds & (sdf >= -trunc)              # (E, N_vox)
+
+        # ── 7. Running average TSDF update ────────────────────────────────────
+        w_old = self._weight_vol.reshape(E, N_vox)             # (E, N_vox)
+        t_old = self._tsdf_vol  .reshape(E, N_vox)             # (E, N_vox)
+
+        w_new = w_old + update_mask.float()                    # (E, N_vox)
+        # avoid div/0 where update_mask is False (w_new == w_old there)
+        t_new = torch.where(
+            update_mask,
+            (t_old * w_old + tsdf) / w_new.clamp(min=1e-8),
+            t_old
+        )                                                      # (E, N_vox)
+
+        self._tsdf_vol   = t_new.reshape(E, Nx, Ny, Nz)
+        self._weight_vol = w_new.reshape(E, Nx, Ny, Nz)
+    
+    def _compute_curr_coverage(self) -> torch.Tensor:
+        """
+        Computes coverage rate per env from the current TSDF volume.
+        
+        A voxel counts as 'observed surface' when:
+        - weight > 0  : seen by at least one depth frame
+        - |tsdf| < 1.0: near a surface (not free space or behind surface)
+
+        Returns: coverage (num_envs,) float32, range [0, 1]
+        """
+        observed = (
+            (self._weight_vol > 0) &
+            (self._tsdf_vol.abs() < 1.0)
+        )                                                      # (E, Nx, Ny, Nz) bool
+
+        count    = observed.sum(dim=(1, 2, 3)).float()         # (E,)
+        coverage = count / self._total_surf_voxels             # (E,)  normalized
+
+        return coverage.clamp(0.0, 1.0)
 
     # ── 상태 프로퍼티 ─────────────────────────────────────────────────────────
 
@@ -195,53 +471,79 @@ class OceanEnv(DirectRLEnv):
         """카메라 리그 월드 자세 쿼터니언 [w,x,y,z] (num_envs, 4)."""
         return self._sensor_rig.data.root_quat_w
 
-    @property
-    def light_pos(self) -> torch.Tensor:
-        """조명 리그 월드 위치 (num_envs, 3)."""
-        return self._light_rig.data.root_pos_w
-
-    @property
-    def light_orient(self) -> torch.Tensor:
-        """조명 리그 월드 자세 쿼터니언 [w,x,y,z] (num_envs, 4)."""
-        return self._light_rig.data.root_quat_w
-
     # ── 관측 ─────────────────────────────────────────────────────────────────
     def _get_observations(self) -> dict:
-        """
-        관측 벡터
-        """
-        cam_to_rock = self.rock_pos - self.cam_pos
-        obs = torch.cat(
-            [self.cam_pos, self.cam_orient,
-             self.light_pos, self.light_orient,
-             cam_to_rock],
-            dim=-1,
-        )
+        # image buffer updating - need to be implemented
+        raw_rgb     = self._camera.data.output["rgb"][:, :, :, :3]          # (num_envs, h, w, 3)
+        raw_depth   = self._camera.data.output["distance_to_image_plane"]   # (num_envs, h, w) ?? sure?
+
+        curr_obs    = torch.mean(raw_rgb.float(), dim=-1)/255.0 # 3 color scale -> grayscale & pixel value normalization
+        curr_state  = raw_depth.squeeze(-1)
+
+        self._image_buffer = torch.roll(self._image_buffer, shifts=-1, dims=1)
+        self._image_buffer[:, -1, :, :] = curr_obs
+
+        self._depth_buffer = torch.roll(self._depth_buffer, shifts=-1, dims=1)
+        self._depth_buffer[:, -1, :, :] = curr_state # depth map은 (num_envs, h, w)아닌지?
+
+        curr_contrast = self._compute_patch_contrast(curr_obs)
+        self.curr_contrast = curr_contrast
+
+        # number data vector (normalizaiton needed)
+        scalar_obs = torch.stack([
+            self._sph_theta / (2*math.pi),
+            (self._sph_phi - self.cfg.phi_min) / (self.cfg.phi_max - self.cfg.phi_min),
+            (self._sph_psi - self.cfg.psi_min) / (self.cfg.psi_max - self.cfg.psi_min),
+            curr_contrast,
+            (self._light_level.float()-1.0)/7.0,
+        ], dim=-1)
 
         # 방향 마커 실시간 업데이트 (PhysX runtime 데이터 사용)
         if self.cfg.debug_vis:
             self._update_vis_markers()
 
-        return {"policy": obs}
-
+        return {
+            "policy": self._image_buffer,     # Actor: 광학 이미지 시퀀스 (6, 84, 84)
+            "extra_info": scalar_obs,         # Actor: 5개 수치 데이터
+            "critic": self._depth_buffer      # Critic: GT Depth 시퀀스 (Privileged)
+        }
+    
     # ── 보상 ─────────────────────────────────────────────────────────────────
 
     def _get_rewards(self) -> torch.Tensor:
-        cfg = self.cfg
-        reward_scalar = cfg.w_distance * 0.3 + cfg.w_direction * 0.3 + cfg.w_baseline * 0.3
+        self._integrate_depth()
+        curr_coverage = self._compute_curr_coverage()
+        self.curr_coverage = curr_coverage
 
-        return torch.full((self.num_envs,), reward_scalar, device=self.device)
+        delta_coverage = curr_coverage - self._prev_coverage
+        reward_coverage = self.cfg.k_c * delta_coverage
+
+        terminal_mask = (curr_coverage >= self.cfg.coverage_terminal)
+        reward_coverage[terminal_mask] += 100.0 #?????
+
+        delta_contrast = self.curr_contrast - self._prev_contrast
+        reward_quality = self.cfg.lambda_q * delta_contrast
+
+        dist_moved = torch.norm(self.cam_pos - self._prev_cam_pos, dim=-1)
+        reward_penalty = self.cfg.k_x * dist_moved + self.cfg.c_step
+
+        self._prev_coverage = curr_coverage.clone()
+        self._prev_contrast  = self.curr_contrast.clone()
+        self._prev_cam_pos  = self.cam_pos.clone()
+
+        return reward_coverage + reward_quality - reward_penalty
     
     # ── 종료 조건 ─────────────────────────────────────────────────────────────
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        terminated: 카메라가 workspace_radius 밖으로 이탈
-        truncated:  에피소드 길이 초과
-        """
-        dist_cam   = torch.norm(self.cam_pos - self.rock_pos, dim=-1)
-        terminated = dist_cam > self.cfg.workspace_radius
-        truncated  = self.episode_length_buf >= self.max_episode_length - 1
+        goal_reached   = self.curr_coverage >= self.cfg.coverage_terminal
+
+        dist_cam       = torch.norm(self.cam_pos - self.rock_pos, dim=-1)
+        out_of_bounds  = dist_cam > self.cfg.psi_max
+
+        terminated     = goal_reached | out_of_bounds
+        truncated      = self.episode_length_buf >= self.max_episode_length - 1
+
         return terminated, truncated
 
     # ── 리셋 ─────────────────────────────────────────────────────────────────
@@ -251,63 +553,48 @@ class OceanEnv(DirectRLEnv):
 
         cfg = self.cfg
         n   = len(env_ids)
- 
-        # rock 월드 위치 (해당 env 들만)
-        rock_np = self.rock_pos[env_ids].cpu().numpy()  # (n, 3)
- 
-        # ── 카메라 위치: 구면 좌표 샘플링 (reset_radius_min ~ reset_radius_max) ──
-        r     = np.random.uniform(cfg.reset_radius_min, cfg.reset_radius_max, n)
-        theta = np.random.uniform(cfg.reset_theta_min,  cfg.reset_theta_max,  n)
-        phi   = np.random.uniform(0.0, 2.0 * np.pi, n)
- 
-        offsets = r[:, None] * np.stack([
-            np.sin(theta) * np.cos(phi),
-            np.sin(theta) * np.sin(phi),
-            np.cos(theta),
-        ], axis=1)  # (n, 3)
- 
-        cam_np = rock_np + offsets  # (n, 3) 월드 좌표
- 
-        # ── 조명 위치: look-at 방향과 수직인 방향으로 baseline 오프셋 ──────────
-        look_dirs = rock_np - cam_np
-        look_dirs /= np.linalg.norm(look_dirs, axis=1, keepdims=True) + 1e-8
- 
-        ref = np.tile([0.0, 0.0, 1.0], (n, 1))
-        perp = np.cross(look_dirs, ref)
-        perp_norm = np.linalg.norm(perp, axis=1, keepdims=True)
-        # look_dir 이 +Z 와 평행한 경우 fallback: +X 기준
-        fallback_mask = (perp_norm[:, 0] < 1e-6)
-        if fallback_mask.any():
-            fallback_ref = np.tile([1.0, 0.0, 0.0], (fallback_mask.sum(), 1))
-            perp[fallback_mask] = np.cross(look_dirs[fallback_mask], fallback_ref)
-            perp_norm[fallback_mask] = np.linalg.norm(
-                perp[fallback_mask], axis=1, keepdims=True
-            )
-        perp /= perp_norm + 1e-8
-        light_np = cam_np + perp * cfg.light_baseline  # (n, 3)
- 
-        # ── 카메라·조명 look-at 쿼터니언 (+X 전방이 rock 을 향하도록) ──────────
-        cam_quats   = np.stack([self._look_at_quat(cam_np[i],   rock_np[i]) for i in range(n)])
-        light_quats = np.stack([self._look_at_quat(light_np[i], rock_np[i]) for i in range(n)])
- 
-        # ── RigidObject 상태 쓰기: [pos(3), quat(4), lin_vel(3), ang_vel(3)] ──
-        cam_state   = torch.zeros(n, 13, device=self.device)
-        light_state = torch.zeros(n, 13, device=self.device)
- 
-        cam_state[:, 0:3] = torch.tensor(cam_np,     dtype=torch.float32, device=self.device)
-        cam_state[:, 3:7] = torch.tensor(cam_quats,  dtype=torch.float32, device=self.device)
-        # lin_vel, ang_vel 은 zeros 로 초기화됨
- 
-        light_state[:, 0:3] = torch.tensor(light_np,    dtype=torch.float32, device=self.device)
-        light_state[:, 3:7] = torch.tensor(light_quats, dtype=torch.float32, device=self.device)
- 
-        env_ids_t = torch.tensor(list(env_ids), dtype=torch.int64, device=self.device)
-        self._sensor_rig.write_root_state_to_sim(cam_state,   env_ids=env_ids_t)
-        self._light_rig.write_root_state_to_sim(light_state,  env_ids=env_ids_t)
+        env_ids_t = torch.tensor(env_ids, device=self.device)
 
-        if self.cfg.water_dr_enabled:
+        self._sph_theta[env_ids]    = torch.rand(n, device=self.device) * 2.0 * math.pi
+        self._sph_phi[env_ids]      = torch.linspace(cfg.phi_min, cfg.phi_max, n, device=self.device)[torch.randperm(n)]
+        self._sph_psi[env_ids]      = torch.rand(n, device=self.device) * (cfg.psi_max - cfg.psi_min) + cfg.psi_min
+        
+        self._light_level[env_ids]  = cfg.light_level_init
+
+        offset = torch.stack([
+            self._sph_psi[env_ids] * torch.sin(self._sph_phi[env_ids]) * torch.cos(self._sph_theta[env_ids]),
+            self._sph_psi[env_ids] * torch.sin(self._sph_phi[env_ids]) * torch.sin(self._sph_theta[env_ids]),
+            self._sph_psi[env_ids] * torch.cos(self._sph_phi[env_ids]),
+        ], dim=-1)
+
+        cam_pos_new = self.rock_pos[env_ids] + offset
+        forward = -offset / (offset.norm(dim=-1, keepdim=True) + 1e-8)
+        cam_quat_new = self._forward_to_quat(forward)
+
+        rig_state = torch.zeros(n, 13, device = self.device) # where does "13" came from??? <- 'isaacLab root_state form' hmm..
+        rig_state[:, 0:3] = cam_pos_new
+        rig_state[:, 3:7] = cam_quat_new
+        self._sensor_rig.write_root_state_to_sim(rig_state, env_ids=env_ids_t)
+
+        # fill buffer frames with 1st frame in k+1 times, but how can it accomplished with 0.0 ??? is this implement not conflict with _get_observation()?
+        raw_rgb = self._camera.data.output["rgb"][env_ids, :, :, :3]
+        current_obs = torch.mean(raw_rgb.float(), dim=-1) / 255.0
+        current_depth = self._camera.data.output["distance_to_image_plane"][env_ids].squeeze(-1)
+
+        # 2. k+1 채널에 현재 프레임을 반복해서 채우기
+        self._image_buffer[env_ids] = current_obs.unsqueeze(1).expand(-1, self.cfg.visual.num_seq_actor, -1, -1)
+        self._depth_buffer[env_ids] = current_depth.unsqueeze(1).expand(-1, self.cfg.visual.num_seq_critic, -1, -1)
+
+        self._prev_coverage[env_ids] = 0.0
+        self._prev_contrast[env_ids] = 0.0
+        self._prev_cam_pos[env_ids]  = cam_pos_new
+
+        if cfg.water_dr_enabled:
             self._randomize_water_params()
-    
+
+        self._voxelize_gt_mesh(env_ids)
+
+
     def _randomize_water_params(self) -> None:
         dr = self.cfg.water_dr
 
@@ -323,57 +610,68 @@ class OceanEnv(DirectRLEnv):
                                         dr.backscatter_coeff_max),
         )
         
-    def _look_at_quat(self, from_pos: np.ndarray, to_pos: np.ndarray) -> np.ndarray:
+    def _batch_look_at_quat(self, from_pos, to_pos):
+      # from_pos, to_pos: (num_envs, 3)
+      forward = to_pos - from_pos
+      forward = forward / (forward.norm(dim=-1, keepdim=True) + 1e-8)
+
+      return self._forward_to_quat(forward)
+
+    def _forward_to_quat(self, forward: torch.Tensor) -> torch.Tensor:
+      """forward 벡터 (N, 3) → 쿼터니언 [w,x,y,z] (N, 3)"""                                                      
+      N = forward.shape[0]                                                                                       
+                                                                                                                 
+      up = torch.tensor([[0., 0., 1.]], device=self.device).expand(N, -1)                                        
+      dot = (forward * up).sum(dim=-1, keepdim=True).abs()                                                       
+      fallback = torch.tensor([[0., 1., 0.]], device=self.device).expand(N, -1)                                  
+      up = torch.where(dot > 1.0 - 1e-6, fallback, up)
+                                                                                                                 
+      right    = torch.linalg.cross(forward, up)
+      right    = right / (right.norm(dim=-1, keepdim=True) + 1e-8)                                               
+      up_ortho = torch.linalg.cross(right, forward)
+                                                                                                                 
+      R = torch.stack([forward, -right, up_ortho], dim=-1)  # (N, 3, 3)
+      trace = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2]                                                               
+      s = 0.5 / torch.sqrt((trace + 1.0).clamp(min=1e-8))                                                        
+      w = 0.25 / s
+      x = (R[:, 2, 1] - R[:, 1, 2]) * s                                                                          
+      y = (R[:, 0, 2] - R[:, 2, 0]) * s
+      z = (R[:, 1, 0] - R[:, 0, 1]) * s                                                                          
+                  
+      quat = torch.stack([w, x, y, z], dim=-1)                                                                   
+
+      return quat / (quat.norm(dim=-1, keepdim=True) + 1e-8)
+    
+    def _quat_to_rot_matrix(self, quat:torch.Tensor) -> torch.Tensor:
+        w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+
+        R = torch.stack([
+            1 - 2*(y*y + z*z),     2*(x*y - w*z),     2*(x*z + w*y),
+                2*(x*y + w*z), 1 - 2*(x*x + z*z),     2*(y*z - w*x),
+                2*(x*z - w*y),     2*(y*z + w*x), 1 - 2*(x*x + y*y),
+        ], dim=-1).reshape(-1, 3, 3)                          # (num_envs, 3, 3)
+
+        return R
+    
+    def _build_cam_pose(self) -> torch.Tensor:
         """
-        +X = forward(to_pos 방향),  +Z = up 기준 roll 고정.
-        반환: [w, x, y, z]
+        Builds world-to-camera extrinsic matrix (E, 4, 4).
+
+        Isaac gives us camera-in-world:
+            R_wc (cam_orient): rotation from camera frame to world frame
+            t_w  (cam_pos):    camera position in world
+
+        We need world-to-camera:
+            R_cw = R_wc^T          (transpose, since R is orthogonal)
+            t_cw = -R_cw @ t_w    (re-express world origin in camera frame)
         """
-        forward = to_pos - from_pos
-        norm = np.linalg.norm(forward)
-        if norm < 1e-8:
-            return np.array([1.0, 0.0, 0.0, 0.0])
-        forward = forward / norm
+        N    = self.num_envs
+        R_wc = self._quat_to_rot_matrix(self.cam_orient)          # (E, 3, 3) cam→world
+        R_cw = R_wc.transpose(1, 2)                               # (E, 3, 3) world→cam
+        t_cw = -torch.bmm(R_cw, self.cam_pos.unsqueeze(-1)).squeeze(-1)  # (E, 3)
 
-        up = np.array([0.0, 0.0, 1.0])
+        pose = torch.eye(4, device=self.device).unsqueeze(0).expand(N, -1, -1).clone()
+        pose[:, :3, :3] = R_cw
+        pose[:, :3,  3] = t_cw
 
-        # forward ≈ ±Z 일 때 up 벡터 fallback
-        if abs(np.dot(forward, up)) > 1.0 - 1e-6:
-            up = np.array([0.0, 1.0, 0.0])
-
-        # 직교 기저 구성 (body frame: X=forward, Y=left, Z=up)
-        right   = np.cross(forward, up);  right   /= np.linalg.norm(right)
-        up_ortho = np.cross(right, forward)           # 재정규화 불필요하지만 안전하게:
-        up_ortho /= np.linalg.norm(up_ortho)
-
-        # 회전행렬 → 쿼터니언 (Shepperd method)
-        # 열: [forward, -right, up_ortho]  ← X=forward, Y=-right(=left), Z=up
-        R = np.stack([forward, -right, up_ortho], axis=1)  # (3,3), 열=축
-
-        trace = R[0,0] + R[1,1] + R[2,2]
-        if trace > 0:
-            s = 0.5 / np.sqrt(trace + 1.0)
-            w = 0.25 / s
-            x = (R[2,1] - R[1,2]) * s
-            y = (R[0,2] - R[2,0]) * s
-            z = (R[1,0] - R[0,1]) * s
-        elif R[0,0] > R[1,1] and R[0,0] > R[2,2]:
-            s = 2.0 * np.sqrt(1.0 + R[0,0] - R[1,1] - R[2,2])
-            w = (R[2,1] - R[1,2]) / s
-            x = 0.25 * s
-            y = (R[0,1] + R[1,0]) / s
-            z = (R[0,2] + R[2,0]) / s
-        elif R[1,1] > R[2,2]:
-            s = 2.0 * np.sqrt(1.0 + R[1,1] - R[0,0] - R[2,2])
-            w = (R[0,2] - R[2,0]) / s
-            x = (R[0,1] + R[1,0]) / s
-            y = 0.25 * s
-            z = (R[1,2] + R[2,1]) / s
-        else:
-            s = 2.0 * np.sqrt(1.0 + R[2,2] - R[0,0] - R[1,1])
-            w = (R[1,0] - R[0,1]) / s
-            x = (R[0,2] + R[2,0]) / s
-            y = (R[1,2] + R[2,1]) / s
-            z = 0.25 * s
-
-        q = np.array([w, x, y, z])
-        return q / np.linalg.norm(q)   # 수치 오차 보정
+        return pose    

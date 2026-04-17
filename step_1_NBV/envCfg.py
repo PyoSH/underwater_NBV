@@ -3,6 +3,23 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 # from dataclasses import field
 from sceneCfg import OceanSceneCfg
+from collections import deque
+import math
+from os.path import join
+
+@configclass
+class VisualConfig:
+    h:  int = 84
+    w:  int = 84
+    k:  int = 5 # num of past frames
+    num_seq_actor:     int = 6
+    num_seq_critic:    int = 6
+
+@configclass
+class TSDFCfg:
+    vol_dim:        tuple = (40,40,40)
+    voxel_size:     float = 0.05
+    trunc_margin:   float = 0.25
 
 @configclass
 class WaterParamRangeCfg:
@@ -32,33 +49,43 @@ class OceanEnvCfg(DirectRLEnvCfg):
     episode_length_s: float = 20.0
 
     # ── RL 공간 크기 ─────────────────────────────────────────────────────────
-    # cam_pos(3) + cam_orient(4) + light_pos(3) + light_orient(4) + cam_to_rock(3) = 17
-    observation_space: int = 17
-    # cam_vel(3) + cam_angvel(3) + light_vel(3) + light_angvel(3) = 12
-    action_space:      int = 12
+    
+    
+    visual: VisualConfig = VisualConfig()
+    observation_space:  tuple = (visual.num_seq_actor, visual.h, visual.w)     # 2D gray image sequence for actor
+    state_space:        tuple = (visual.num_seq_critic, visual.h, visual.w)    # depth map sequence for critic
+
+    # 총 5개 = 구면좌표계 3개 (azimuth, elevation, distance) + contrast 1개 + 조명 밝기 단계 1개  
+    num_scalar_obs: int = 5
+
+    # 6개 (구면좌표계 3개에 대해 이산 +-) + 3개 (조명 3가지 이산 +,0,-)
+    action_space:   int = 9
 
     # 시뮬레이션 스텝당 정책 업데이트 횟수 (policy dt = decimation * sim dt)
     decimation: int = 2
 
     # ── 물리 파라미터 ────────────────────────────────────────────────────────
-    max_velocity:         float = 0.1    # 선속도 스케일 [m/s]
-    max_angular_velocity: float = 1.0   # 각속도 스케일 [rad/s] ≈ 57°/s
-    optimal_cam_dist:     float = 1.5   # rock 에서 최적 거리 [m]
-    workspace_radius:     float = 3.0   # 이 거리를 넘으면 에피소드 종료 [m]
-    baseline_min:         float = 0.5  # 카메라-조명 최소 baseline [m]
-    baseline_max:         float = 5.0   # 카메라-조명 최대 baseline [m]
+    delta_theta:    float = math.radians(15)
+    delta_phi:      float = math.radians(15)
+    delta_psi:      float = 0.20
 
-    # ── 리셋 랜덤화 (카메라 초기 위치 구면 좌표 범위) ────────────────────────
-    reset_radius_min: float = 1.0   # rock 에서 최소 거리 [m]
-    reset_radius_max: float = 3.5   # rock 에서 최대 거리 [m]
-    reset_theta_min:  float = 0.35  # 최소 앙각 [rad] ≈ 20°
-    reset_theta_max:  float = 1.22  # 최대 앙각 [rad] ≈ 70°
-    light_baseline:   float = 0.5  # 리셋 시 카메라-조명 baseline [m]
+    phi_min:        float = math.radians(10)
+    phi_max:        float = math.radians(80)
+    psi_min:        float = 0.5
+    psi_max:        float = 10.0
+
+    light_level_init:           int = 4
+    light_intensity_per_level:  float = 2_000_000.0
+
+    tsdf:       TSDFCfg = TSDFCfg()
+    mesh_root:  str = join("isaac-sim", "extsUser","OceanSim", "oceansim_asset", "collected_rock")
 
     # ── 보상 가중치 ──────────────────────────────────────────────────────────
-    w_distance:  float = 1.0   # 거리 보상
-    w_direction: float = 0.8   # 카메라 시선이 rock 을 향하는 정도
-    w_baseline:  float = 0.5   # baseline 페널티
+    k_c:                float = 1.0
+    lambda_q:           float = 1.0
+    k_x:                float = 0.02
+    c_step:             float = 2.0
+    coverage_terminal:  float = 0.96
 
     # ── 카메라 센서 ──────────────────────────────────────────────────────────
     water_dr:           WaterParamRangeCfg = WaterParamRangeCfg()
