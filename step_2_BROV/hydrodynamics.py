@@ -187,12 +187,16 @@ class BROV2Hydrodynamics:
     _GRAVITY       : float = 9.81     # [m/s²]
 
     # --- BROV2 Heavy 유체역학 계수 ---
-    _VOLUME : float = 0.022747843     # [m³]
+    _VOLUME : float = 0.0134     # [m³] 0.022747843
     _COB_OFFSET : float = 0.01        # [m]  COM → COB (+Z body)
 
-    _ADDED_MASS        = [5.5,   12.7,  14.57, 0.12, 0.12, 0.12]
-    _LINEAR_DAMPING    = [4.03,  6.22,  5.18,  0.07, 0.07, 0.07]
-    _QUADRATIC_DAMPING = [18.18, 21.66, 36.99, 1.55, 1.55, 1.55]
+    # _ADDED_MASS        = [5.5,   12.7,  14.57, 0.12, 0.12, 0.12]
+    # _LINEAR_DAMPING    = [4.03,  6.22,  5.18,  0.07, 0.07, 0.07]
+    # _QUADRATIC_DAMPING = [18.18, 21.66, 36.99, 1.55, 1.55, 1.55]
+
+    _ADDED_MASS        = [06.36, 07.12, 18.68, 0.189, 0.135, 0.222]
+    _LINEAR_DAMPING    = [13.70, 00.00, 33.00, 00.00, 00.80, 00.00]
+    _QUADRATIC_DAMPING = [141.0, 217.0, 190.0, 01.19, 00.47, 01.50]
 
     # 가속도 저역 필터 alpha (MarineGym 기본값)
     _ACC_ALPHA : float = 0.3

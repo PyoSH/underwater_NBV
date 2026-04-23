@@ -46,7 +46,7 @@ class OceanEnvCfg(DirectRLEnvCfg):
     scene: OceanSceneCfg = OceanSceneCfg(num_envs=1, env_spacing=5.0)
 
     # ── 에피소드 ─────────────────────────────────────────────────────────────
-    episode_length_s: float = 20.0
+    episode_length_s: float = 20000.0
 
     # ── RL 공간 크기 ─────────────────────────────────────────────────────────
     
@@ -74,7 +74,7 @@ class OceanEnvCfg(DirectRLEnvCfg):
     psi_min:        float = 0.5
     psi_max:        float = 6.0
 
-    light_level_init:           int = 0
+    light_level_init:           int = 3
     light_intensity_per_level:  float = 2_000_000.0
 
     tsdf:       TSDFCfg = TSDFCfg()

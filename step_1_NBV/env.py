@@ -207,19 +207,12 @@ class OceanEnv(DirectRLEnv):
         
         cam_pos_new = self.rock_pos + offset
         cam_quat_new = self._look_at_quat(cam_pos_new, self.rock_pos)
-        # cam_quat_new = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=self.device)
                                                                                                                         
         # sensor_rig 상태 세트                                                                                         
         state = torch.zeros(self.num_envs, 13, device=self.device)                                                     
         state[:, 0:3] = cam_pos_new                                                                                    
         state[:, 3:7] = cam_quat_new
         self._sensor_rig.write_root_state_to_sim(state)
-
-        # 이게 맞나??? 센서 리그 따로, 카메라 따로 움직이게 하는게.
-        self._camera.set_world_poses(
-            positions=cam_pos_new,
-            orientations=cam_quat_new,
-        )
                                                                                                                         
         # 조명 intensity 업데이트
         self._update_light_intensity(self._light_level) 
@@ -608,13 +601,13 @@ class OceanEnv(DirectRLEnv):
         rig_state[:, 0:3] = cam_pos_new
         rig_state[:, 3:7] = cam_quat_new
         self._sensor_rig.write_root_state_to_sim(rig_state, env_ids=env_ids_t)
-        self._camera.set_world_poses(
-            positions=cam_pos_new,
-            orientations=cam_quat_new,
-            env_ids=env_ids_t,
-        )
 
         # fill buffer frames with 1st frame in k+1 times, but how can it accomplished with 0.0 ??? is this implement not conflict with _get_observation()?
+        sim = sim_utils.SimulationContext.instance()
+
+        for _ in range(10):
+            sim.render()
+
         raw_rgb = self._camera.data.output["uw_rgb"][env_ids, :, :, :3]
         # raw_rgb = self._camera.data.output["rgba"][env_ids, :, :, :3]
         current_obs = torch.mean(raw_rgb.float(), dim=-1) / 255.0

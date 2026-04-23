@@ -5,7 +5,6 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
-from isaaclab.sensors import CameraCfg
 
 OCEANSIM_DIR = "/isaac-sim/extsUser/OceanSim"
 ASSET_DIR    = os.path.join(OCEANSIM_DIR, "oceansim_asset")
@@ -63,23 +62,6 @@ wall_mat_west  = sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 1.0, 0.0), roug
 @configclass
 class OceanSceneCfg(InteractiveSceneCfg):
     """수중 탐색 씬."""
- 
-    # ── 글로벌 조명 (태양광 역할) ─────────────────────────────────────────────
-    # prim_path 에 ENV_REGEX_NS 를 쓰지 않아 모든 env 에 공유되는 단일 광원.
-    # DistantLight: 무한 거리의 평행광 → 씬 전체를 균일하게 비춰
-    # 벽 색상이 카메라 이미지에 명확히 드러나게 함.
-    # distant_light: AssetBaseCfg = AssetBaseCfg(
-    #     prim_path="/World/DistantLight",
-    #     spawn=sim_utils.DistantLightCfg(
-    #         intensity=3000.0,
-    #         color=(1.0, 1.0, 1.0),
-    #         angle=0.53,             # 태양 반각 [도]
-    #     ),
-    #     init_state=AssetBaseCfg.InitialStateCfg(
-    #         pos=(0.0, 0.0, 10.0),
-    #         rot=(0.9239, 0.0, 0.3827, 0.0),  # Y축 기준 45° 기울여 아래를 향함
-    #     ),
-    # )
  
     # ── 해저면 (정적 충돌체) ─────────────────────────────────────────────────
     seafloor: AssetBaseCfg = AssetBaseCfg(
@@ -157,15 +139,15 @@ class OceanSceneCfg(InteractiveSceneCfg):
     camera: UWCameraCfg = UWCameraCfg(
         prim_path="{ENV_REGEX_NS}/SensorRig/Camera",
         update_period=0,
-        height=480,
-        width=640,
+        height=240,
+        width=320,
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0,
             clipping_range=(0.1, 20.0)
         ),
         offset=UWCameraCfg.OffsetCfg(
             pos=(0.0, 0.0, 0.0),
-            # rot=(0.5, -0.5, -0.5, 0.5),   # [w, x, y, z]
+            # rot=(0.0, -0.5, 0.5, -0.5),   # [w, x, y, z]
             rot=(1.0, 0.0, 0.0, 0.0),   # [w, x, y, z]
             convention="world",
         ),
@@ -173,22 +155,6 @@ class OceanSceneCfg(InteractiveSceneCfg):
         atten_coeff        =(0.05, 0.05, 0.20),
         backscatter_coeff  =(0.05, 0.05, 0.05),
     )
-    # camera: CameraCfg = CameraCfg(
-    #     prim_path="{ENV_REGEX_NS}/SensorRig/Camera",
-    #     update_period=0,
-    #     height=480,
-    #     width=640,
-    #     data_types=["rgba", "distance_to_camera"],
-    #     spawn=sim_utils.PinholeCameraCfg(
-    #         focal_length=24.0,
-    #         clipping_range=(0.1, 20.0)
-    #     ),
-    #     offset=CameraCfg.OffsetCfg(
-    #         pos=(0.0, 0.0, 0.0),
-    #         rot=(1.0, 0.0, 0.0, 0.0),   # [w, x, y, z]
-    #         convention="world",
-    #     ),
-    # )
  
     '''
     SensorRig에 부착된 위치 수정할 것.
