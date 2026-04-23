@@ -9,6 +9,7 @@ import os
 
 import omni.usd
 from pxr import UsdLux
+import torch.nn.functional as F
 
 import isaaclab.sim as sim_utils
 from isaaclab.envs import DirectRLEnv
@@ -162,9 +163,13 @@ class OceanEnv(DirectRLEnv):
         shaping.GetShapingConeAngleAttr().Set(40.0)   # 반각 [도]
         shaping.GetShapingConeSoftnessAttr().Set(0.1)
 
+    def _pre_physics_step(self, action: torch.Tensor) -> None:
+        """action을 저장한다. 실제 적용은 _apply_action()에서 수행."""
+        self._actions = action.clone()
+
     def _apply_action(self) -> None:
         pose_idx = self._actions[:, 0:6].argmax(dim=-1) 
-        light_idx= self._actions[:, 6:9].argmax(dim=-1) # 조명은 이렇게 하는게 이해됨. 예시로 6(1), 7(0), 8(0) 이 있으면 6을 하는거니까. 그런데 왜 pose는??
+        light_idx= self._actions[:, 6:9].argmax(dim=-1) 
 
         deltas = torch.tensor([self.cfg.delta_theta, self.cfg.delta_phi, self.cfg.delta_psi],
                               device = self.device)
@@ -201,15 +206,20 @@ class OceanEnv(DirectRLEnv):
         ], dim=-1)
         
         cam_pos_new = self.rock_pos + offset
-
-        forward = -offset / (offset.norm(dim=-1, keepdim=True) + 1e-8)
-        cam_quat_new = self._forward_to_quat(forward)
+        cam_quat_new = self._look_at_quat(cam_pos_new, self.rock_pos)
+        # cam_quat_new = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=self.device)
                                                                                                                         
         # sensor_rig 상태 세트                                                                                         
         state = torch.zeros(self.num_envs, 13, device=self.device)                                                     
         state[:, 0:3] = cam_pos_new                                                                                    
         state[:, 3:7] = cam_quat_new
         self._sensor_rig.write_root_state_to_sim(state)
+
+        # 이게 맞나??? 센서 리그 따로, 카메라 따로 움직이게 하는게.
+        self._camera.set_world_poses(
+            positions=cam_pos_new,
+            orientations=cam_quat_new,
+        )
                                                                                                                         
         # 조명 intensity 업데이트
         self._update_light_intensity(self._light_level) 
@@ -222,8 +232,12 @@ class OceanEnv(DirectRLEnv):
             for i in range(2):
                 path = f"{env_ns}/SensorRig/SphereLight_{i}"
                 prim = stage.GetPrimAtPath(path)
-                if prim.IsValid():
-                    prim.GetAttribute("intensity").Set(intensity)
+                if not prim.IsValid():
+                    continue
+
+                attr = prim.GetAttribute("inputs:intensity")
+                if attr.IsValid():
+                    attr.Set(intensity)
     
     def _compute_patch_contrast(self, img: torch.Tensor)->torch.Tensor:
         patches     = img.unfold(1, 14, 14).unfold(2, 14, 14) # what tensor shape is this?
@@ -341,10 +355,11 @@ class OceanEnv(DirectRLEnv):
         N_vox      = Nx * Ny * Nz
         E          = self.num_envs
 
-        fx = self.cfg.camera_intrinsics.fx
-        fy = self.cfg.camera_intrinsics.fy
-        cx = self.cfg.camera_intrinsics.cx
-        cy = self.cfg.camera_intrinsics.cy
+        K = self._camera.data.intrinsic_matrices
+        fx = K[:, 0, 0]
+        fy = K[:, 1, 1]
+        cx = K[:, 0, 2]
+        cy = K[:, 1, 2]
 
         # ── 1. Build voxel center grid (shared across envs) ───────────────────
         # Do this once and cache — grid doesn't change between steps
@@ -387,8 +402,8 @@ class OceanEnv(DirectRLEnv):
         proj_u = (fx * vox_x / vox_z.clamp(min=1e-4) + cx)    # (E, N_vox)
         proj_v = (fy * vox_y / vox_z.clamp(min=1e-4) + cy)    # (E, N_vox)
 
-        H = self._camera.data.output["distance_to_image_plane"].shape[1]
-        W = self._camera.data.output["distance_to_image_plane"].shape[2]
+        H = self._camera.data.output["distance_to_camera"].shape[1]
+        W = self._camera.data.output["distance_to_camera"].shape[2]
 
         proj_u_int = proj_u.long()
         proj_v_int = proj_v.long()
@@ -402,7 +417,7 @@ class OceanEnv(DirectRLEnv):
         )                                                      # (E, N_vox) bool
 
         # ── 5. Sample depth image at projected pixels ──────────────────────────
-        depth_img = self._camera.data.output["distance_to_image_plane"]
+        depth_img = self._camera.data.output["distance_to_camera"]
         if depth_img.dim() == 4:
             depth_img = depth_img.squeeze(-1)                      # (E, H, W)
         H, W      = depth_img.shape[1], depth_img.shape[2]        # move here, after squeeze
@@ -474,11 +489,24 @@ class OceanEnv(DirectRLEnv):
     # ── 관측 ─────────────────────────────────────────────────────────────────
     def _get_observations(self) -> dict:
         # image buffer updating - need to be implemented
-        raw_rgb     = self._camera.data.output["rgb"][:, :, :, :3]          # (num_envs, h, w, 3)
-        raw_depth   = self._camera.data.output["distance_to_image_plane"]   # (num_envs, h, w) ?? sure?
+        raw_rgb     = self._camera.data.output["uw_rgb"][:, :, :, :3]          # (num_envs, h, w, 3)
+        # raw_rgb     = self._camera.data.output["rgba"][:, :, :, :3]          # (num_envs, h, w, 3)
+        raw_depth   = self._camera.data.output["distance_to_camera"]   # (num_envs, h, w) ?? sure?
 
         curr_obs    = torch.mean(raw_rgb.float(), dim=-1)/255.0 # 3 color scale -> grayscale & pixel value normalization
         curr_state  = raw_depth.squeeze(-1)
+
+        curr_obs = F.interpolate(
+            curr_obs.unsqueeze(1),
+            size = (self.cfg.visual.h, self.cfg.visual.w),
+            mode = "bilinear", align_corners=False
+        ).squeeze(1)
+
+        curr_state = F.interpolate(
+            curr_state.unsqueeze(1),
+            size = (self.cfg.visual.h, self.cfg.visual.w),
+            mode = "nearest"
+        ).squeeze(1)
 
         self._image_buffer = torch.roll(self._image_buffer, shifts=-1, dims=1)
         self._image_buffer[:, -1, :, :] = curr_obs
@@ -555,9 +583,12 @@ class OceanEnv(DirectRLEnv):
         n   = len(env_ids)
         env_ids_t = torch.tensor(env_ids, device=self.device)
 
-        self._sph_theta[env_ids]    = torch.rand(n, device=self.device) * 2.0 * math.pi
-        self._sph_phi[env_ids]      = torch.linspace(cfg.phi_min, cfg.phi_max, n, device=self.device)[torch.randperm(n)]
-        self._sph_psi[env_ids]      = torch.rand(n, device=self.device) * (cfg.psi_max - cfg.psi_min) + cfg.psi_min
+        # self._sph_theta[env_ids]    = torch.rand(n, device=self.device) * 2.0 * math.pi
+        # self._sph_phi[env_ids]      = torch.rand(n) * (cfg.phi_max - cfg.phi_min) + cfg.phi_min
+        # self._sph_psi[env_ids]      = torch.rand(n, device=self.device) * (cfg.psi_max - cfg.psi_min) + cfg.psi_min
+        self._sph_theta[env_ids]    = 0.0
+        self._sph_phi[env_ids]      = math.radians(89.0)
+        self._sph_psi[env_ids]      = 1.0
         
         self._light_level[env_ids]  = cfg.light_level_init
 
@@ -568,18 +599,37 @@ class OceanEnv(DirectRLEnv):
         ], dim=-1)
 
         cam_pos_new = self.rock_pos[env_ids] + offset
-        forward = -offset / (offset.norm(dim=-1, keepdim=True) + 1e-8)
-        cam_quat_new = self._forward_to_quat(forward)
+        # forward = -offset / (offset.norm(dim=-1, keepdim=True) + 1e-8)
+        # cam_quat_new = self._forward_to_quat(forward)
+        cam_quat_new = self._look_at_quat(cam_pos_new, self.rock_pos)
+        # cam_quat_new = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=self.device).expand(n, -1)
 
         rig_state = torch.zeros(n, 13, device = self.device) # where does "13" came from??? <- 'isaacLab root_state form' hmm..
         rig_state[:, 0:3] = cam_pos_new
         rig_state[:, 3:7] = cam_quat_new
         self._sensor_rig.write_root_state_to_sim(rig_state, env_ids=env_ids_t)
+        self._camera.set_world_poses(
+            positions=cam_pos_new,
+            orientations=cam_quat_new,
+            env_ids=env_ids_t,
+        )
 
         # fill buffer frames with 1st frame in k+1 times, but how can it accomplished with 0.0 ??? is this implement not conflict with _get_observation()?
-        raw_rgb = self._camera.data.output["rgb"][env_ids, :, :, :3]
+        raw_rgb = self._camera.data.output["uw_rgb"][env_ids, :, :, :3]
+        # raw_rgb = self._camera.data.output["rgba"][env_ids, :, :, :3]
         current_obs = torch.mean(raw_rgb.float(), dim=-1) / 255.0
-        current_depth = self._camera.data.output["distance_to_image_plane"][env_ids].squeeze(-1)
+        current_depth = self._camera.data.output["distance_to_camera"][env_ids].squeeze(-1)
+
+        current_obs = F.interpolate(
+            current_obs.unsqueeze(1),
+            size=(self.cfg.visual.h, self.cfg.visual.w),
+            mode="bilinear", align_corners=False
+        ).squeeze(1)
+        current_depth = F.interpolate(
+            current_depth.unsqueeze(1),
+            size=(self.cfg.visual.h, self.cfg.visual.w),
+            mode="nearest"
+        ).squeeze(1)
 
         # 2. k+1 채널에 현재 프레임을 반복해서 채우기
         self._image_buffer[env_ids] = current_obs.unsqueeze(1).expand(-1, self.cfg.visual.num_seq_actor, -1, -1)
@@ -609,38 +659,114 @@ class OceanEnv(DirectRLEnv):
             backscatter_coeff = rand_tuple(dr.backscatter_coeff_min,
                                         dr.backscatter_coeff_max),
         )
-        
-    def _batch_look_at_quat(self, from_pos, to_pos):
-      # from_pos, to_pos: (num_envs, 3)
-      forward = to_pos - from_pos
-      forward = forward / (forward.norm(dim=-1, keepdim=True) + 1e-8)
-
-      return self._forward_to_quat(forward)
 
     def _forward_to_quat(self, forward: torch.Tensor) -> torch.Tensor:
-      """forward 벡터 (N, 3) → 쿼터니언 [w,x,y,z] (N, 3)"""                                                      
-      N = forward.shape[0]                                                                                       
-                                                                                                                 
-      up = torch.tensor([[0., 0., 1.]], device=self.device).expand(N, -1)                                        
-      dot = (forward * up).sum(dim=-1, keepdim=True).abs()                                                       
-      fallback = torch.tensor([[0., 1., 0.]], device=self.device).expand(N, -1)                                  
-      up = torch.where(dot > 1.0 - 1e-6, fallback, up)
-                                                                                                                 
-      right    = torch.linalg.cross(forward, up)
-      right    = right / (right.norm(dim=-1, keepdim=True) + 1e-8)                                               
-      up_ortho = torch.linalg.cross(right, forward)
-                                                                                                                 
-      R = torch.stack([forward, -right, up_ortho], dim=-1)  # (N, 3, 3)
-      trace = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2]                                                               
-      s = 0.5 / torch.sqrt((trace + 1.0).clamp(min=1e-8))                                                        
-      w = 0.25 / s
-      x = (R[:, 2, 1] - R[:, 1, 2]) * s                                                                          
-      y = (R[:, 0, 2] - R[:, 2, 0]) * s
-      z = (R[:, 1, 0] - R[:, 0, 1]) * s                                                                          
-                  
-      quat = torch.stack([w, x, y, z], dim=-1)                                                                   
+        N = forward.shape[0]
 
-      return quat / (quat.norm(dim=-1, keepdim=True) + 1e-8)
+        up = torch.tensor([[0., 0., 1.]], device=self.device).expand(N, -1)
+        dot = (forward * up).sum(dim=-1, keepdim=True).abs()
+        fallback = torch.tensor([[0., 1., 0.]], device=self.device).expand(N, -1)
+        up = torch.where(dot > 1.0 - 1e-6, fallback, up)
+
+        # 수정: up × forward 순서
+        right    = torch.linalg.cross(forward, up)
+        right    = right / (right.norm(dim=-1, keepdim=True) + 1e-8)
+        up_ortho = torch.linalg.cross(forward, right)
+
+        # 수정: Isaac body frame 기준 열 배치 (X=forward, Y=left, Z=up)
+        R = torch.stack([forward, -right, up_ortho], dim=-1)
+
+        # 쿼터니언 변환은 동일
+        trace = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2]
+        s = 0.5 / torch.sqrt((trace + 1.0).clamp(min=1e-8))
+        w = 0.25 / s
+        x = (R[:, 2, 1] - R[:, 1, 2]) * s
+        y = (R[:, 0, 2] - R[:, 2, 0]) * s
+        z = (R[:, 1, 0] - R[:, 0, 1]) * s
+
+        quat = torch.stack([w, x, y, z], dim=-1)
+        print(f"1. forward vector : {forward}")
+        print(f"2. forward quat   : {quat / (quat.norm(dim=-1, keepdim=True) + 1e-8)}")
+        return quat / (quat.norm(dim=-1, keepdim=True) + 1e-8)
+    
+    def _look_at_quat(self, from_pos: torch.Tensor, to_pos: torch.Tensor) -> torch.Tensor:
+        """
+        from_pos (N,3) → to_pos (N,3) 를 바라보는 쿼터니언 [w,x,y,z] (N,4) 반환.
+        리그 body frame: +X = forward, +Y = left, +Z = up.
+ 
+        Shepperd method 4분기 완전 구현으로 수치 안정성 확보.
+        """
+        N = from_pos.shape[0]
+ 
+        # ── forward 벡터 ───────────────────────────────────────────────────
+        forward = to_pos - from_pos
+        forward = forward / (forward.norm(dim=-1, keepdim=True) + 1e-8)
+ 
+        # ── up 기준벡터 및 gimbal lock fallback ────────────────────────────
+        up = torch.tensor([[0., 0., 1.]], device=self.device).expand(N, -1)
+        dot = (forward * up).sum(dim=-1, keepdim=True).abs()
+        fallback = torch.tensor([[0., 1., 0.]], device=self.device).expand(N, -1)
+        up = torch.where(dot > 1.0 - 1e-6, fallback, up)
+ 
+        # ── 직교 기저 구성 (X=forward, Y=left, Z=up) ──────────────────────
+        right    = torch.linalg.cross(forward, up)
+        right    = right / (right.norm(dim=-1, keepdim=True) + 1e-8)
+        up_ortho = torch.linalg.cross(right, forward)
+        up_ortho = up_ortho / (up_ortho.norm(dim=-1, keepdim=True) + 1e-8)
+ 
+        # ── R 열 배치: col0=forward(+X), col1=-right(+Y=left), col2=up_ortho(+Z) ──
+        R = torch.stack([forward, -right, up_ortho], dim=-1)  # (N, 3, 3)
+ 
+        # ── Shepperd method 4분기 ──────────────────────────────────────────
+        trace = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2]          # (N,)
+ 
+        w = torch.zeros(N, device=self.device)
+        x = torch.zeros(N, device=self.device)
+        y = torch.zeros(N, device=self.device)
+        z = torch.zeros(N, device=self.device)
+ 
+        # case 0: trace > 0
+        m0 = trace > 0
+        if m0.any():
+            s     = 0.5 / torch.sqrt((trace[m0] + 1.0).clamp(min=1e-8))
+            w[m0] = 0.25 / s
+            x[m0] = (R[m0, 2, 1] - R[m0, 1, 2]) * s
+            y[m0] = (R[m0, 0, 2] - R[m0, 2, 0]) * s
+            z[m0] = (R[m0, 1, 0] - R[m0, 0, 1]) * s
+ 
+        # case 1: R00 최대
+        m1 = (~m0) & (R[:, 0, 0] > R[:, 1, 1]) & (R[:, 0, 0] > R[:, 2, 2])
+        if m1.any():
+            s     = 2.0 * torch.sqrt((1.0 + R[m1, 0, 0] - R[m1, 1, 1] - R[m1, 2, 2]).clamp(min=1e-8))
+            w[m1] = (R[m1, 2, 1] - R[m1, 1, 2]) / s
+            x[m1] = 0.25 * s
+            y[m1] = (R[m1, 0, 1] + R[m1, 1, 0]) / s
+            z[m1] = (R[m1, 0, 2] + R[m1, 2, 0]) / s
+ 
+        # case 2: R11 최대
+        m2 = (~m0) & (~m1) & (R[:, 1, 1] > R[:, 2, 2])
+        if m2.any():
+            s     = 2.0 * torch.sqrt((1.0 + R[m2, 1, 1] - R[m2, 0, 0] - R[m2, 2, 2]).clamp(min=1e-8))
+            w[m2] = (R[m2, 0, 2] - R[m2, 2, 0]) / s
+            x[m2] = (R[m2, 0, 1] + R[m2, 1, 0]) / s
+            y[m2] = 0.25 * s
+            z[m2] = (R[m2, 1, 2] + R[m2, 2, 1]) / s
+ 
+        # case 3: R22 최대
+        m3 = (~m0) & (~m1) & (~m2)
+        if m3.any():
+            s     = 2.0 * torch.sqrt((1.0 + R[m3, 2, 2] - R[m3, 0, 0] - R[m3, 1, 1]).clamp(min=1e-8))
+            w[m3] = (R[m3, 1, 0] - R[m3, 0, 1]) / s
+            x[m3] = (R[m3, 0, 2] + R[m3, 2, 0]) / s
+            y[m3] = (R[m3, 1, 2] + R[m3, 2, 1]) / s
+            z[m3] = 0.25 * s
+ 
+        quat = torch.stack([w, x, y, z], dim=-1)               # (N, 4)
+
+        print(f"1. forward vector : {forward}")
+        print(f"2. forward quat   : {quat / (quat.norm(dim=-1, keepdim=True) + 1e-8)}")
+
+        return quat / (quat.norm(dim=-1, keepdim=True) + 1e-8)
     
     def _quat_to_rot_matrix(self, quat:torch.Tensor) -> torch.Tensor:
         w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]

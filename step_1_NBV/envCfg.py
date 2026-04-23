@@ -72,9 +72,9 @@ class OceanEnvCfg(DirectRLEnvCfg):
     phi_min:        float = math.radians(10)
     phi_max:        float = math.radians(80)
     psi_min:        float = 0.5
-    psi_max:        float = 10.0
+    psi_max:        float = 6.0
 
-    light_level_init:           int = 4
+    light_level_init:           int = 0
     light_intensity_per_level:  float = 2_000_000.0
 
     tsdf:       TSDFCfg = TSDFCfg()
