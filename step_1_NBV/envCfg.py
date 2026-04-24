@@ -62,7 +62,7 @@ class OceanEnvCfg(DirectRLEnvCfg):
     action_space:   int = 9
 
     # 시뮬레이션 스텝당 정책 업데이트 횟수 (policy dt = decimation * sim dt)
-    decimation: int = 2
+    decimation: int = 1
 
     # ── 물리 파라미터 ────────────────────────────────────────────────────────
     delta_theta:    float = math.radians(15)

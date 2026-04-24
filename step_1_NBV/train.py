@@ -100,6 +100,8 @@ def run_random_policy(env: OceanEnv, steps: int = 1000000000) -> None:
 
 
 if __name__ == "__main__":
+    from orbital_basic import run_orbital_debug, print_env_state, print_action_effect
+
     cfg = OceanEnvCfg()
     cfg.scene.num_envs = 1
     cfg.sim.dt = 1.0 / 30.0
@@ -107,7 +109,29 @@ if __name__ == "__main__":
     env = OceanEnv(cfg=cfg, render_mode="rgb_array")
 
     try:
-        run_random_policy(env, steps=100000)
+        obs, _ = env.reset()
+        print_env_state(env, "AFTER RESET")
+
+        # θ+ 1회 → coverage와 terminated 확인
+        result = print_action_effect(env, action_idx=0, repeat=1)
+
+        if result["reset_triggered"]:
+            # coverage spike 원인 규명
+            print("=== COVERAGE SPIKE 진단 ===", flush=True)
+            obs, _ = env.reset()
+
+            # reset 직후, step 전 coverage 강제 계산
+            env._integrate_depth()
+            cov = env._compute_curr_coverage()
+            print(f"reset 직후 (step 전) coverage = {cov[0].item():.6f}", flush=True)
+            print(f"total_surf_voxels = {env._total_surf_voxels[0].item():.0f}", flush=True)
+            w_nonzero = (env._weight_vol[0] > 0).sum().item()
+            t_near    = (env._tsdf_vol[0].abs() < 1.0).sum().item()
+            print(f"weight_vol nonzero voxels = {w_nonzero}", flush=True)
+            print(f"tsdf near-surface voxels  = {t_near}", flush=True)
+
+    except Exception as ex:
+        import traceback; traceback.print_exc()
     finally:
         env.close()
         simulation_app.close()

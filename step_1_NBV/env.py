@@ -25,7 +25,7 @@ class OceanEnv(DirectRLEnv):
     # ── 초기화 ───────────────────────────────────────────────────────────────
     def __init__(self, cfg: OceanEnvCfg, render_mode: str | None = None):
         if cfg.debug_vis:
-            cfg.scene.camera.enable_viewport = True
+            # cfg.scene.camera.enable_viewport = True
             cfg.scene.camera.viewport_env_id = 0
             
         super().__init__(cfg, render_mode)
@@ -652,35 +652,6 @@ class OceanEnv(DirectRLEnv):
             backscatter_coeff = rand_tuple(dr.backscatter_coeff_min,
                                         dr.backscatter_coeff_max),
         )
-
-    def _forward_to_quat(self, forward: torch.Tensor) -> torch.Tensor:
-        N = forward.shape[0]
-
-        up = torch.tensor([[0., 0., 1.]], device=self.device).expand(N, -1)
-        dot = (forward * up).sum(dim=-1, keepdim=True).abs()
-        fallback = torch.tensor([[0., 1., 0.]], device=self.device).expand(N, -1)
-        up = torch.where(dot > 1.0 - 1e-6, fallback, up)
-
-        # 수정: up × forward 순서
-        right    = torch.linalg.cross(forward, up)
-        right    = right / (right.norm(dim=-1, keepdim=True) + 1e-8)
-        up_ortho = torch.linalg.cross(forward, right)
-
-        # 수정: Isaac body frame 기준 열 배치 (X=forward, Y=left, Z=up)
-        R = torch.stack([forward, -right, up_ortho], dim=-1)
-
-        # 쿼터니언 변환은 동일
-        trace = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2]
-        s = 0.5 / torch.sqrt((trace + 1.0).clamp(min=1e-8))
-        w = 0.25 / s
-        x = (R[:, 2, 1] - R[:, 1, 2]) * s
-        y = (R[:, 0, 2] - R[:, 2, 0]) * s
-        z = (R[:, 1, 0] - R[:, 0, 1]) * s
-
-        quat = torch.stack([w, x, y, z], dim=-1)
-        print(f"1. forward vector : {forward}")
-        print(f"2. forward quat   : {quat / (quat.norm(dim=-1, keepdim=True) + 1e-8)}")
-        return quat / (quat.norm(dim=-1, keepdim=True) + 1e-8)
     
     def _look_at_quat(self, from_pos: torch.Tensor, to_pos: torch.Tensor) -> torch.Tensor:
         """
@@ -756,8 +727,8 @@ class OceanEnv(DirectRLEnv):
  
         quat = torch.stack([w, x, y, z], dim=-1)               # (N, 4)
 
-        print(f"1. forward vector : {forward}")
-        print(f"2. forward quat   : {quat / (quat.norm(dim=-1, keepdim=True) + 1e-8)}")
+        # print(f"1. forward vector : {forward}")
+        # print(f"2. forward quat   : {quat / (quat.norm(dim=-1, keepdim=True) + 1e-8)}")
 
         return quat / (quat.norm(dim=-1, keepdim=True) + 1e-8)
     
