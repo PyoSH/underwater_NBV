@@ -43,10 +43,10 @@ class OceanEnvCfg(DirectRLEnvCfg):
     sim: SimulationCfg = SimulationCfg(dt=1 / 60, render_interval=1)
 
     # ── 씬 설정 (InteractiveSceneCfg 서브클래스) ──────────────────────────
-    scene: OceanSceneCfg = OceanSceneCfg(num_envs=1, env_spacing=5.0)
+    scene: OceanSceneCfg = OceanSceneCfg(num_envs=1, env_spacing=10.0)
 
     # ── 에피소드 ─────────────────────────────────────────────────────────────
-    episode_length_s: float = 20000.0
+    episode_length_s: float = 200000.0
 
     # ── RL 공간 크기 ─────────────────────────────────────────────────────────
     

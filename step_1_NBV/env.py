@@ -552,7 +552,10 @@ class OceanEnv(DirectRLEnv):
         self._prev_contrast  = self.curr_contrast.clone()
         self._prev_cam_pos  = self.cam_pos.clone()
 
-        return reward_coverage + reward_quality - reward_penalty
+        retval = torch.tensor([10.0], device = self.device)
+        print(f"reward : {reward_coverage + reward_quality - reward_penalty}")
+        # return reward_coverage + reward_quality - reward_penalty
+        return retval
     
     # ── 종료 조건 ─────────────────────────────────────────────────────────────
 
@@ -562,7 +565,8 @@ class OceanEnv(DirectRLEnv):
         dist_cam       = torch.norm(self.cam_pos - self.rock_pos, dim=-1)
         out_of_bounds  = dist_cam > self.cfg.psi_max
 
-        terminated     = goal_reached | out_of_bounds
+        # terminated     = goal_reached | out_of_bounds
+        terminated = False
         truncated      = self.episode_length_buf >= self.max_episode_length - 1
 
         return terminated, truncated
@@ -592,8 +596,6 @@ class OceanEnv(DirectRLEnv):
         ], dim=-1)
 
         cam_pos_new = self.rock_pos[env_ids] + offset
-        # forward = -offset / (offset.norm(dim=-1, keepdim=True) + 1e-8)
-        # cam_quat_new = self._forward_to_quat(forward)
         cam_quat_new = self._look_at_quat(cam_pos_new, self.rock_pos)
         # cam_quat_new = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=self.device).expand(n, -1)
 

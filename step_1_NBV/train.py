@@ -44,52 +44,61 @@ sys.path.insert(0, os.path.dirname(__file__))
 from envCfg import OceanEnvCfg
 from env    import OceanEnv
 
-def run_random_policy(env: OceanEnv, steps: int = 1000000000) -> None:
-    """
-    OceanEnv에서 sensor rig만 랜덤하게 움직이는 간단한 테스트 루프.
-    매 step마다 uw_rgb 텐서를 읽어서, 값이 실제로 변하는지 확인한다.
-    """
-    print("[train_random] run_random_policy 시작", flush=True)
+def run_sequential_policy(env: OceanEnv, steps: int = 1000) -> None:
+    print("시작", flush=True)
+
+    def make_action(idx: int, num_envs: int, action_dim: int, device) -> torch.Tensor:
+        a = torch.zeros(num_envs, action_dim, device=device)
+        a[:, idx] = 1.0
+
+        return a
+
+    # Action index constants (matches your cfg order)
+    AZ_POS, AZ_NEG = 0, 1
+    EL_POS, EL_NEG = 2, 3
+    DI_POS, DI_NEG = 4, 5
+    LI_POS, LI_HLD, LI_NEG = 6, 7, 8
 
     # 1. reset
     obs, _ = env.reset()  # DirectRLEnv는 obs, info 반환 [web:49]
-    prev_uw = None
+    # prev_uw = None
 
     for t in range(steps):
-        # 2. 랜덤 action 생성
-        #    OceanEnvCfg.action_space 에 맞춰 uniform(-1, 1) 샘플링
-        a = torch.rand(env.num_envs, env.cfg.action_space, device=env.device) * 2.0 - 1.0
+        a = torch.zeros(env.num_envs, env.cfg.action_space, device=env.device)
+
+        a[:, AZ_POS] = 1.0
+        # if t % 15 == 0:
+        #     a[:, AZ_POS] = 0.0
 
         # 3. step 수행 (rig 이동 + sensor 업데이트 + obs/reward 계산까지 한 번에 처리됨)
         obs, reward, terminated, truncated, info = env.step(a)  # [web:49]
 
         # 4. uw_rgb 직접 확인 (디버그용)
         #    env._camera.data.output["uw_rgb"]: (E, H, W, 4) 또는 (E, H, W, 4) 가정
-        cam_out = env._camera.data.output
-        if "uw_rgb" in cam_out:
-            uw = cam_out["uw_rgb"]  # (E, H, W, 4) torch.uint8
-            # env 0 기준 mean intensity 로 간단하게 변화 확인
-            uw0 = uw[0, :, :, :3].float().mean().item()
-        else:
-            uw0 = float("nan")
+        # cam_out = env._camera.data.output
+        # if "uw_rgb" in cam_out:
+        #     uw = cam_out["uw_rgb"]  # (E, H, W, 4) torch.uint8
+        #     # env 0 기준 mean intensity 로 간단하게 변화 확인
+        #     uw0 = uw[0, :, :, :3].float().mean().item()
+        # else:
+        #     uw0 = float("nan")
 
-        # 이전 frame과 비교 (간단한 수치 로그)
-        if prev_uw is not None and not torch.isnan(torch.tensor(uw0)):
-            delta = uw0 - prev_uw
-        else:
-            delta = float("nan")
-        prev_uw = uw0
+        # # 이전 frame과 비교 (간단한 수치 로그)
+        # if prev_uw is not None and not torch.isnan(torch.tensor(uw0)):
+        #     delta = uw0 - prev_uw
+        # else:
+        #     delta = float("nan")
+        # prev_uw = uw0
 
-        if (t + 1) % 50 == 0:
-            cam_pos = env.cam_pos[0].cpu().numpy()
-            print(
-                f"[step {t+1:4d}] "
-                f"cam=({cam_pos[0]:.2f},{cam_pos[1]:.2f},{cam_pos[2]:.2f}) "
-                f"uw_mean={uw0:.3f} "
-                f"delta={delta:.3f} "
-                f"reward={reward[0].item():.3f}",
-                flush=True,
-            )
+        cam_pos = env.cam_pos[0].cpu().numpy()
+        print(
+            f"[step {t+1:4d}] "
+            f"terminated={terminated[0].item()} "
+            f"truncated={truncated[0].item()} "
+            f"reward={reward[0].item():.4f} "
+            f"cam=({cam_pos[0]:.2f},{cam_pos[1]:.2f},{cam_pos[2]:.2f})",
+            flush=True,
+        )
 
         # episode 종료 시 reset
         if terminated.any() or truncated.any():
@@ -100,8 +109,6 @@ def run_random_policy(env: OceanEnv, steps: int = 1000000000) -> None:
 
 
 if __name__ == "__main__":
-    from orbital_basic import run_orbital_debug, print_env_state, print_action_effect
-
     cfg = OceanEnvCfg()
     cfg.scene.num_envs = 1
     cfg.sim.dt = 1.0 / 30.0
@@ -109,29 +116,7 @@ if __name__ == "__main__":
     env = OceanEnv(cfg=cfg, render_mode="rgb_array")
 
     try:
-        obs, _ = env.reset()
-        print_env_state(env, "AFTER RESET")
-
-        # θ+ 1회 → coverage와 terminated 확인
-        result = print_action_effect(env, action_idx=0, repeat=1)
-
-        if result["reset_triggered"]:
-            # coverage spike 원인 규명
-            print("=== COVERAGE SPIKE 진단 ===", flush=True)
-            obs, _ = env.reset()
-
-            # reset 직후, step 전 coverage 강제 계산
-            env._integrate_depth()
-            cov = env._compute_curr_coverage()
-            print(f"reset 직후 (step 전) coverage = {cov[0].item():.6f}", flush=True)
-            print(f"total_surf_voxels = {env._total_surf_voxels[0].item():.0f}", flush=True)
-            w_nonzero = (env._weight_vol[0] > 0).sum().item()
-            t_near    = (env._tsdf_vol[0].abs() < 1.0).sum().item()
-            print(f"weight_vol nonzero voxels = {w_nonzero}", flush=True)
-            print(f"tsdf near-surface voxels  = {t_near}", flush=True)
-
-    except Exception as ex:
-        import traceback; traceback.print_exc()
+        run_sequential_policy(env, steps=100000)
     finally:
         env.close()
         simulation_app.close()
