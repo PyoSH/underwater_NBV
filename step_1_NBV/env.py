@@ -17,6 +17,9 @@ from isaaclab.utils.math import quat_apply
 
 from envCfg import OceanEnvCfg
 
+import cv2
+from pathlib import Path
+
 class OceanEnv(DirectRLEnv):
     """카메라와 조명을 이동시키며 대상 물체를 탐색하는 병렬 RL 환경."""
 
@@ -62,6 +65,16 @@ class OceanEnv(DirectRLEnv):
         self._prev_cam_pos = torch.zeros(self.num_envs, 3, device=self.device) # this var doesn't use right now, but it will be in reward function.
 
         self._setup_vis_markers()        
+
+        self._debug_save_dir = Path("./debug_obs")
+        self._debug_save_dir.mkdir(parents=True, exist_ok=True)
+        self._debug_save_every = 1   # 10 step마다 저장
+        self._debug_frame_idx = 0
+        
+        self._debug_seq_dir = Path("./debug_seq")
+        self._debug_seq_dir.mkdir(parents=True, exist_ok=True)
+        self._debug_seq_every = 10    # 10 step마다 저장
+        self._debug_seq_step = 0
 
     # ── 방향 시각화 마커 ──────────────────────────────────────────────────────
 
@@ -477,7 +490,7 @@ class OceanEnv(DirectRLEnv):
     @property
     def cam_orient(self) -> torch.Tensor:
         """카메라 리그 월드 자세 쿼터니언 [w,x,y,z] (num_envs, 4)."""
-        return self._sensor_rig.data.root_quat_w
+        return self._sensor_rig.data.root_quat_w        
 
     # ── 관측 ─────────────────────────────────────────────────────────────────
     def _get_observations(self) -> dict:
@@ -523,37 +536,125 @@ class OceanEnv(DirectRLEnv):
         if self.cfg.debug_vis:
             self._update_vis_markers()
 
+        # self._save_debug_obs(raw_rgb, raw_depth, curr_obs, curr_state)
+        self._save_debug_sequence()
+
         return {
             "policy": self._image_buffer,     # Actor: 광학 이미지 시퀀스 (6, 84, 84)
             "extra_info": scalar_obs,         # Actor: 5개 수치 데이터
             "critic": self._depth_buffer      # Critic: GT Depth 시퀀스 (Privileged)
         }
+
+    def _save_debug_sequence(self):
+        # 너무 자주 저장하면 느리니 주기로 제어
+        if self._debug_seq_step % self._debug_seq_every != 0:
+            self._debug_seq_step += 1
+            return
+
+        step_dir = self._debug_seq_dir / f"step_{self._debug_seq_step:06d}"
+        step_dir.mkdir(parents=True, exist_ok=True)
+
+        num_envs = self.num_envs
+        K_img = self.cfg.visual.num_seq_actor
+        K_dep = self.cfg.visual.num_seq_critic
+
+        img_buf = self._image_buffer.detach().cpu().numpy()   # (E,K,H,W)
+        dep_buf = self._depth_buffer.detach().cpu().numpy()   # (E,K,H,W)
+
+        for env_id in range(num_envs):
+            env_dir = step_dir / f"env_{env_id}"
+            env_dir.mkdir(parents=True, exist_ok=True)
+
+            # image 시퀀스 저장: time axis = 1
+            for k in range(K_img):
+                img = img_buf[env_id, k]  # (H,W), [0,1] 가정
+                img_u8 = (img * 255.0).clip(0, 255).astype(np.uint8)
+                cv2.imwrite(str(env_dir / f"img_seq_{k:02d}.png"), img_u8)
+
+            # depth 시퀀스 저장
+            for k in range(K_dep):
+                depth = dep_buf[env_id, k]      # (H,W), float
+                depth_valid = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+                dmin, dmax = depth_valid.min(), depth_valid.max()
+                if dmax > dmin:
+                    depth_vis = ((depth_valid - dmin) / (dmax - dmin) * 255.0).astype(np.uint8)
+                else:
+                    depth_vis = np.zeros_like(depth_valid, dtype=np.uint8)
+                cv2.imwrite(str(env_dir / f"depth_seq_{k:02d}.png"), depth_vis)
+
+        self._debug_seq_step += 1
     
+    def _save_debug_obs(self, raw_rgb, raw_depth, curr_obs, curr_state):
+        import cv2
+        import numpy as np
+
+        if self._debug_frame_idx % self._debug_save_every != 0:
+            self._debug_frame_idx += 1
+            return
+
+        save_root = self._debug_save_dir / f"step_{self._debug_frame_idx:06d}"
+        save_root.mkdir(parents=True, exist_ok=True)
+
+        num_envs = raw_rgb.shape[0]
+
+        for env_id in range(num_envs):
+            env_dir = save_root / f"env_{env_id}"
+            env_dir.mkdir(parents=True, exist_ok=True)
+
+            rgb = raw_rgb[env_id].detach().cpu().numpy().astype(np.uint8)   # (H,W,3)
+            rgb_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(str(env_dir / "raw_rgb.png"), rgb_bgr)
+
+            depth = raw_depth[env_id].detach().cpu().numpy()
+            if depth.ndim == 3 and depth.shape[-1] == 1:
+                depth = depth[..., 0]
+
+            depth_valid = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+            dmin, dmax = depth_valid.min(), depth_valid.max()
+            if dmax > dmin:
+                depth_vis = ((depth_valid - dmin) / (dmax - dmin) * 255.0).astype(np.uint8)
+            else:
+                depth_vis = np.zeros_like(depth_valid, dtype=np.uint8)
+            cv2.imwrite(str(env_dir / "raw_depth.png"), depth_vis)
+
+            obs_img = (curr_obs[env_id].detach().cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
+            cv2.imwrite(str(env_dir / "policy_obs.png"), obs_img)
+
+            critic_depth = curr_state[env_id].detach().cpu().numpy()
+            critic_depth = np.nan_to_num(critic_depth, nan=0.0, posinf=0.0, neginf=0.0)
+            cmin, cmax = critic_depth.min(), critic_depth.max()
+            if cmax > cmin:
+                critic_vis = ((critic_depth - cmin) / (cmax - cmin) * 255.0).astype(np.uint8)
+            else:
+                critic_vis = np.zeros_like(critic_depth, dtype=np.uint8)
+            cv2.imwrite(str(env_dir / "critic_depth.png"), critic_vis)
+
+        self._debug_frame_idx += 1
     # ── 보상 ─────────────────────────────────────────────────────────────────
 
     def _get_rewards(self) -> torch.Tensor:
-        self._integrate_depth()
-        curr_coverage = self._compute_curr_coverage()
-        self.curr_coverage = curr_coverage
+        # self._integrate_depth()
+        # curr_coverage = self._compute_curr_coverage()
+        # self.curr_coverage = curr_coverage
 
-        delta_coverage = curr_coverage - self._prev_coverage
-        reward_coverage = self.cfg.k_c * delta_coverage
+        # delta_coverage = curr_coverage - self._prev_coverage
+        # reward_coverage = self.cfg.k_c * delta_coverage
 
-        terminal_mask = (curr_coverage >= self.cfg.coverage_terminal)
-        reward_coverage[terminal_mask] += 100.0 #?????
+        # terminal_mask = (curr_coverage >= self.cfg.coverage_terminal)
+        # reward_coverage[terminal_mask] += 100.0 #?????
 
-        delta_contrast = self.curr_contrast - self._prev_contrast
-        reward_quality = self.cfg.lambda_q * delta_contrast
+        # delta_contrast = self.curr_contrast - self._prev_contrast
+        # reward_quality = self.cfg.lambda_q * delta_contrast
 
-        dist_moved = torch.norm(self.cam_pos - self._prev_cam_pos, dim=-1)
-        reward_penalty = self.cfg.k_x * dist_moved + self.cfg.c_step
+        # dist_moved = torch.norm(self.cam_pos - self._prev_cam_pos, dim=-1)
+        # reward_penalty = self.cfg.k_x * dist_moved + self.cfg.c_step
 
-        self._prev_coverage = curr_coverage.clone()
-        self._prev_contrast  = self.curr_contrast.clone()
-        self._prev_cam_pos  = self.cam_pos.clone()
+        # self._prev_coverage = curr_coverage.clone()
+        # self._prev_contrast  = self.curr_contrast.clone()
+        # self._prev_cam_pos  = self.cam_pos.clone()
 
+        # print(f"reward : {reward_coverage + reward_quality - reward_penalty}")
         retval = torch.tensor([10.0], device = self.device)
-        print(f"reward : {reward_coverage + reward_quality - reward_penalty}")
         # return reward_coverage + reward_quality - reward_penalty
         return retval
     
@@ -765,5 +866,4 @@ class OceanEnv(DirectRLEnv):
         pose = torch.eye(4, device=self.device).unsqueeze(0).expand(N, -1, -1).clone()
         pose[:, :3, :3] = R_cw
         pose[:, :3,  3] = t_cw
-
         return pose    
