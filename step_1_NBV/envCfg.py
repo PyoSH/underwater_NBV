@@ -74,8 +74,8 @@ class OceanEnvCfg(DirectRLEnvCfg):
     psi_min:        float = 0.5
     psi_max:        float = 6.0
 
-    light_level_init:           int = 3
-    light_intensity_per_level:  float = 2_000_000.0
+    light_level_init:           int = 1
+    light_intensity_per_level:  float = 100_000.0 #2_000_000.0
 
     tsdf:       TSDFCfg = TSDFCfg()
     mesh_root:  str = join("isaac-sim", "extsUser","OceanSim", "oceansim_asset", "collected_rock")

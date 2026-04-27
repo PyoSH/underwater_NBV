@@ -14,15 +14,13 @@ import torch.nn.functional as F
 import isaaclab.sim as sim_utils
 from isaaclab.envs import DirectRLEnv
 from isaaclab.utils.math import quat_apply
-
+from env_utils import EnvUtilsMixin
+from env_reward import EnvRewardMixin
 from envCfg import OceanEnvCfg
-
-import cv2
 from pathlib import Path
 
-class OceanEnv(DirectRLEnv):
+class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
     """카메라와 조명을 이동시키며 대상 물체를 탐색하는 병렬 RL 환경."""
-
     cfg: OceanEnvCfg
 
     # ── 초기화 ───────────────────────────────────────────────────────────────
@@ -55,25 +53,24 @@ class OceanEnv(DirectRLEnv):
         self.curr_contrast  = torch.zeros(self.num_envs, device=self.device)
 
         # RigidObject 핸들 (InteractiveScene 이 자동 생성)
-        self._sensor_rig   = self.scene["sensor_rig"]
-        self._camera = self.scene["camera"]
+        self._sensor_rig    = self.scene["sensor_rig"]
+        self._camera        = self.scene["camera"]
 
-        rock_local = torch.tensor([0.0, 0.0, -3.0], device=self.device)
-        self.rock_pos = self.scene.env_origins + rock_local  # (num_envs, 3)
-        self._actions = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
+        rock_local      = torch.tensor([0.0, 0.0, -3.0], device=self.device)
+        self.rock_pos   = self.scene.env_origins + rock_local  # (num_envs, 3)
+        self._actions   = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
         
         self._prev_cam_pos = torch.zeros(self.num_envs, 3, device=self.device) # this var doesn't use right now, but it will be in reward function.
 
         self._setup_vis_markers()        
-
         self._debug_save_dir = Path("./debug_obs")
         self._debug_save_dir.mkdir(parents=True, exist_ok=True)
-        self._debug_save_every = 1   # 10 step마다 저장
+        self._debug_save_every = 1 
         self._debug_frame_idx = 0
         
         self._debug_seq_dir = Path("./debug_seq")
         self._debug_seq_dir.mkdir(parents=True, exist_ok=True)
-        self._debug_seq_every = 10    # 10 step마다 저장
+        self._debug_seq_every = 6
         self._debug_seq_step = 0
 
     # ── 방향 시각화 마커 ──────────────────────────────────────────────────────
@@ -176,13 +173,15 @@ class OceanEnv(DirectRLEnv):
         shaping.GetShapingConeAngleAttr().Set(40.0)   # 반각 [도]
         shaping.GetShapingConeSoftnessAttr().Set(0.1)
 
-    def _pre_physics_step(self, action: torch.Tensor) -> None:
+    def _pre_physics_step(self, action: torch.Tensor) -> None: # 실제로 쓰이는 함수인가???
         """action을 저장한다. 실제 적용은 _apply_action()에서 수행."""
         self._actions = action.clone()
 
     def _apply_action(self) -> None:
         pose_idx = self._actions[:, 0:6].argmax(dim=-1) 
-        light_idx= self._actions[:, 6:9].argmax(dim=-1) 
+        light_idx= self._actions[:, 6:9].argmax(dim=-1)
+
+        pose_active = self._actions[:, 0:6].any(dim=-1)
 
         deltas = torch.tensor([self.cfg.delta_theta, self.cfg.delta_phi, self.cfg.delta_psi],
                               device = self.device)
@@ -195,6 +194,8 @@ class OceanEnv(DirectRLEnv):
         delta_mat.scatter_(1,
                            axis.unsqueeze(1),
                            (sign*deltas[axis]).unsqueeze(1))
+        # delta_mat *= pose_active.float().unsequeeze(1)
+
         self._sph_theta += delta_mat[:, 0]
         self._sph_phi   += delta_mat[:, 1]
         self._sph_psi   += delta_mat[:, 2]
@@ -231,6 +232,7 @@ class OceanEnv(DirectRLEnv):
         self._update_light_intensity(self._light_level) 
 
     def _update_light_intensity(self, next_light_level:torch.Tensor)->None:
+        print(f"Ordered light level: {next_light_level}")
         stage = omni.usd.get_context().get_stage()
         for env_idx in range(self.num_envs):
             intensity = float(next_light_level[env_idx].item() * self.cfg.light_intensity_per_level)
@@ -244,241 +246,6 @@ class OceanEnv(DirectRLEnv):
                 attr = prim.GetAttribute("inputs:intensity")
                 if attr.IsValid():
                     attr.Set(intensity)
-    
-    def _compute_patch_contrast(self, img: torch.Tensor)->torch.Tensor:
-        patches     = img.unfold(1, 14, 14).unfold(2, 14, 14) # what tensor shape is this?
-        patch_std   = torch.std(patches, dim=(-1, -2))
-        
-        return torch.mean(patch_std, dim=(1,2))
-    
-    def _voxelize_gt_mesh(self, env_ids: Sequence[int]) -> None:
-        vox        = self.cfg.tsdf.voxel_size
-        Nx, Ny, Nz = self.cfg.tsdf.vol_dim
-
-        for env_id in env_ids:
-            verts, faces = self._load_mesh(env_id)             # world-space verts
-
-            r1  = np.random.rand(len(faces), 1).astype(np.float32)
-            r2  = np.random.rand(len(faces), 1).astype(np.float32)
-            a   = 1.0 - np.sqrt(r1)
-            b   = np.sqrt(r1) * (1.0 - r2)
-            c   = np.sqrt(r1) * r2
-
-            v0  = verts[faces[:, 0]]
-            v1  = verts[faces[:, 1]]
-            v2  = verts[faces[:, 2]]
-            pts = a * v0 + b * v1 + c * v2                     # (F, 3)
-
-            obj_min  = pts.min(axis=0)
-            obj_max  = pts.max(axis=0)
-            center   = (obj_min + obj_max) / 2.0
-            half_ext = np.array([Nx, Ny, Nz], dtype=np.float32) * vox / 2.0
-            origin   = center - half_ext
-
-            self._vol_origin[env_id] = torch.tensor(origin, device=self.device)
-
-            pts_t     = torch.tensor(pts, device=self.device)
-            orig_t    = self._vol_origin[env_id]
-            idx       = ((pts_t - orig_t) / vox).long()
-
-            in_bounds = (
-                (idx[:, 0] >= 0) & (idx[:, 0] < Nx) &
-                (idx[:, 1] >= 0) & (idx[:, 1] < Ny) &
-                (idx[:, 2] >= 0) & (idx[:, 2] < Nz)
-            )
-            idx = idx[in_bounds]
-
-            surf_vol = torch.zeros(Nx, Ny, Nz, dtype=torch.bool, device=self.device)
-            surf_vol[idx[:, 0], idx[:, 1], idx[:, 2]] = True
-
-            self._total_surf_voxels[env_id] = surf_vol.sum().float().clamp(min=1.0)
-            self._tsdf_vol  [env_id]        = torch.zeros(Nx, Ny, Nz, device=self.device)
-            self._weight_vol[env_id]        = torch.zeros(Nx, Ny, Nz, device=self.device)
-
-
-    def _load_mesh(self, env_id: int):
-        from pxr import Usd, UsdGeom, Gf
-
-        stage     = omni.usd.get_context().get_stage()
-        prim_path = f"/World/envs/env_{env_id}/Object"
-        root_prim = stage.GetPrimAtPath(prim_path)
-
-        mesh_prim = None
-        for prim in Usd.PrimRange(root_prim):                  # full subtree
-            if prim.IsA(UsdGeom.Mesh):
-                mesh_prim = UsdGeom.Mesh(prim)
-                break
-
-        if mesh_prim is None:
-            raise RuntimeError(f"No UsdGeom.Mesh found under: {prim_path}")
-
-        points  = mesh_prim.GetPointsAttr().Get()
-        verts   = np.array(points, dtype=np.float32)
-
-        indices = np.array(mesh_prim.GetFaceVertexIndicesAttr().Get(), dtype=np.int64)
-        counts  = np.array(mesh_prim.GetFaceVertexCountsAttr().Get(),  dtype=np.int64)
-        faces   = self._triangulate(indices, counts)
-
-        # Local → world space
-        xform_cache = UsdGeom.XformCache()
-        world_xform = xform_cache.GetLocalToWorldTransform(mesh_prim.GetPrim())
-        ones    = np.ones((len(verts), 1), dtype=np.float32)
-        verts_h = np.hstack([verts, ones])
-        mat     = np.array(world_xform).reshape(4, 4).T.astype(np.float32)
-        verts   = (verts_h @ mat.T)[:, :3]
-
-        # Unit conversion (cm → m etc.)
-        stage_mpu = UsdGeom.GetStageMetersPerUnit(stage)
-        verts     = verts * float(stage_mpu)
-
-        return verts, faces
-
-    def _triangulate(self, indices: np.ndarray, counts: np.ndarray) -> np.ndarray:
-        triangles = []
-        offset    = 0
-        for n in counts:
-            v0 = indices[offset]
-            for j in range(1, n - 1):
-                triangles.append([v0, indices[offset + j], indices[offset + j + 1]])
-            offset += n
-        return np.array(triangles, dtype=np.int64)
-    
-    def _integrate_depth(self) -> None:
-        """
-        Fuses current depth maps from all envs into the batched TSDF volume.
-        Fully vectorized — no Python loops over envs or voxels.
-        
-        Shapes:
-            vox_world:  (num_envs, Nx*Ny*Nz, 3)
-            vox_cam:    (num_envs, Nx*Ny*Nz, 3)
-            proj_u/v:   (num_envs, Nx*Ny*Nz)
-            sdf:        (num_envs, Nx*Ny*Nz)
-        """
-        cfg        = self.cfg.tsdf
-        vox        = cfg.voxel_size
-        trunc      = cfg.trunc_margin
-        Nx, Ny, Nz = cfg.vol_dim
-        N_vox      = Nx * Ny * Nz
-        E          = self.num_envs
-
-        K = self._camera.data.intrinsic_matrices
-        fx = K[:, 0, 0]
-        fy = K[:, 1, 1]
-        cx = K[:, 0, 2]
-        cy = K[:, 1, 2]
-
-        # ── 1. Build voxel center grid (shared across envs) ───────────────────
-        # Do this once and cache — grid doesn't change between steps
-        if not hasattr(self, '_vox_local'):
-            xi = torch.arange(Nx, device=self.device)
-            yi = torch.arange(Ny, device=self.device)
-            zi = torch.arange(Nz, device=self.device)
-
-            # (Nx, Ny, Nz, 3) voxel centers in local grid coords (origin = 0)
-            gx, gy, gz = torch.meshgrid(xi, yi, zi, indexing='ij')
-            self._vox_local = torch.stack([
-                gx.flatten().float() * vox + vox / 2.0,
-                gy.flatten().float() * vox + vox / 2.0,
-                gz.flatten().float() * vox + vox / 2.0,
-            ], dim=-1)                                         # (N_vox, 3)
-
-        # ── 2. Shift local grid to world coords per env ────────────────────────
-        # _vol_origin: (E, 3),  _vox_local: (N_vox, 3)
-        vox_world = self._vox_local.unsqueeze(0) + \
-                    self._vol_origin.unsqueeze(1)              # (E, N_vox, 3)
-
-        # ── 3. Transform world → camera space ─────────────────────────────────
-        cam_pose = self._build_cam_pose()                      # (E, 4, 4)
-        R = cam_pose[:, :3, :3]                                # (E, 3, 3)
-        t = cam_pose[:, :3,  3]                                # (E, 3)
-
-        # v_cam = R @ v_world + t
-        # bmm expects (E, 3, 3) @ (E, 3, N_vox) → (E, 3, N_vox)
-        vox_cam = torch.bmm(R, vox_world.permute(0, 2, 1))    # (E, 3, N_vox)
-        vox_cam = vox_cam + t.unsqueeze(-1)                    # (E, 3, N_vox)
-        vox_cam = vox_cam.permute(0, 2, 1)                     # (E, N_vox, 3)
-
-        vox_z = vox_cam[..., 2]                                # (E, N_vox)
-        vox_x = vox_cam[..., 0]
-        vox_y = vox_cam[..., 1]
-
-        # ── 4. Project to pixel coordinates ───────────────────────────────────
-        valid_z = vox_z > 1e-4                                 # in front of camera
-
-        proj_u = (fx * vox_x / vox_z.clamp(min=1e-4) + cx)    # (E, N_vox)
-        proj_v = (fy * vox_y / vox_z.clamp(min=1e-4) + cy)    # (E, N_vox)
-
-        H = self._camera.data.output["distance_to_camera"].shape[1]
-        W = self._camera.data.output["distance_to_camera"].shape[2]
-
-        proj_u_int = proj_u.long()
-        proj_v_int = proj_v.long()
-
-        in_bounds = (
-            valid_z                        &
-            (proj_u_int >= 0)              &
-            (proj_u_int <  W)              &
-            (proj_v_int >= 0)              &
-            (proj_v_int <  H)
-        )                                                      # (E, N_vox) bool
-
-        # ── 5. Sample depth image at projected pixels ──────────────────────────
-        depth_img = self._camera.data.output["distance_to_camera"]
-        if depth_img.dim() == 4:
-            depth_img = depth_img.squeeze(-1)                      # (E, H, W)
-        H, W      = depth_img.shape[1], depth_img.shape[2]        # move here, after squeeze
-        depth_flat = depth_img.reshape(E, -1)
-
-        # Clamp indices for safe gather (out-of-bounds handled by mask)
-        safe_u = proj_u_int.clamp(0, W - 1)
-        safe_v = proj_v_int.clamp(0, H - 1)
-        pixel_idx = safe_v * W + safe_u                        # (E, N_vox)
-
-        sampled_depth = torch.gather(depth_flat, 1, pixel_idx) # (E, N_vox)
-
-        # ── 6. Compute SDF and truncate ────────────────────────────────────────
-        sdf  = sampled_depth - vox_z                           # (E, N_vox)
-        tsdf = (sdf / trunc).clamp(-1.0, 1.0)                  # (E, N_vox)
-
-        # Only update voxels that are:
-        #  - projected inside image (in_bounds)
-        #  - within truncation band (sdf >= -trunc)
-        update_mask = in_bounds & (sdf >= -trunc)              # (E, N_vox)
-
-        # ── 7. Running average TSDF update ────────────────────────────────────
-        w_old = self._weight_vol.reshape(E, N_vox)             # (E, N_vox)
-        t_old = self._tsdf_vol  .reshape(E, N_vox)             # (E, N_vox)
-
-        w_new = w_old + update_mask.float()                    # (E, N_vox)
-        # avoid div/0 where update_mask is False (w_new == w_old there)
-        t_new = torch.where(
-            update_mask,
-            (t_old * w_old + tsdf) / w_new.clamp(min=1e-8),
-            t_old
-        )                                                      # (E, N_vox)
-
-        self._tsdf_vol   = t_new.reshape(E, Nx, Ny, Nz)
-        self._weight_vol = w_new.reshape(E, Nx, Ny, Nz)
-    
-    def _compute_curr_coverage(self) -> torch.Tensor:
-        """
-        Computes coverage rate per env from the current TSDF volume.
-        
-        A voxel counts as 'observed surface' when:
-        - weight > 0  : seen by at least one depth frame
-        - |tsdf| < 1.0: near a surface (not free space or behind surface)
-
-        Returns: coverage (num_envs,) float32, range [0, 1]
-        """
-        observed = (
-            (self._weight_vol > 0) &
-            (self._tsdf_vol.abs() < 1.0)
-        )                                                      # (E, Nx, Ny, Nz) bool
-
-        count    = observed.sum(dim=(1, 2, 3)).float()         # (E,)
-        coverage = count / self._total_surf_voxels             # (E,)  normalized
-
-        return coverage.clamp(0.0, 1.0)
 
     # ── 상태 프로퍼티 ─────────────────────────────────────────────────────────
 
@@ -537,7 +304,7 @@ class OceanEnv(DirectRLEnv):
             self._update_vis_markers()
 
         # self._save_debug_obs(raw_rgb, raw_depth, curr_obs, curr_state)
-        self._save_debug_sequence()
+        # self._save_debug_sequence()
 
         return {
             "policy": self._image_buffer,     # Actor: 광학 이미지 시퀀스 (6, 84, 84)
@@ -545,95 +312,14 @@ class OceanEnv(DirectRLEnv):
             "critic": self._depth_buffer      # Critic: GT Depth 시퀀스 (Privileged)
         }
 
-    def _save_debug_sequence(self):
-        # 너무 자주 저장하면 느리니 주기로 제어
-        if self._debug_seq_step % self._debug_seq_every != 0:
-            self._debug_seq_step += 1
-            return
-
-        step_dir = self._debug_seq_dir / f"step_{self._debug_seq_step:06d}"
-        step_dir.mkdir(parents=True, exist_ok=True)
-
-        num_envs = self.num_envs
-        K_img = self.cfg.visual.num_seq_actor
-        K_dep = self.cfg.visual.num_seq_critic
-
-        img_buf = self._image_buffer.detach().cpu().numpy()   # (E,K,H,W)
-        dep_buf = self._depth_buffer.detach().cpu().numpy()   # (E,K,H,W)
-
-        for env_id in range(num_envs):
-            env_dir = step_dir / f"env_{env_id}"
-            env_dir.mkdir(parents=True, exist_ok=True)
-
-            # image 시퀀스 저장: time axis = 1
-            for k in range(K_img):
-                img = img_buf[env_id, k]  # (H,W), [0,1] 가정
-                img_u8 = (img * 255.0).clip(0, 255).astype(np.uint8)
-                cv2.imwrite(str(env_dir / f"img_seq_{k:02d}.png"), img_u8)
-
-            # depth 시퀀스 저장
-            for k in range(K_dep):
-                depth = dep_buf[env_id, k]      # (H,W), float
-                depth_valid = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
-                dmin, dmax = depth_valid.min(), depth_valid.max()
-                if dmax > dmin:
-                    depth_vis = ((depth_valid - dmin) / (dmax - dmin) * 255.0).astype(np.uint8)
-                else:
-                    depth_vis = np.zeros_like(depth_valid, dtype=np.uint8)
-                cv2.imwrite(str(env_dir / f"depth_seq_{k:02d}.png"), depth_vis)
-
-        self._debug_seq_step += 1
     
-    def _save_debug_obs(self, raw_rgb, raw_depth, curr_obs, curr_state):
-        import cv2
-        import numpy as np
-
-        if self._debug_frame_idx % self._debug_save_every != 0:
-            self._debug_frame_idx += 1
-            return
-
-        save_root = self._debug_save_dir / f"step_{self._debug_frame_idx:06d}"
-        save_root.mkdir(parents=True, exist_ok=True)
-
-        num_envs = raw_rgb.shape[0]
-
-        for env_id in range(num_envs):
-            env_dir = save_root / f"env_{env_id}"
-            env_dir.mkdir(parents=True, exist_ok=True)
-
-            rgb = raw_rgb[env_id].detach().cpu().numpy().astype(np.uint8)   # (H,W,3)
-            rgb_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(str(env_dir / "raw_rgb.png"), rgb_bgr)
-
-            depth = raw_depth[env_id].detach().cpu().numpy()
-            if depth.ndim == 3 and depth.shape[-1] == 1:
-                depth = depth[..., 0]
-
-            depth_valid = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
-            dmin, dmax = depth_valid.min(), depth_valid.max()
-            if dmax > dmin:
-                depth_vis = ((depth_valid - dmin) / (dmax - dmin) * 255.0).astype(np.uint8)
-            else:
-                depth_vis = np.zeros_like(depth_valid, dtype=np.uint8)
-            cv2.imwrite(str(env_dir / "raw_depth.png"), depth_vis)
-
-            obs_img = (curr_obs[env_id].detach().cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
-            cv2.imwrite(str(env_dir / "policy_obs.png"), obs_img)
-
-            critic_depth = curr_state[env_id].detach().cpu().numpy()
-            critic_depth = np.nan_to_num(critic_depth, nan=0.0, posinf=0.0, neginf=0.0)
-            cmin, cmax = critic_depth.min(), critic_depth.max()
-            if cmax > cmin:
-                critic_vis = ((critic_depth - cmin) / (cmax - cmin) * 255.0).astype(np.uint8)
-            else:
-                critic_vis = np.zeros_like(critic_depth, dtype=np.uint8)
-            cv2.imwrite(str(env_dir / "critic_depth.png"), critic_vis)
-
-        self._debug_frame_idx += 1
     # ── 보상 ─────────────────────────────────────────────────────────────────
 
     def _get_rewards(self) -> torch.Tensor:
-        # self._integrate_depth()
+        # self._voxelize_gt_mesh(list(range(self.num_envs)))
+        # print(f"[S1] total_surf_voxels : {self._total_surf_voxels}")                    
+        # print(f"[S1] vol_origin        : {self._vol_origin}")                           
+        # print(f"[S1] rock_pos          : {self.rock_pos}")      
         # curr_coverage = self._compute_curr_coverage()
         # self.curr_coverage = curr_coverage
 
@@ -654,7 +340,7 @@ class OceanEnv(DirectRLEnv):
         # self._prev_cam_pos  = self.cam_pos.clone()
 
         # print(f"reward : {reward_coverage + reward_quality - reward_penalty}")
-        retval = torch.tensor([10.0], device = self.device)
+        retval = torch.full((self.num_envs,),10.0, device = self.device)
         # return reward_coverage + reward_quality - reward_penalty
         return retval
     
@@ -666,8 +352,7 @@ class OceanEnv(DirectRLEnv):
         dist_cam       = torch.norm(self.cam_pos - self.rock_pos, dim=-1)
         out_of_bounds  = dist_cam > self.cfg.psi_max
 
-        # terminated     = goal_reached | out_of_bounds
-        terminated = False
+        terminated     = goal_reached | out_of_bounds
         truncated      = self.episode_length_buf >= self.max_episode_length - 1
 
         return terminated, truncated
@@ -697,7 +382,7 @@ class OceanEnv(DirectRLEnv):
         ], dim=-1)
 
         cam_pos_new = self.rock_pos[env_ids] + offset
-        cam_quat_new = self._look_at_quat(cam_pos_new, self.rock_pos)
+        cam_quat_new = self._look_at_quat(cam_pos_new, self.rock_pos[env_ids])
         # cam_quat_new = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=self.device).expand(n, -1)
 
         rig_state = torch.zeros(n, 13, device = self.device) # where does "13" came from??? <- 'isaacLab root_state form' hmm..
@@ -740,7 +425,6 @@ class OceanEnv(DirectRLEnv):
 
         self._voxelize_gt_mesh(env_ids)
 
-
     def _randomize_water_params(self) -> None:
         dr = self.cfg.water_dr
 
@@ -755,115 +439,3 @@ class OceanEnv(DirectRLEnv):
             backscatter_coeff = rand_tuple(dr.backscatter_coeff_min,
                                         dr.backscatter_coeff_max),
         )
-    
-    def _look_at_quat(self, from_pos: torch.Tensor, to_pos: torch.Tensor) -> torch.Tensor:
-        """
-        from_pos (N,3) → to_pos (N,3) 를 바라보는 쿼터니언 [w,x,y,z] (N,4) 반환.
-        리그 body frame: +X = forward, +Y = left, +Z = up.
- 
-        Shepperd method 4분기 완전 구현으로 수치 안정성 확보.
-        """
-        N = from_pos.shape[0]
- 
-        # ── forward 벡터 ───────────────────────────────────────────────────
-        forward = to_pos - from_pos
-        forward = forward / (forward.norm(dim=-1, keepdim=True) + 1e-8)
- 
-        # ── up 기준벡터 및 gimbal lock fallback ────────────────────────────
-        up = torch.tensor([[0., 0., 1.]], device=self.device).expand(N, -1)
-        dot = (forward * up).sum(dim=-1, keepdim=True).abs()
-        fallback = torch.tensor([[0., 1., 0.]], device=self.device).expand(N, -1)
-        up = torch.where(dot > 1.0 - 1e-6, fallback, up)
- 
-        # ── 직교 기저 구성 (X=forward, Y=left, Z=up) ──────────────────────
-        right    = torch.linalg.cross(forward, up)
-        right    = right / (right.norm(dim=-1, keepdim=True) + 1e-8)
-        up_ortho = torch.linalg.cross(right, forward)
-        up_ortho = up_ortho / (up_ortho.norm(dim=-1, keepdim=True) + 1e-8)
- 
-        # ── R 열 배치: col0=forward(+X), col1=-right(+Y=left), col2=up_ortho(+Z) ──
-        R = torch.stack([forward, -right, up_ortho], dim=-1)  # (N, 3, 3)
- 
-        # ── Shepperd method 4분기 ──────────────────────────────────────────
-        trace = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2]          # (N,)
- 
-        w = torch.zeros(N, device=self.device)
-        x = torch.zeros(N, device=self.device)
-        y = torch.zeros(N, device=self.device)
-        z = torch.zeros(N, device=self.device)
- 
-        # case 0: trace > 0
-        m0 = trace > 0
-        if m0.any():
-            s     = 0.5 / torch.sqrt((trace[m0] + 1.0).clamp(min=1e-8))
-            w[m0] = 0.25 / s
-            x[m0] = (R[m0, 2, 1] - R[m0, 1, 2]) * s
-            y[m0] = (R[m0, 0, 2] - R[m0, 2, 0]) * s
-            z[m0] = (R[m0, 1, 0] - R[m0, 0, 1]) * s
- 
-        # case 1: R00 최대
-        m1 = (~m0) & (R[:, 0, 0] > R[:, 1, 1]) & (R[:, 0, 0] > R[:, 2, 2])
-        if m1.any():
-            s     = 2.0 * torch.sqrt((1.0 + R[m1, 0, 0] - R[m1, 1, 1] - R[m1, 2, 2]).clamp(min=1e-8))
-            w[m1] = (R[m1, 2, 1] - R[m1, 1, 2]) / s
-            x[m1] = 0.25 * s
-            y[m1] = (R[m1, 0, 1] + R[m1, 1, 0]) / s
-            z[m1] = (R[m1, 0, 2] + R[m1, 2, 0]) / s
- 
-        # case 2: R11 최대
-        m2 = (~m0) & (~m1) & (R[:, 1, 1] > R[:, 2, 2])
-        if m2.any():
-            s     = 2.0 * torch.sqrt((1.0 + R[m2, 1, 1] - R[m2, 0, 0] - R[m2, 2, 2]).clamp(min=1e-8))
-            w[m2] = (R[m2, 0, 2] - R[m2, 2, 0]) / s
-            x[m2] = (R[m2, 0, 1] + R[m2, 1, 0]) / s
-            y[m2] = 0.25 * s
-            z[m2] = (R[m2, 1, 2] + R[m2, 2, 1]) / s
- 
-        # case 3: R22 최대
-        m3 = (~m0) & (~m1) & (~m2)
-        if m3.any():
-            s     = 2.0 * torch.sqrt((1.0 + R[m3, 2, 2] - R[m3, 0, 0] - R[m3, 1, 1]).clamp(min=1e-8))
-            w[m3] = (R[m3, 1, 0] - R[m3, 0, 1]) / s
-            x[m3] = (R[m3, 0, 2] + R[m3, 2, 0]) / s
-            y[m3] = (R[m3, 1, 2] + R[m3, 2, 1]) / s
-            z[m3] = 0.25 * s
- 
-        quat = torch.stack([w, x, y, z], dim=-1)               # (N, 4)
-
-        # print(f"1. forward vector : {forward}")
-        # print(f"2. forward quat   : {quat / (quat.norm(dim=-1, keepdim=True) + 1e-8)}")
-
-        return quat / (quat.norm(dim=-1, keepdim=True) + 1e-8)
-    
-    def _quat_to_rot_matrix(self, quat:torch.Tensor) -> torch.Tensor:
-        w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
-
-        R = torch.stack([
-            1 - 2*(y*y + z*z),     2*(x*y - w*z),     2*(x*z + w*y),
-                2*(x*y + w*z), 1 - 2*(x*x + z*z),     2*(y*z - w*x),
-                2*(x*z - w*y),     2*(y*z + w*x), 1 - 2*(x*x + y*y),
-        ], dim=-1).reshape(-1, 3, 3)                          # (num_envs, 3, 3)
-
-        return R
-    
-    def _build_cam_pose(self) -> torch.Tensor:
-        """
-        Builds world-to-camera extrinsic matrix (E, 4, 4).
-
-        Isaac gives us camera-in-world:
-            R_wc (cam_orient): rotation from camera frame to world frame
-            t_w  (cam_pos):    camera position in world
-
-        We need world-to-camera:
-            R_cw = R_wc^T          (transpose, since R is orthogonal)
-            t_cw = -R_cw @ t_w    (re-express world origin in camera frame)
-        """
-        N    = self.num_envs
-        R_wc = self._quat_to_rot_matrix(self.cam_orient)          # (E, 3, 3) cam→world
-        R_cw = R_wc.transpose(1, 2)                               # (E, 3, 3) world→cam
-        t_cw = -torch.bmm(R_cw, self.cam_pos.unsqueeze(-1)).squeeze(-1)  # (E, 3)
-
-        pose = torch.eye(4, device=self.device).unsqueeze(0).expand(N, -1, -1).clone()
-        pose[:, :3, :3] = R_cw
-        pose[:, :3,  3] = t_cw
-        return pose    

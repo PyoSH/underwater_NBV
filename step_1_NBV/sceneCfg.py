@@ -28,32 +28,6 @@ wall_material = sim_utils.PreviewSurfaceCfg(
     roughness=1.0,                # 거칠기를 최대화하여 정반사(Specular) 억제
 )
 
-# @configclass
-# class OceanSceneCfg(InteractiveSceneCfg):
-#     """수중 탐색 씬."""
-
-#     # ── 해저면 (정적 충돌체) ─────────────────────────────────────────────────
-#     seafloor: AssetBaseCfg = AssetBaseCfg(
-#         prim_path="{ENV_REGEX_NS}/Seafloor",
-#         spawn=sim_utils.CuboidCfg(
-#             size=(10.0, 10.0, 0.25),
-#             collision_props=sim_utils.CollisionPropertiesCfg(),
-#             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.15, 0.15, 0.15)),
-#         ),
-#         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, floorDepth)),
-#     )
-
-#     # 북쪽 벽 (Y+)
-#     wall_north: AssetBaseCfg = AssetBaseCfg(
-#         prim_path="{ENV_REGEX_NS}/Wall1",
-#         spawn=sim_utils.CuboidCfg(
-#             size=(wallLength, wallWidth, wallHeight),
-#             visual_material=wall_material,
-#         ),
-#         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, wallLength/2, floorDepth + wallHeight/2))
-#     )
-
-
 wall_mat_north = sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0), roughness=1.0, metallic=0.0)
 wall_mat_south = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0), roughness=1.0, metallic=0.0)
 wall_mat_east  = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0), roughness=1.0, metallic=0.0)
@@ -80,7 +54,7 @@ class OceanSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Wall1",
         spawn=sim_utils.CuboidCfg(
             size=(wallLength, wallWidth, wallHeight),
-            visual_material=wall_mat_north,
+            visual_material=wall_material,
         ),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, wallLength/2, floorDepth + wallHeight/2))
     )
@@ -89,7 +63,7 @@ class OceanSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Wall2",
         spawn=sim_utils.CuboidCfg(
             size=(wallLength, wallWidth, wallHeight),
-            visual_material=wall_mat_south,
+            visual_material=wall_material,
         ),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, -wallLength/2, floorDepth + wallHeight/2))
     )
@@ -98,7 +72,7 @@ class OceanSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Wall3",
         spawn=sim_utils.CuboidCfg(
             size=(wallWidth, wallLength, wallHeight),
-            visual_material=wall_mat_east,
+            visual_material=wall_material,
         ),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(wallLength/2, 0.0, floorDepth + wallHeight/2))
     )
@@ -107,7 +81,7 @@ class OceanSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Wall4",
         spawn=sim_utils.CuboidCfg(
             size=(wallWidth, wallLength, wallHeight),
-            visual_material=wall_mat_west,
+            visual_material=wall_material,
         ),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(-wallLength/2, 0.0, floorDepth + wallHeight/2))
     )
@@ -162,7 +136,7 @@ class OceanSceneCfg(InteractiveSceneCfg):
     sphere_light_0: AssetBaseCfg = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/SensorRig/SphereLight_0",
         spawn=sim_utils.SphereLightCfg(
-            intensity=10000000.0,
+            intensity=0.0,
             radius=0.05,
             color=(1.0, 1.0, 1.0),
         ),
@@ -175,7 +149,7 @@ class OceanSceneCfg(InteractiveSceneCfg):
     sphere_light_1: AssetBaseCfg = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/SensorRig/SphereLight_1",
         spawn=sim_utils.SphereLightCfg(
-            intensity=10000000.0,
+            intensity=0.0,
             radius=0.05,
             color=(1.0, 1.0, 1.0),
         ),
