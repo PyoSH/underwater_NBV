@@ -45,7 +45,7 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         self._weight_vol    = torch.zeros(self.num_envs, Nx, Ny, Nz, device=self.device)
         self._vol_origin    = torch.zeros(self.num_envs, 3,          device=self.device)
         self._total_surf_voxels = torch.ones(self.num_envs,          device=self.device)
-
+        self._surf_vol      = torch.zeros(self.num_envs, Nx, Ny, Nz, dtype=torch.bool, device=self.device)
         
         self._prev_coverage = torch.zeros(self.num_envs, device=self.device)
         self._prev_contrast = torch.zeros(self.num_envs, device=self.device)
@@ -232,7 +232,6 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         self._update_light_intensity(self._light_level) 
 
     def _update_light_intensity(self, next_light_level:torch.Tensor)->None:
-        print(f"Ordered light level: {next_light_level}")
         stage = omni.usd.get_context().get_stage()
         for env_idx in range(self.num_envs):
             intensity = float(next_light_level[env_idx].item() * self.cfg.light_intensity_per_level)
@@ -316,10 +315,11 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
     # ── 보상 ─────────────────────────────────────────────────────────────────
 
     def _get_rewards(self) -> torch.Tensor:
-        # self._voxelize_gt_mesh(list(range(self.num_envs)))
-        # print(f"[S1] total_surf_voxels : {self._total_surf_voxels}")                    
-        # print(f"[S1] vol_origin        : {self._vol_origin}")                           
-        # print(f"[S1] rock_pos          : {self.rock_pos}")      
+        # self._save_surf_pc(env_id=0)                                                                              
+        
+        self._integrate_depth()             
+        self._save_weight_pc(env_id=0)                                                                
+
         # curr_coverage = self._compute_curr_coverage()
         # self.curr_coverage = curr_coverage
 
@@ -424,6 +424,7 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
             self._randomize_water_params()
 
         self._voxelize_gt_mesh(env_ids)
+        # self._save_surf_pc(env_id=0)
 
     def _randomize_water_params(self) -> None:
         dr = self.cfg.water_dr

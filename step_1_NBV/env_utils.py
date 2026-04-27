@@ -162,6 +162,7 @@ class EnvUtilsMixin:
             self._total_surf_voxels[env_id] = surf_vol.sum().float().clamp(min=1.0)
             self._tsdf_vol  [env_id]        = torch.zeros(Nx, Ny, Nz, device=self.device)
             self._weight_vol[env_id]        = torch.zeros(Nx, Ny, Nz, device=self.device)
+            self._surf_vol[env_id] = surf_vol
 
     def _load_mesh(self, env_id: int):
         from pxr import Usd, UsdGeom
@@ -292,3 +293,40 @@ class EnvUtilsMixin:
             cv2.imwrite(str(env_dir / "critic_depth.png"), critic_vis)
 
         self._debug_frame_idx += 1
+    
+    def _save_surf_pc(self, env_id:int =0):
+        vox = self.cfg.tsdf.voxel_size
+        Nx, Ny, Nz = self.cfg.tsdf.vol_dim
+        origin = self._vol_origin[env_id].cpu().numpy()
+
+        idx = self._surf_vol[env_id].nonzero(as_tuple=False).cpu().numpy()
+        pts = origin + (idx + 0.5) * vox
+
+        path = f"./surf_cloud_env{env_id}.ply"
+        with open(path, 'w') as f:                                                      
+            f.write("ply\nformat ascii 1.0\n")                                          
+            f.write(f"element vertex {len(pts)}\n")                                     
+            f.write("property float x\nproperty float y\nproperty float z\n")
+            f.write("end_header\n")                                                     
+            for p in pts:          
+                f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")                          
+        print(f"[VIZ] saved {len(pts)} points → {path}")  
+    
+    def _save_weight_pc(self, env_id: int = 0):
+      vox    = self.cfg.tsdf.voxel_size                                               
+      origin = self._vol_origin[env_id].cpu().numpy()                                 
+                                                                                      
+      # 관측된 voxel 인덱스 (weight > 0)                                              
+      idx = (self._weight_vol[env_id] > 0).nonzero(as_tuple=False).cpu().numpy()                                                                             
+      pts = origin + (idx + 0.5) * vox
+                                                                                      
+      path = f"./weight_cloud_env{env_id}.ply"                                        
+      with open(path, 'w') as f:                                                      
+          f.write("ply\nformat ascii 1.0\n")                                          
+          f.write(f"element vertex {len(pts)}\n")
+          f.write("property float x\nproperty float y\nproperty float z\n")           
+          f.write("end_header\n")                                                     
+          for p in pts:
+              f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")                          
+                                                                                      
+      print(f"[VIZ] weight cloud saved: {len(pts)} voxels → {path}")    
