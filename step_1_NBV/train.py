@@ -101,7 +101,7 @@ if __name__ == "__main__":
     env = OceanEnv(cfg=cfg, render_mode="rgb_array")
 
     try:
-        run_sequential_policy(env, steps=30)
+        run_sequential_policy(env, steps=10)
     finally:
         env.close()
         simulation_app.close()

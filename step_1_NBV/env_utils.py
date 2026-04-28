@@ -98,27 +98,53 @@ class EnvUtilsMixin:
         return R
 
     def _build_cam_pose(self) -> torch.Tensor:
-        """
-        Builds world-to-camera extrinsic matrix (E, 4, 4).
-
-        Isaac gives us camera-in-world:
-            R_wc (cam_orient): rotation from camera frame to world frame
-            t_w  (cam_pos):    camera position in world
-
-        We need world-to-camera:
-            R_cw = R_wc^T          (transpose, since R is orthogonal)
-            t_cw = -R_cw @ t_w    (re-express world origin in camera frame)
-        """
-        N    = self.num_envs
-        R_wc = self._quat_to_rot_matrix(self.cam_orient)          # (E, 3, 3) cam→world
-        R_cw = R_wc.transpose(1, 2)                               # (E, 3, 3) world→cam
-        t_cw = -torch.bmm(R_cw, self.cam_pos.unsqueeze(-1)).squeeze(-1)  # (E, 3)
-
+        N    = self.num_envs                                                                              
+        # cam_orient = sensor_rig.root_quat_w                                           
+        # _look_at_quat이 설정한 quaternion → rig body frame: X=fwd, Y=left, Z=up       
+        # _quat_to_rot_matrix: quaternion → 3x3 rotation matrix                         
+        # R_wc[:,i] = rig i번째 축의 world 좌표 표현                                    
+        # R_wc[:,0] ≈ [-0.97, 0.26, -0.17] (forward, 바위 방향)                         
+        # R_wc[:,1] ≈ [ 0.26, 0.97,  0.00] (left)                                       
+        # R_wc[:,2] ≈ [ 0.17,-0.07,  0.98] (up)                                         
+        R_wc = self._quat_to_rot_matrix(self.cam_orient)   # (E,3,3) rig→world          
+                                                                                        
+        # R_wc가 orthogonal이므로 역행렬 = 전치                                         
+        # R_cw: world 벡터 → rig body frame 벡터로 변환                                 
+        R_cw = R_wc.transpose(1, 2)                        # (E,3,3) world→rig          
+                    
+        # world origin을 rig body frame으로 표현                                        
+        # p_rig = R_cw @ p_world + t_cw 에서 p_world=0 이면 p_rig = t_cw
+        t_cw = -torch.bmm(R_cw, self.cam_pos.unsqueeze(-1)).squeeze(-1)  # (E,3)        
+                                                                                        
+        # 여기까지: world → rig body frame (X=fwd, Y=left, Z=up)                        
+        # _integrate_depth는 OpenCV frame (X=right, Y=down, Z=depth) 가정               
+        # → 추가 변환 P 필요                                                            
+                                                                                        
+        # P: rig frame → OpenCV frame 축 재배치                                         
+        # new X (right) = -old Y (left를 뒤집음)  → [0, -1, 0]                          
+        # new Y (down)  = -old Z (up을 뒤집음)    → [0,  0,-1]                          
+        # new Z (depth) = +old X (forward = depth) → [1,  0, 0]                         
+        P = torch.tensor([                                                              
+            [ 0., -1.,  0.],                                                            
+            [ 0.,  0., -1.],                                                            
+            [ 1.,  0.,  0.],                                                            
+        ], device=self.device)                             # (3,3)
+                                                                                        
+        # bmm을 위해 batch 차원 추가                                                    
+        P_batch = P.unsqueeze(0).expand(N, -1, -1)         # (E,3,3)
+                                                                                        
+        # P @ R_cw: world → rig → OpenCV 두 변환을 하나로 합성                          
+        R_std = torch.bmm(P_batch, R_cw)                   # (E,3,3) world→OpenCV cam   
+                                                                                        
+        # t도 동일한 P 적용: rig frame offset → OpenCV frame offset                     
+        t_std = torch.bmm(P_batch, t_cw.unsqueeze(-1)).squeeze(-1)  # (E,3)             
+                                                                                        
+        # 4x4 extrinsic matrix 조립                                                     
         pose = torch.eye(4, device=self.device).unsqueeze(0).expand(N, -1, -1).clone()
-        pose[:, :3, :3] = R_cw
-        pose[:, :3,  3] = t_cw
-        return pose    
-    
+        pose[:, :3, :3] = R_std                                                         
+        pose[:, :3,  3] = t_std
+        return pose                                        # (E,4,4)
+
     def _voxelize_gt_mesh(self, env_ids: Sequence[int]) -> None:
         vox        = self.cfg.tsdf.voxel_size
         Nx, Ny, Nz = self.cfg.tsdf.vol_dim

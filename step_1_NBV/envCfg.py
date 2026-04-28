@@ -19,7 +19,7 @@ class VisualConfig:
 class TSDFCfg:
     vol_dim:        tuple = (40,40,40)
     voxel_size:     float = 0.05
-    trunc_margin:   float = 0.25
+    trunc_margin:   float = 0.05
 
 @configclass
 class WaterParamRangeCfg:

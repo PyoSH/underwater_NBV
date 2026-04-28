@@ -50,12 +50,24 @@ class EnvRewardMixin:
         cam_pose = self._build_cam_pose()                      # (E, 4, 4)
         R = cam_pose[:, :3, :3]                                # (E, 3, 3)
         t = cam_pose[:, :3,  3]                                # (E, 3)
+        # cam_pos_w = self._camera.data.pos_w
+        # cam_quat_w = self._camera.data.quat_w
+        # R_wc = self._quat_to_rot_matrix(cam_quat_w)
+        # R_cw = R_wc.transpose(1,2)
+        # t_cw = -torch.bmm(R_cw, cam_pos_w.unsqueeze(-1)).squeeze(-1)        
 
         # v_cam = R @ v_world + t
         # bmm expects (E, 3, 3) @ (E, 3, N_vox) → (E, 3, N_vox)
         vox_cam = torch.bmm(R, vox_world.permute(0, 2, 1))    # (E, 3, N_vox)
         vox_cam = vox_cam + t.unsqueeze(-1)                    # (E, 3, N_vox)
         vox_cam = vox_cam.permute(0, 2, 1)                     # (E, N_vox, 3)
+
+        surf_flat = self._surf_vol[0].flatten()  # (N_vox,) bool                            
+        # if surf_flat.any():                                                                 
+        #     surf_cam = vox_cam[0][surf_flat]     # surf voxel들의 camera frame 좌표         
+        #     print(f"[AXIS] surf cam_x: {surf_cam[:,0].min():.3f} ~ {surf_cam[:,0].max():.3f}")                                                         
+        #     print(f"[AXIS] surf cam_z: {surf_cam[:,2].min():.3f} ~ {surf_cam[:,2].max():.3f}")
+        #     print(f"[AXIS] surf behind cam (z<=0): {(surf_cam[:,2] <= 0).sum().item()}/{surf_flat.sum().item()}")
 
         vox_z = vox_cam[..., 2]                                # (E, N_vox)
         vox_x = vox_cam[..., 0]
@@ -69,6 +81,7 @@ class EnvRewardMixin:
 
         H = self._camera.data.output["distance_to_camera"].shape[1]
         W = self._camera.data.output["distance_to_camera"].shape[2]
+        
 
         proj_u_int = proj_u.long()
         proj_v_int = proj_v.long()
@@ -80,6 +93,13 @@ class EnvRewardMixin:
             (proj_v_int >= 0)              &
             (proj_v_int <  H)
         )                                                      # (E, N_vox) bool
+        # if surf_flat.any():                                                                 
+        #     surf_u = proj_u[0][surf_flat]
+        #     surf_v = proj_v[0][surf_flat]                                                   
+        #     print(f"[PROJ] surf proj_u: {surf_u.min():.1f} ~ {surf_u.max():.1f}  (W={W})")
+        #     print(f"[PROJ] surf proj_v: {surf_v.min():.1f} ~ {surf_v.max():.1f}  (H={H})")  
+        #     surf_inbounds = in_bounds[0][surf_flat]                                         
+        #     print(f"[PROJ] surf in_bounds: {surf_inbounds.sum().item()}/{surf_flat.sum().item()}")
 
         # ── 5. Sample depth image at projected pixels ──────────────────────────
         depth_img = self._camera.data.output["distance_to_camera"]
@@ -99,10 +119,19 @@ class EnvRewardMixin:
         sdf  = sampled_depth - vox_z                           # (E, N_vox)
         tsdf = (sdf / trunc).clamp(-1.0, 1.0)                  # (E, N_vox)
 
+        # if surf_flat.any():                                                                 
+        #     surf_sdf   = sdf[0][surf_flat]
+        #     surf_depth = sampled_depth[0][surf_flat]                                        
+        #     surf_vz    = vox_z[0][surf_flat]                                                
+        #     print(f"[SDF]  surf sampled_depth: {surf_depth.min():.3f} ~ {surf_depth.max():.3f}")                                                            
+        #     print(f"[SDF]  surf vox_z:         {surf_vz.min():.3f} ~ {surf_vz.max():.3f}")  
+        #     print(f"[SDF]  surf sdf:           {surf_sdf.min():.3f} ~ {surf_sdf.max():.3f}")
+        #     print(f"[SDF]  surf sdf>=-trunc:   {(surf_sdf >= -trunc).sum().item()}/{surf_flat.sum().item()}")
+
         # Only update voxels that are:
         #  - projected inside image (in_bounds)
         #  - within truncation band (sdf >= -trunc)
-        update_mask = in_bounds & (sdf >= -trunc)              # (E, N_vox)
+        update_mask = in_bounds & (sdf >= -trunc) & (sdf <= trunc)              # (E, N_vox)
 
         # ── 7. Running average TSDF update ────────────────────────────────────
         w_old = self._weight_vol.reshape(E, N_vox)             # (E, N_vox)
@@ -126,21 +155,6 @@ class EnvRewardMixin:
         return torch.mean(patch_std, dim=(1,2))
 
     def _compute_curr_coverage(self) -> torch.Tensor:
-        """
-        Computes coverage rate per env from the current TSDF volume.
-        
-        A voxel counts as 'observed surface' when:
-        - weight > 0  : seen by at least one depth frame
-        - |tsdf| < 1.0: near a surface (not free space or behind surface)
-
-        Returns: coverage (num_envs,) float32, range [0, 1]
-        """
-        observed = (
-            (self._weight_vol > 0) &
-            (self._tsdf_vol.abs() < 1.0)
-        )                                                      # (E, Nx, Ny, Nz) bool
-
-        count    = observed.sum(dim=(1, 2, 3)).float()         # (E,)
-        coverage = count / self._total_surf_voxels             # (E,)  normalized
-
-        return coverage.clamp(0.0, 1.0)
+      observed = (self._weight_vol > 0) & self._surf_vol   # GT surface만 카운트      
+      count    = observed.sum(dim=(1, 2, 3)).float()                                  
+      return (count / self._total_surf_voxels).clamp(0.0, 1.0)
