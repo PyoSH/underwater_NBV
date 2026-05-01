@@ -287,7 +287,7 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         self._depth_buffer[:, -1, :, :] = curr_state # depth map은 (num_envs, h, w)아닌지?
 
         curr_contrast = self._compute_patch_contrast(curr_obs)
-        print(f"[CONTRAST] shape={curr_obs.shape}, contrast={curr_contrast}")
+        # print(f"[CONTRAST] shape={curr_obs.shape}, contrast={curr_contrast}")
         self.curr_contrast = curr_contrast
 
         # number data vector (normalizaiton needed)
@@ -321,9 +321,24 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         self._integrate_depth()         
         # self._save_weight_pc(env_id=0)   
         
-        retval = torch.full((self.num_envs,),10.0, device = self.device)
-        # return reward_coverage + reward_quality - reward_penalty
-        return retval
+        self.curr_coverage  = self._compute_curr_coverage()
+        delta_coverage      = self.curr_coverage - self._prev_coverage
+        self._prev_coverage = self.curr_coverage.clone()
+
+        delta_contrast      = self.curr_contrast - self._prev_contrast
+        self._prev_contrast = self.curr_contrast.clone()
+
+        dist_moved          = torch.norm(self.cam_pos-self._prev_cam_pos, dim=-1)
+        self._prev_cam_pos  = self.cam_pos.clone()
+        cfg = self.cfg
+
+        reward_coverage = cfg.k_c* delta_coverage
+        reward_contrast = cfg.lambda_q  * delta_contrast
+        reward_penalty  = (cfg.k_x * dist_moved) + (cfg.c_step)
+
+        # retval = torch.full((self.num_envs,),10.0, device = self.device)
+        
+        return reward_coverage + reward_contrast - reward_penalty
     
     # ── 종료 조건 ─────────────────────────────────────────────────────────────
 
