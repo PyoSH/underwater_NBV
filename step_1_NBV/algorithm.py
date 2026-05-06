@@ -13,11 +13,13 @@ from torch.distributions import Categorical
 @dataclass
 class PPOConfig:                                                                    
     ppo_epochs:     int   = 4
-    minibatch_size: int   = 512
+    minibatch_size: int   = 256
     clip_eps:       float = 0.2                                                     
-    ent_coef:       float = 0.01
+    ent_coef:       float = 0.05
     vf_coef:        float = 0.5                                                     
     max_grad_norm:  float = 0.5
+    gamma:          float = 0.99
+    lam:            float = 0.95
                                                                                     
 
 # ══════════════════════════════════════════════════════════════════════════════    
@@ -147,8 +149,10 @@ class RolloutBuffer:
             "returns":    self.returns   .reshape(TE),                              
             "advantages": self.advantages.reshape(TE),
             "old_values": self.values    .reshape(TE),                              
-        }                                                                           
+        }
 
+    def reset(self):
+        self.ptr = 0                                          
                                                                                     
 # ══════════════════════════════════════════════════════════════════════════════
 # 유틸
@@ -207,9 +211,14 @@ def ppo_update(actor: Actor, critic: Critic,
                 -mb_adv * ratio.clamp(1 - cfg.clip_eps, 1 + cfg.clip_eps),          
             ).mean()                                                                
 
-            v  = critic(data["obs_depth"][mb])                                      
-            vl = F.mse_loss(v, data["returns"][mb])
-                                                                                    
+            v = critic(data["obs_depth"][mb])
+            v_clipped = data["returns"][mb] + (v-data["old_values"][mb]).clamp(-cfg.clip_eps, cfg.clip_eps)
+            
+            vl = torch.max(
+                F.mse_loss(v,           data["returns"][mb]),
+                F.mse_loss(v_clipped,   data["returns"][mb]),
+            )
+
             loss = pg + cfg.vf_coef * vl - cfg.ent_coef * entropy.mean()            
             optimizer.zero_grad()                                                   
             loss.backward()                                                         

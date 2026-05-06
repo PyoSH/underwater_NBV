@@ -21,10 +21,10 @@ class EnvRewardMixin:
         E          = self.num_envs
 
         K = self._camera.data.intrinsic_matrices
-        fx = K[:, 0, 0]
-        fy = K[:, 1, 1]
-        cx = K[:, 0, 2]
-        cy = K[:, 1, 2]
+        fx = K[:, 0, 0].unsqueeze(1)
+        fy = K[:, 1, 1].unsqueeze(1)
+        cx = K[:, 0, 2].unsqueeze(1)
+        cy = K[:, 1, 2].unsqueeze(1)
 
         # ── 1. Build voxel center grid (shared across envs) ───────────────────
         # Do this once and cache — grid doesn't change between steps

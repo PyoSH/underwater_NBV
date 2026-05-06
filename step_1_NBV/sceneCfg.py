@@ -141,7 +141,7 @@ class OceanSceneCfg(InteractiveSceneCfg):
             color=(1.0, 1.0, 1.0),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(0.06, 0.5, 0.0),
+            pos=(0.055, 0.185, -0.125),
             rot=(0.7071, 0.0, -0.7071, 0.0),   # [w, x, y, z]
         ),
     )
@@ -154,7 +154,7 @@ class OceanSceneCfg(InteractiveSceneCfg):
             color=(1.0, 1.0, 1.0),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(0.06, -0.5, 0.0),
+            pos=(0.055, -0.185, -0.125),
             rot=(0.7071, 0.0, -0.7071, 0.0),   # [w, x, y, z]
         ),
     )

@@ -332,23 +332,24 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         self._prev_cam_pos  = self.cam_pos.clone()
         cfg = self.cfg
 
+        goal_reached = (self.curr_coverage >= self.cfg.coverage_terminal).float()
+        success_reward = goal_reached * cfg.coverage_bonus
+
         reward_coverage = cfg.k_c* delta_coverage
         reward_contrast = cfg.lambda_q  * delta_contrast
         reward_penalty  = (cfg.k_x * dist_moved) + (cfg.c_step)
 
-        # retval = torch.full((self.num_envs,),10.0, device = self.device)
+        self._last_rew_coverage = reward_coverage   # (num_envs,)                           
+        self._last_rew_contrast = reward_contrast                                           
+        self._last_rew_penalty  = reward_penalty 
+        self._last_success_reward = success_reward
         
-        return reward_coverage + reward_contrast - reward_penalty
+        return reward_coverage + reward_contrast - reward_penalty + success_reward
     
     # ── 종료 조건 ─────────────────────────────────────────────────────────────
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        goal_reached   = self.curr_coverage >= self.cfg.coverage_terminal
-
-        dist_cam       = torch.norm(self.cam_pos - self.rock_pos, dim=-1)
-        out_of_bounds  = dist_cam > self.cfg.psi_max
-
-        terminated     = goal_reached | out_of_bounds
+        terminated     = self.curr_coverage >= self.cfg.coverage_terminal
         truncated      = self.episode_length_buf >= self.max_episode_length - 1
 
         return terminated, truncated
@@ -360,14 +361,14 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
 
         cfg = self.cfg
         n   = len(env_ids)
-        env_ids_t = torch.tensor(env_ids, device=self.device)
+        env_ids_t = torch.as_tensor(env_ids, dtype = torch.long, device=self.device)
 
-        # self._sph_theta[env_ids]    = torch.rand(n, device=self.device) * 2.0 * math.pi
-        # self._sph_phi[env_ids]      = torch.rand(n) * (cfg.phi_max - cfg.phi_min) + cfg.phi_min
-        # self._sph_psi[env_ids]      = torch.rand(n, device=self.device) * (cfg.psi_max - cfg.psi_min) + cfg.psi_min
-        self._sph_theta[env_ids]    = 0.0
-        self._sph_phi[env_ids]      = math.radians(89.0)
-        self._sph_psi[env_ids]      = 1.0
+        self._sph_theta[env_ids]    = torch.rand(n, device=self.device) * 2.0 * math.pi
+        self._sph_phi[env_ids]      = torch.rand(n, device=self.device) * (cfg.phi_max - cfg.phi_min) + cfg.phi_min
+        self._sph_psi[env_ids]      = torch.rand(n, device=self.device) * (cfg.psi_max - cfg.psi_min) + cfg.psi_min
+        # self._sph_theta[env_ids]    = 0.0
+        # self._sph_phi[env_ids]      = math.radians(89.0)
+        # self._sph_psi[env_ids]      = 1.0
         
         self._light_level[env_ids]  = cfg.light_level_init
 

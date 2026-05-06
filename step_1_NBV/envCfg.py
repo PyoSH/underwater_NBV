@@ -46,7 +46,7 @@ class OceanEnvCfg(DirectRLEnvCfg):
     scene: OceanSceneCfg = OceanSceneCfg(num_envs=1, env_spacing=10.0)
 
     # ── 에피소드 ─────────────────────────────────────────────────────────────
-    episode_length_s: float = 200000.0
+    episode_length_s: float = 5.0
 
     # ── RL 공간 크기 ─────────────────────────────────────────────────────────
     
@@ -72,7 +72,7 @@ class OceanEnvCfg(DirectRLEnvCfg):
     phi_min:        float = math.radians(10)
     phi_max:        float = math.radians(80)
     psi_min:        float = 0.5
-    psi_max:        float = 6.0
+    psi_max:        float = 4.5
 
     light_level_init:           int = 1
     light_intensity_per_level:  float = 100_000.0 #2_000_000.0
@@ -81,11 +81,12 @@ class OceanEnvCfg(DirectRLEnvCfg):
     mesh_root:  str = join("isaac-sim", "extsUser","OceanSim", "oceansim_asset", "collected_rock")
 
     # ── 보상 가중치 ──────────────────────────────────────────────────────────
-    k_c:                float = 1.0
-    lambda_q:           float = 1.0
-    k_x:                float = 0.02
-    c_step:             float = 2.0
-    coverage_terminal:  float = 0.96
+    k_c:                float = 50.0    # 1.0
+    lambda_q:           float = 0.1     # 1.0
+    k_x:                float = 0.02    # 0.02
+    c_step:             float = 0.01     # 2.0
+    coverage_terminal:  float = 0.86    # 0.96
+    coverage_bonus:     float = 100.0
 
     # ── 카메라 센서 ──────────────────────────────────────────────────────────
     water_dr:           WaterParamRangeCfg = WaterParamRangeCfg()
@@ -93,5 +94,5 @@ class OceanEnvCfg(DirectRLEnvCfg):
     
 
     # ── 디버그 시각화 ─────────────────────────────────────────────────────────
-    debug_vis:        bool = True  # 방향 마커 활성화 여부
+    debug_vis:        bool = False  # 방향 마커 활성화 여부
     debug_vis_env_id: int  = -1     # -1: 전체 env, 0~N-1: 특정 env 만 시각화
