@@ -61,6 +61,11 @@ class Actor(nn.Module):
         return (Categorical(logits=self.pose_head(feat)),
                 Categorical(logits=self.light_head(feat)))                          
 
+    def greedy(self, img: torch.Tensor, scalar: torch.Tensor):
+        """Deterministic action: argmax of logits (for evaluation)."""
+        pd, ld = self._dists(img, scalar)
+        return pd.logits.argmax(dim=-1), ld.logits.argmax(dim=-1)
+
     def sample(self, img: torch.Tensor, scalar: torch.Tensor):                      
         """(pose_act, light_act, joint_logprob, joint_entropy)"""
         pd, ld = self._dists(img, scalar)                                           
