@@ -10,7 +10,7 @@ parser = argparse.ArgumentParser(description="OceanNBV PPO")
 parser.add_argument("--num_envs",       type=int,   default=1)                      
 parser.add_argument("--total_steps",    type=int,   default=500_000)             
 parser.add_argument("--rollout_steps",  type=int,   default=256)                    
-parser.add_argument("--ppo_epochs",     type=int,   default=4)                      
+parser.add_argument("--ppo_epochs",     type=int,   default=10)                      
 parser.add_argument("--minibatch_size", type=int,   default=512)                    
 parser.add_argument("--lr",             type=float, default=3e-4)                   
 parser.add_argument("--gamma",          type=float, default=0.99)                   
@@ -36,7 +36,6 @@ if "--enable_cameras" not in sys.argv:
 args = parser.parse_args()                                                          
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app                                                   
-                
 # ── AppLauncher 이후 import ───────────────────────────────────────────────────    
 import numpy as np
 import torch                                                                        
@@ -45,7 +44,7 @@ import wandb
 sys.path.insert(0, os.path.dirname(__file__))
 from envCfg   import OceanEnvCfg                                                    
 from env      import OceanEnv                                                       
-from algorithm import (Actor, Critic, RolloutBuffer, PPOConfig,
+from algorithm2 import (Actor, Critic, RolloutBuffer, PPOConfig,
                         make_env_action, explained_variance, ppo_update)            
                                                                                     
 
@@ -67,8 +66,8 @@ def run_eval(env, actor, device, n_episodes: int) -> dict:
         for _ in range(max_steps):
             if min(completed) >= n_episodes:
                 break
-            pose_act, light_act = actor.greedy(obs_img, obs_scalar)
-            env_action = make_env_action(pose_act, light_act, E, device)
+            pose_act = actor.greedy(obs_img, obs_scalar)
+            env_action = make_env_action(pose_act, E, device)
             next_obs, reward, terminated, truncated, _ = env.step(env_action)
 
             ep_return += reward
@@ -110,8 +109,8 @@ def main():
     T      = args.rollout_steps
                                                                                     
     # ── 네트워크 & 옵티마이저 ─────────────────────────────────────────────────    
-    actor     = Actor (img_ch=K_img, scalar_dim=5).to(device)                       
-    critic    = Critic(depth_ch=K_dep).to(device)                                   
+    actor     = Actor (img_ch=K_img, scalar_dim=3).to(device)                       
+    critic    = Critic(depth_ch=K_dep, scalar_dim=3).to(device)                                   
     optimizer = torch.optim.Adam(                                                   
         list(actor.parameters()) + list(critic.parameters()),
         lr=args.lr, eps=1e-5,                                                       
@@ -151,7 +150,7 @@ def main():
         wandb.watch(critic, log="gradients", log_freq=200)                          
 
     # ── 버퍼 & 에피소드 트래커 ───────────────────────────────────────────────     
-    buf = RolloutBuffer(T, E, K_img, K_dep, H, W, scalar_dim=5, device=device)
+    buf = RolloutBuffer(T, E, K_img, K_dep, H, W, scalar_dim=3, device=device)
                                                                                     
     obs, _     = env.reset()
     obs_img    = obs["policy"]                                                      
@@ -179,26 +178,25 @@ def main():
         buf.reset()
         actor.eval(); critic.eval()
 
-        rew_cov_list, rew_cont_list, rew_pen_list, rew_succ_list = [], [], [], []
+        rew_cov_list, rew_pen_list, rew_succ_list = [], [], []
                                                                                     
         # ── Rollout 수집 ──────────────────────────────────────────────────────    
         for _ in range(T):                                                          
-            with torch.no_grad():                                                   
-                pose_act, light_act, logprob, _ = actor.sample(obs_img, obs_scalar)
-                value = critic(obs_depth)                                           
+            with torch.no_grad():
+                pose_act, logprob, _ = actor.sample(obs_img, obs_scalar)
+                value = critic(obs_depth, obs_scalar)
 
-            env_action = make_env_action(pose_act, light_act, E, device)
+            env_action = make_env_action(pose_act, E, device)
             next_obs, reward, terminated, truncated, _ = env.step(env_action)
-            rew_cov_list .append(env._last_rew_coverage .mean().item())
-            rew_cont_list.append(env._last_rew_contrast .mean().item())
-            rew_pen_list .append(env._last_rew_penalty  .mean().item())
+            rew_cov_list .append(env._last_rew_coverage  .mean().item())
+            rew_pen_list .append(env._last_rew_penalty   .mean().item())
             rew_succ_list.append(env._last_success_reward.mean().item())
             # done = (terminated | truncated).float()
             terminated_f    = terminated.float()
             done_any        = (terminated | truncated)
                 
-            buf.add(obs_img, obs_scalar, obs_depth,                                 
-                    pose_act, light_act, logprob, reward, terminated_f, value)
+            buf.add(obs_img, obs_scalar, obs_depth,
+                    pose_act, logprob, reward, terminated_f, value)
                                                                                     
             ep_return += reward
             ep_len    += 1                                                          
@@ -218,7 +216,7 @@ def main():
 
         # ── GAE & PPO ─────────────────────────────────────────────────────────    
         with torch.no_grad():
-            last_val = critic(obs_depth)                                            
+            last_val = critic(obs_depth, obs_scalar)                                            
         buf.compute_gae(last_val, args.gamma, args.gae_lambda)                      
 
         actor.train(); critic.train()                                               
@@ -240,15 +238,15 @@ def main():
             "train/fps":                fps,
             "train/global_step":        global_step,
             "reward/coverage":          np.mean(rew_cov_list),
-            "reward/contrast":          np.mean(rew_cont_list),
             "reward/penalty":           np.mean(rew_pen_list),
             "reward/success":           np.mean(rew_succ_list),
+            "train/coverage_mean":      env.curr_coverage.mean().item(),
             "env0/theta_deg":           math.degrees(env._sph_theta[0].item()),
             "env0/phi_deg":             math.degrees(env._sph_phi[0].item()),
             "env0/psi":                 env._sph_psi[0].item(),
-            "env0/light_level":         env._light_level[0].item(),
             "env0/coverage":            env.curr_coverage[0].item(),
-            "env0/contrast":            env.curr_contrast[0].item(),
+            "env0/surf_voxels":         env._total_surf_voxels[0].item(),
+            "env0/weight_filled":       (env._weight_vol[0] > 0).float().mean().item(),
         }                                                                           
 
         if finished["returns"]:
@@ -261,19 +259,7 @@ def main():
                 
         if use_wandb:                                                               
             wandb.log(log, step=global_step)
-                                                                                    
-        # if rollout_idx % 10 == 0:
-        #     cov = f"  cov={log['episode/mean_coverage']:.3f}" if "episode/mean_coverage" in log else ""                                              
-        #     print(
-        #         f"[{global_step:9d}]"                                               
-        #         f"  rew={log['train/mean_step_reward']:+.3f}"
-        #         f"  pl={stats['policy_loss']:.4f}"                                  
-        #         f"  vl={stats['value_loss']:.4f}"                                   
-        #         f"  ent={stats['entropy']:.3f}"                                     
-        #         f"  ev={ev:.3f}"                                                    
-        #         f"{cov}  fps={fps}",
-        #         flush=True,                                                         
-        #     )   
+                                  
         if rollout_idx % 10 == 0:
             cov = f"  cov={log['episode/mean_coverage']:.3f}" if "episode/mean_coverage" in log else ""
                                                                                             
@@ -297,14 +283,13 @@ def main():
                 f"{cov}  fps={fps}",                                                        
                 flush=True,
             )                                                                               
-            print(          
-                f"  [reward]"                                                         
-                f"  cov={env._last_rew_coverage.mean().item():+.4f}"                            
-                f"  cont={env._last_rew_contrast.mean().item():+.4f}"
-                f"  penalty={-env._last_rew_penalty.mean().item():.4f}"                         
+            print(
+                f"  [reward]"
+                f"  cov={env._last_rew_coverage.mean().item():+.4f}"
+                f"  penalty={-env._last_rew_penalty.mean().item():.4f}"
                 f"  success={env._last_success_reward.mean().item():+.4f}"
-                f"  net={buf.rewards.mean().item():+.4f}",                              
-                flush=True,                                                                     
+                f"  net={buf.rewards.mean().item():+.4f}",
+                flush=True,
             )               
             print(
                 f"  [tsdf]"
@@ -350,10 +335,12 @@ def main():
                 wandb.save(str(ckpt_path))
             print(f"[ckpt] → {ckpt_path}", flush=True)                              
 
-    env.close()                                                                     
-    simulation_app.close()
+    env.close()
+    
     if use_wandb:
-        wandb.finish()                                                              
+        wandb.finish()
+
+    simulation_app.close()
 
                                                                                     
 if __name__ == "__main__":

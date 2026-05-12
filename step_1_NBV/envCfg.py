@@ -9,9 +9,9 @@ from os.path import join
 
 @configclass
 class VisualConfig:
-    h:  int = 84
-    w:  int = 84
-    k:  int = 5 # num of past frames
+    h:  int = 64    # 84
+    w:  int = 64    # 84
+    k:  int = 5     # num of past frames
     num_seq_actor:     int = 6
     num_seq_critic:    int = 6
 
@@ -56,10 +56,10 @@ class OceanEnvCfg(DirectRLEnvCfg):
     state_space:        tuple = (visual.num_seq_critic, visual.h, visual.w)    # depth map sequence for critic
 
     # 총 5개 = 구면좌표계 3개 (azimuth, elevation, distance) + contrast 1개 + 조명 밝기 단계 1개  
-    num_scalar_obs: int = 5
+    num_scalar_obs: int = 3 # 5
 
     # 6개 (구면좌표계 3개에 대해 이산 +-) + 3개 (조명 3가지 이산 +,0,-)
-    action_space:   int = 9
+    action_space:   int = 6
 
     # 시뮬레이션 스텝당 정책 업데이트 횟수 (policy dt = decimation * sim dt)
     decimation: int = 1
@@ -74,8 +74,8 @@ class OceanEnvCfg(DirectRLEnvCfg):
     psi_min:        float = 0.5
     psi_max:        float = 4.5
 
-    light_level_init:           int = 1
-    light_intensity_per_level:  float = 100_000.0 #2_000_000.0
+    light_level_init:           int = 7
+    light_intensity_per_level:  float = 200_000.0 #2_000_000.0 | 100_000.0
 
     tsdf:       TSDFCfg = TSDFCfg()
     mesh_root:  str = join("isaac-sim", "extsUser","OceanSim", "oceansim_asset", "collected_rock")
@@ -83,9 +83,9 @@ class OceanEnvCfg(DirectRLEnvCfg):
     # ── 보상 가중치 ──────────────────────────────────────────────────────────
     k_c:                float = 50.0    # 1.0
     lambda_q:           float = 0.1     # 1.0
-    k_x:                float = 0.02    # 0.02
-    c_step:             float = 0.01     # 2.0
-    coverage_terminal:  float = 0.86    # 0.96
+    k_x:                float = 0.00    # 0.02
+    c_step:             float = 0.08     # 2.0
+    coverage_terminal:  float = 0.90    # 0.96
     coverage_bonus:     float = 100.0
 
     # ── 카메라 센서 ──────────────────────────────────────────────────────────

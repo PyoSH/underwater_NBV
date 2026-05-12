@@ -28,22 +28,22 @@ wall_material = sim_utils.PreviewSurfaceCfg(
     roughness=1.0,                # 거칠기를 최대화하여 정반사(Specular) 억제
 )
 
-wall_mat_north = sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0), roughness=1.0, metallic=0.0)
-wall_mat_south = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0), roughness=1.0, metallic=0.0)
-wall_mat_east  = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0), roughness=1.0, metallic=0.0)
-wall_mat_west  = sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 1.0, 0.0), roughness=1.0, metallic=0.0)
+# wall_mat_north = sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0), roughness=1.0, metallic=0.0)
+# wall_mat_south = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0), roughness=1.0, metallic=0.0)
+# wall_mat_east  = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0), roughness=1.0, metallic=0.0)
+# wall_mat_west  = sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 1.0, 0.0), roughness=1.0, metallic=0.0)
 
 @configclass
 class OceanSceneCfg(InteractiveSceneCfg):
-    """수중 탐색 씬."""
- 
+    """수중 탐색 씬.""" 
     # ── 해저면 (정적 충돌체) ─────────────────────────────────────────────────
     seafloor: AssetBaseCfg = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Seafloor",
         spawn=sim_utils.CuboidCfg(
             size=(10.0, 10.0, 0.25),
             collision_props=sim_utils.CollisionPropertiesCfg(),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.15, 0.15, 0.15)),
+            # visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.15, 0.15, 0.15)),
+            visual_material=wall_material,
         ),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, floorDepth)),
     )

@@ -41,43 +41,37 @@ def _build_cnn(in_ch: int) -> nn.Sequential:
                 
 class Actor(nn.Module):
     """
-    이미지(K,H,W) + scalar(5) → pose(6) / light(3) 독립 Categorical.
-    _apply_action() 이 pose·light 각각 argmax 를 취하는 구조에 대응.                
-    """                                                                             
-    def __init__(self, img_ch: int = 6, scalar_dim: int = 5,                        
-                n_pose: int = 6, n_light: int = 3):                                
-        super().__init__()                                                          
-        self.cnn  = _build_cnn(img_ch)                                              
-        self.mlp  = nn.Sequential(                                                  
-            nn.Linear(_CNN_OUT + scalar_dim, 512), nn.ReLU(),                       
+    이미지(K,H,W) + scalar(3) → pose(6) Categorical.
+    """
+    def __init__(self, img_ch: int = 6, scalar_dim: int = 3, n_pose: int = 6):
+        super().__init__()
+        self.cnn  = _build_cnn(img_ch)
+        self.mlp  = nn.Sequential(
+            nn.Linear(_CNN_OUT + scalar_dim, 512), nn.ReLU(),
             nn.Linear(512, 256),                   nn.ReLU(),
-        )                                                                           
-        self.pose_head  = nn.Linear(256, n_pose)
-        self.light_head = nn.Linear(256, n_light)                                   
-                
-    def _dists(self, img: torch.Tensor, scalar: torch.Tensor):                      
+        )
+        self.pose_head = nn.Linear(256, n_pose)
+
+    def _dist(self, img: torch.Tensor, scalar: torch.Tensor):
         feat = self.cnn(img)
-        feat = self.mlp(torch.cat([feat, scalar], dim=-1))                          
-        return (Categorical(logits=self.pose_head(feat)),
-                Categorical(logits=self.light_head(feat)))                          
+        feat = self.mlp(torch.cat([feat, scalar], dim=-1))
+        return Categorical(logits=self.pose_head(feat))
 
     def greedy(self, img: torch.Tensor, scalar: torch.Tensor):
         """Deterministic action: argmax of logits (for evaluation)."""
-        pd, ld = self._dists(img, scalar)
-        return pd.logits.argmax(dim=-1), ld.logits.argmax(dim=-1)
+        return self._dist(img, scalar).logits.argmax(dim=-1)
 
-    def sample(self, img: torch.Tensor, scalar: torch.Tensor):                      
-        """(pose_act, light_act, joint_logprob, joint_entropy)"""
-        pd, ld = self._dists(img, scalar)                                           
-        pa, la = pd.sample(), ld.sample()                                           
-        return pa, la, pd.log_prob(pa) + ld.log_prob(la), pd.entropy() + ld.entropy()                                                                        
-                
-    def evaluate(self, img: torch.Tensor, scalar: torch.Tensor,                     
-                pose_act: torch.Tensor, light_act: torch.Tensor):
-        """(joint_logprob, joint_entropy)"""                                        
-        pd, ld = self._dists(img, scalar)
-        return (pd.log_prob(pose_act) + ld.log_prob(light_act),                     
-                pd.entropy()          + ld.entropy())
+    def sample(self, img: torch.Tensor, scalar: torch.Tensor):
+        """(pose_act, logprob, entropy)"""
+        pd = self._dist(img, scalar)
+        pa = pd.sample()
+        return pa, pd.log_prob(pa), pd.entropy()
+
+    def evaluate(self, img: torch.Tensor, scalar: torch.Tensor,
+                 pose_act: torch.Tensor):
+        """(logprob, entropy)"""
+        pd = self._dist(img, scalar)
+        return pd.log_prob(pose_act), pd.entropy()
                                                                                     
                 
 class Critic(nn.Module):                                                            
@@ -100,34 +94,32 @@ class Critic(nn.Module):
 # ══════════════════════════════════════════════════════════════════════════════
                                                                                     
 class RolloutBuffer:
-    def __init__(self, T: int, E: int, K_img: int, K_dep: int,                      
-                H: int, W: int, scalar_dim: int, device):                          
-        self.T, self.E, self.ptr = T, E, 0                                          
-        kw = dict(device=device)                                                    
-        self.obs_img    = torch.zeros(T, E, K_img, H, W, **kw)                      
-        self.obs_scalar = torch.zeros(T, E, scalar_dim,  **kw)                      
-        self.obs_depth  = torch.zeros(T, E, K_dep, H, W, **kw)                      
-        self.pose_acts  = torch.zeros(T, E, dtype=torch.long, **kw)                 
-        self.light_acts = torch.zeros(T, E, dtype=torch.long, **kw)                 
-        self.logprobs   = torch.zeros(T, E, **kw)                                   
-        self.rewards    = torch.zeros(T, E, **kw)                                   
-        self.dones      = torch.zeros(T, E, **kw)                                   
+    def __init__(self, T: int, E: int, K_img: int, K_dep: int,
+                 H: int, W: int, scalar_dim: int, device):
+        self.T, self.E, self.ptr = T, E, 0
+        kw = dict(device=device)
+        self.obs_img    = torch.zeros(T, E, K_img, H, W, **kw)
+        self.obs_scalar = torch.zeros(T, E, scalar_dim,  **kw)
+        self.obs_depth  = torch.zeros(T, E, K_dep, H, W, **kw)
+        self.pose_acts  = torch.zeros(T, E, dtype=torch.long, **kw)
+        self.logprobs   = torch.zeros(T, E, **kw)
+        self.rewards    = torch.zeros(T, E, **kw)
+        self.dones      = torch.zeros(T, E, **kw)
         self.values     = torch.zeros(T, E, **kw)
-        self.returns:    torch.Tensor                                               
-        self.advantages: torch.Tensor                                               
+        self.returns:    torch.Tensor
+        self.advantages: torch.Tensor
 
-    def add(self, obs_img, obs_scalar, obs_depth,                                   
-            pose_act, light_act, logprob, reward, done, value):
-        t = self.ptr                                                                
+    def add(self, obs_img, obs_scalar, obs_depth,
+            pose_act, logprob, reward, done, value):
+        t = self.ptr
         self.obs_img[t]    = obs_img
-        self.obs_scalar[t] = obs_scalar                                             
+        self.obs_scalar[t] = obs_scalar
         self.obs_depth[t]  = obs_depth
-        self.pose_acts[t]  = pose_act                                               
-        self.light_acts[t] = light_act                                              
+        self.pose_acts[t]  = pose_act
         self.logprobs[t]   = logprob
-        self.rewards[t]    = reward                                                 
+        self.rewards[t]    = reward
         self.dones[t]      = done
-        self.values[t]     = value                                                  
+        self.values[t]     = value
         self.ptr += 1
                                                                                     
     def compute_gae(self, last_value: torch.Tensor, gamma: float, lam: float):      
@@ -143,17 +135,16 @@ class RolloutBuffer:
         self.advantages = adv                                                       
                                                                                     
     def flat(self) -> dict[str, torch.Tensor]:
-        TE = self.T * self.E                                                        
-        return {                                                                    
+        TE = self.T * self.E
+        return {
             "obs_img":    self.obs_img   .reshape(TE, *self.obs_img.shape[2:]),
-            "obs_scalar": self.obs_scalar.reshape(TE, *self.obs_scalar.shape[2:]),  
+            "obs_scalar": self.obs_scalar.reshape(TE, *self.obs_scalar.shape[2:]),
             "obs_depth":  self.obs_depth .reshape(TE, *self.obs_depth.shape[2:]),
-            "pose_acts":  self.pose_acts .reshape(TE),                              
-            "light_acts": self.light_acts.reshape(TE),
-            "logprobs":   self.logprobs  .reshape(TE),                              
-            "returns":    self.returns   .reshape(TE),                              
+            "pose_acts":  self.pose_acts .reshape(TE),
+            "logprobs":   self.logprobs  .reshape(TE),
+            "returns":    self.returns   .reshape(TE),
             "advantages": self.advantages.reshape(TE),
-            "old_values": self.values    .reshape(TE),                              
+            "old_values": self.values    .reshape(TE),
         }
 
     def reset(self):
@@ -163,15 +154,10 @@ class RolloutBuffer:
 # 유틸
 # ══════════════════════════════════════════════════════════════════════════════    
 
-def make_env_action(pose_idx: torch.Tensor, light_idx: torch.Tensor,                
-                    E: int, device) -> torch.Tensor:
-    """                                                                             
-    (E,) index → (E, 9) one-hot.
-    슬롯 0-5: pose one-hot,  슬롯 6-8: light one-hot.                               
-    """                                                                             
-    act = torch.zeros(E, 9, device=device)                                          
-    act.scatter_(1, pose_idx.unsqueeze(1),        1.0)                              
-    act.scatter_(1, (light_idx + 6).unsqueeze(1), 1.0)
+def make_env_action(pose_idx: torch.Tensor, E: int, device) -> torch.Tensor:
+    """(E,) index → (E, 6) one-hot."""
+    act = torch.zeros(E, 6, device=device)
+    act.scatter_(1, pose_idx.unsqueeze(1), 1.0)
     return act                                                                      
                 
                                                                                     
@@ -205,8 +191,8 @@ def ppo_update(actor: Actor, critic: Critic,
                 continue
                                                                                     
             new_logp, entropy = actor.evaluate(
-                data["obs_img"][mb], data["obs_scalar"][mb],                        
-                data["pose_acts"][mb], data["light_acts"][mb],                      
+                data["obs_img"][mb], data["obs_scalar"][mb],
+                data["pose_acts"][mb],
             )
             ratio  = (new_logp - data["logprobs"][mb]).exp()                        
             mb_adv = adv[mb]                                                        

@@ -26,7 +26,7 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
     # ── 초기화 ───────────────────────────────────────────────────────────────
     def __init__(self, cfg: OceanEnvCfg, render_mode: str | None = None):
         if cfg.debug_vis:
-            # cfg.scene.camera.enable_viewport = True
+            cfg.scene.camera.enable_viewport = True
             cfg.scene.camera.viewport_env_id = 0
             
         super().__init__(cfg, render_mode)
@@ -179,7 +179,7 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
 
     def _apply_action(self) -> None:
         pose_idx = self._actions[:, 0:6].argmax(dim=-1) 
-        light_idx= self._actions[:, 6:9].argmax(dim=-1)
+        # light_idx= self._actions[:, 6:9].argmax(dim=-1)
 
         pose_active = self._actions[:, 0:6].any(dim=-1)
 
@@ -204,9 +204,9 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         self._sph_phi.clamp_(self.cfg.phi_min, self.cfg.phi_max)
         self._sph_psi.clamp_(self.cfg.psi_min, self.cfg.psi_max)
 
-        prev_light_level = self._light_level.clone()
-        delta_light = light_idx.long() - 1
-        self._light_level = (prev_light_level + delta_light).clamp(1, 8)
+        # prev_light_level = self._light_level.clone()
+        # delta_light = light_idx.long() - 1
+        # self._light_level = (prev_light_level + delta_light).clamp(1, 8)
 
         # sphere -> cartesian coordinate 변환
         curr_theta = self._sph_theta
@@ -229,7 +229,7 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         self._sensor_rig.write_root_state_to_sim(state)
                                                                                                                         
         # 조명 intensity 업데이트
-        self._update_light_intensity(self._light_level) 
+        # self._update_light_intensity(self._light_level) 
 
     def _update_light_intensity(self, next_light_level:torch.Tensor)->None:
         stage = omni.usd.get_context().get_stage()
@@ -295,13 +295,13 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
             self._sph_theta / (2*math.pi),
             (self._sph_phi - self.cfg.phi_min) / (self.cfg.phi_max - self.cfg.phi_min),
             (self._sph_psi - self.cfg.psi_min) / (self.cfg.psi_max - self.cfg.psi_min),
-            curr_contrast,
-            (self._light_level.float()-1.0)/7.0,
+            # curr_contrast,
+            # (self._light_level.float()-1.0)/7.0,
         ], dim=-1)
 
         # 방향 마커 실시간 업데이트 (PhysX runtime 데이터 사용)
-        if self.cfg.debug_vis:
-            self._update_vis_markers()
+        # if self.cfg.debug_vis:
+            # self._update_vis_markers()
 
         # self._save_debug_obs(raw_rgb, raw_depth, curr_obs, curr_state)
         # self._save_debug_sequence()
@@ -344,7 +344,7 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         self._last_rew_penalty  = reward_penalty 
         self._last_success_reward = success_reward
         
-        return reward_coverage + reward_contrast - reward_penalty + success_reward
+        return reward_coverage - reward_penalty + success_reward
     
     # ── 종료 조건 ─────────────────────────────────────────────────────────────
 
@@ -371,6 +371,7 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         # self._sph_psi[env_ids]      = 1.0
         
         self._light_level[env_ids]  = cfg.light_level_init
+        self._update_light_intensity(self._light_level)
 
         offset = torch.stack([
             self._sph_psi[env_ids] * torch.sin(self._sph_phi[env_ids]) * torch.cos(self._sph_theta[env_ids]),
