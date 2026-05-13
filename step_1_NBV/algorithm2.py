@@ -13,7 +13,7 @@ from torch.distributions import Categorical
 
 @dataclass
 class PPOConfig:
-    ppo_epochs:     int   = 10      # 4 → 10: NBV 희소 보상 환경에서 샘플 효율 향상
+    ppo_epochs:     int   = 6      # 4 → 10: NBV 희소 보상 환경에서 샘플 효율 향상
     minibatch_size: int   = 256
     clip_eps:       float = 0.2
     ent_coef:       float = 0.01    # 0.05 → 0.01: 단일 Categorical 분포 엔트로피 스케일 조정
@@ -21,14 +21,14 @@ class PPOConfig:
     max_grad_norm:  float = 0.5
     gamma:          float = 0.99    # 장거리 Δcoverage 보상 반영
     lam:            float = 0.95    # GAE λ
-
+    target_kl:      float = 0.02
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Network
 # ══════════════════════════════════════════════════════════════════════════════
 
 # 84×84: Conv(8,s4)→20, Conv(4,s2)→9, Conv(3,s1)→7  →  64*7*7 = 3136
-_CNN_OUT = 64 * 7 * 7
+_CNN_OUT = 64 * 4 * 4
 
 
 def _build_cnn(in_ch: int) -> nn.Sequential:
@@ -100,7 +100,7 @@ class Critic(nn.Module):
 
     입력:
         depth  : GT depth map 시퀀스  (B, K_dep, H, W)  — DR 없는 특권 정보
-        scalar : 구면좌표 정규화 벡터 (B, 3)             — (θ, φ, ψ)
+        scalar : 구면좌표 정규화 벡터 (B, 4)             — (θ, φ, ψ, curr_coverage) # to-be
 
     변경 사항 (기존 대비):
         - scalar 입력 추가: 동일 geometry라도 위치(거리·각도)에 따라
@@ -239,83 +239,75 @@ def explained_variance(values: torch.Tensor, returns: torch.Tensor) -> float:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def ppo_update(actor: Actor, critic: Critic,
-               optimizer: torch.optim.Optimizer,
-               buf: RolloutBuffer,
-               cfg: PPOConfig) -> dict:
-    """
-    변경 사항 (기존 대비):
-        - actor.evaluate() 인자에서 light_acts 제거
-        - critic() 호출에 obs_scalar 추가
-        - policy gradient 부호 수정:
-            기존: torch.max(-adv*r, -adv*r.clamp(...))  ← 부호 오류
-            수정: -torch.min(adv*r, adv*r.clamp(...))   ← S&B / PPO 논문 정의
-    """
-    data = buf.flat()
-    adv  = data["advantages"]
-    adv  = (adv - adv.mean()) / (adv.std() + 1e-8)   # 배치 정규화
+                 optimizer: torch.optim.Optimizer,
+                 buf: RolloutBuffer,
+                 cfg: PPOConfig) -> dict:
+      data = buf.flat()
+      adv  = data["advantages"]
+      adv  = (adv - adv.mean()) / (adv.std() + 1e-8)
 
-    TE  = adv.shape[0]
-    acc = dict(policy_loss=0., value_loss=0., entropy=0., approx_kl=0., n=0)
+      TE         = adv.shape[0]
+      acc        = dict(policy_loss=0., value_loss=0., entropy=0., approx_kl=0., n=0)
+      early_stop = False
 
-    for _ in range(cfg.ppo_epochs):
-        perm = torch.randperm(TE, device=adv.device)
-        for s in range(0, TE, cfg.minibatch_size):
-            mb = perm[s : s + cfg.minibatch_size]
-            if mb.numel() == 0:
-                continue
+      for _ in range(cfg.ppo_epochs):
+          perm = torch.randperm(TE, device=adv.device)
+          for s in range(0, TE, cfg.minibatch_size):
+              mb = perm[s : s + cfg.minibatch_size]
+              if mb.numel() == 0:
+                  continue
 
-            # ── Actor 재평가 ──────────────────────────────────────────────
-            new_logp, entropy = actor.evaluate(
-                data["obs_img"][mb],
-                data["obs_scalar"][mb],
-                data["pose_acts"][mb],   # light_acts 제거
-            )
+              new_logp, entropy = actor.evaluate(
+                  data["obs_img"][mb], data["obs_scalar"][mb],
+                  data["pose_acts"][mb],
+              )
 
-            ratio  = (new_logp - data["logprobs"][mb]).exp()
-            mb_adv = adv[mb]
+            #   approx_kl_mb = (data["logprobs"][mb] - new_logp).mean().item()
+              approx_kl_mb = (data["logprobs"][mb] - new_logp).abs().mean().item()
+              if approx_kl_mb > cfg.target_kl:
+                  early_stop = True
+                  break
 
-            # PPO clipping — S&B / Schulman 2017 정의
-            # 기존 코드의 torch.max(-adv*r, ...) 는 부호가 반전된 형태
-            # 수정: L_CLIP = -min(r*A, clip(r,1-ε,1+ε)*A) 의 mean
-            pg = -torch.min(
-                mb_adv * ratio,
-                mb_adv * ratio.clamp(1 - cfg.clip_eps, 1 + cfg.clip_eps),
-            ).mean()
+              ratio  = (new_logp - data["logprobs"][mb]).exp()
+              mb_adv = adv[mb]
 
-            # ── Critic 재평가 ─────────────────────────────────────────────
-            # scalar를 Critic에 추가로 전달 (위치 정보 포함)
-            v = critic(data["obs_depth"][mb], data["obs_scalar"][mb])
-            v_clipped = (
-                data["old_values"][mb]
-                + (v - data["old_values"][mb]).clamp(-cfg.clip_eps, cfg.clip_eps)
-            )
-            vl = torch.max(
-                F.mse_loss(v,         data["returns"][mb]),
-                F.mse_loss(v_clipped, data["returns"][mb]),
-            )
+              pg = torch.max(
+                  -mb_adv * ratio,
+                  -mb_adv * ratio.clamp(1 - cfg.clip_eps, 1 + cfg.clip_eps),
+              ).mean()
 
-            # ── 총 손실 ───────────────────────────────────────────────────
-            loss = pg + cfg.vf_coef * vl - cfg.ent_coef * entropy.mean()
+              v = critic(data["obs_depth"][mb], data["obs_scalar"][mb])  # ← 수정
+              v_clipped = data["returns"][mb] + (v - data["old_values"][mb]).clamp(
+                  -cfg.clip_eps, cfg.clip_eps
+              )
+              vl = torch.max(
+                  F.mse_loss(v,         data["returns"][mb]),
+                  F.mse_loss(v_clipped, data["returns"][mb]),
+              )
 
-            optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(
-                list(actor.parameters()) + list(critic.parameters()),
-                cfg.max_grad_norm,
-            )
-            optimizer.step()
+              loss = pg + cfg.vf_coef * vl - cfg.ent_coef * entropy.mean()
+              optimizer.zero_grad()
+              loss.backward()
+            #   nn.utils.clip_grad_norm_(
+            #       list(actor.parameters()) + list(critic.parameters()),
+            #       cfg.max_grad_norm,
+            #   )
+              nn.utils.clip_grad_norm_(actor.parameters(), cfg.max_grad_norm)
+              nn.utils.clip_grad_norm_(critic.parameters(), cfg.max_grad_norm)
+              optimizer.step()
 
-            B = mb.numel()
-            acc["policy_loss"] += pg.item()             * B
-            acc["value_loss"]  += vl.item()             * B
-            acc["entropy"]     += entropy.mean().item() * B
-            acc["approx_kl"]   += (
-                data["logprobs"][mb] - new_logp
-            ).mean().item() * B
-            acc["n"] += B
+              B = mb.numel()
+              acc["policy_loss"] += pg.item()             * B
+              acc["value_loss"]  += vl.item()             * B
+              acc["entropy"]     += entropy.mean().item() * B
+              acc["approx_kl"]   += approx_kl_mb          * B
+              acc["n"]           += B
 
-    n = acc.pop("n")
-    return {k: v / n for k, v in acc.items()}
+          if early_stop:
+              break
+
+      n = max(acc.pop("n"), 1)
+      return {k: v / n for k, v in acc.items()} | {"early_stop": early_stop}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

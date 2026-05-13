@@ -81,12 +81,12 @@ class OceanEnvCfg(DirectRLEnvCfg):
     mesh_root:  str = join("isaac-sim", "extsUser","OceanSim", "oceansim_asset", "collected_rock")
 
     # ── 보상 가중치 ──────────────────────────────────────────────────────────
-    k_c:                float = 50.0    # 1.0
-    lambda_q:           float = 0.1     # 1.0
-    k_x:                float = 0.00    # 0.02
-    c_step:             float = 0.08     # 2.0
-    coverage_terminal:  float = 0.90    # 0.96
+    k_c:                float = 100.0    # 1.0 | 50.0
+    k_x:                float = 1.0    # 0.02
+    c_step:             float = 2.0    # 2.0 | 0.08
+    coverage_terminal:  float = 0.96    # 0.96
     coverage_bonus:     float = 100.0
+    lambda_q:           float = 0.1     # 1.0
 
     # ── 카메라 센서 ──────────────────────────────────────────────────────────
     water_dr:           WaterParamRangeCfg = WaterParamRangeCfg()

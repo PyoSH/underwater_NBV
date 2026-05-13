@@ -11,7 +11,7 @@ parser.add_argument("--num_envs",       type=int,   default=1)
 parser.add_argument("--total_steps",    type=int,   default=500_000)             
 parser.add_argument("--rollout_steps",  type=int,   default=256)                    
 parser.add_argument("--ppo_epochs",     type=int,   default=10)                      
-parser.add_argument("--minibatch_size", type=int,   default=512)                    
+parser.add_argument("--minibatch_size", type=int,   default=64)                    
 parser.add_argument("--lr",             type=float, default=3e-4)                   
 parser.add_argument("--gamma",          type=float, default=0.99)                   
 parser.add_argument("--gae_lambda",     type=float, default=0.95)
@@ -126,6 +126,7 @@ def main():
                 
     global_step = 0
     rollout_idx = 0
+    last_log_step = 0
                                                                                     
     # ── Resume ───────────────────────────────────────────────────────────────
     if args.resume:                                                                 
@@ -135,6 +136,7 @@ def main():
         optimizer.load_state_dict(ckpt["optimizer"])                                
         global_step = ckpt.get("global_step", 0)
         rollout_idx = ckpt.get("rollout_idx",  0)                                   
+        last_log_step = global_step
         print(f"[resume] {args.resume}  (step={global_step})", flush=True)          
                                                                                     
     # ── wandb ─────────────────────────────────────────────────────────────────    
@@ -234,6 +236,7 @@ def main():
             "train/entropy":            stats["entropy"],
             "train/approx_kl":          stats["approx_kl"],
             "train/explained_variance": ev,
+            "train/early_stop":         float(stats["early_stop"]),
             "train/learning_rate":      optimizer.param_groups[0]["lr"],
             "train/fps":                fps,
             "train/global_step":        global_step,
@@ -260,7 +263,10 @@ def main():
         if use_wandb:                                                               
             wandb.log(log, step=global_step)
                                   
-        if rollout_idx % 10 == 0:
+        # if rollout_idx % 10 == 0:
+        LOG_EVERY = 10_000
+        if global_step - last_log_step >= LOG_EVERY:
+            last_log_step = global_step
             cov = f"  cov={log['episode/mean_coverage']:.3f}" if "episode/mean_coverage" in log else ""
                                                                                             
             # ── 보상 구성요소 분해 ──────────────────────────────────────────────          
@@ -315,7 +321,7 @@ def main():
             )
             obs, _ = env.reset()
             obs_img    = obs["policy"]
-            obs_scalar = obs["extra_info"]
+            obs_scalar = obs["extra_info"] 
             obs_depth  = obs["critic"]
             ep_return  = torch.zeros(E, device=device)
             ep_len     = torch.zeros(E, device=device, dtype=torch.long)

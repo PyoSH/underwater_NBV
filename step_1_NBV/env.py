@@ -324,11 +324,14 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         self.curr_coverage  = self._compute_curr_coverage()
         delta_coverage      = self.curr_coverage - self._prev_coverage
         self._prev_coverage = self.curr_coverage.clone()
+        # print(f"moved dist: {delta_coverage}")
 
         delta_contrast      = self.curr_contrast - self._prev_contrast
         self._prev_contrast = self.curr_contrast.clone()
 
         dist_moved          = torch.norm(self.cam_pos-self._prev_cam_pos, dim=-1)
+        # print(f"moved dist: {dist_moved}")
+
         self._prev_cam_pos  = self.cam_pos.clone()
         cfg = self.cfg
 
@@ -343,6 +346,7 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         self._last_rew_contrast = reward_contrast                                           
         self._last_rew_penalty  = reward_penalty 
         self._last_success_reward = success_reward
+        # print(f"Total reward per step = {reward_coverage - reward_penalty + success_reward}")
         
         return reward_coverage - reward_penalty + success_reward
     
@@ -391,7 +395,7 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         # fill buffer frames with 1st frame in k+1 times, but how can it accomplished with 0.0 ??? is this implement not conflict with _get_observation()?
         sim = sim_utils.SimulationContext.instance()
 
-        for _ in range(10):
+        for _ in range(5): # 10
             sim.render()
 
         raw_rgb = self._camera.data.output["uw_rgb"][env_ids, :, :, :3]
