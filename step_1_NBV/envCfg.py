@@ -71,7 +71,7 @@ class OceanEnvCfg(DirectRLEnvCfg):
 
     phi_min:        float = math.radians(10)
     phi_max:        float = math.radians(80)
-    psi_min:        float = 0.5
+    psi_min:        float = 1.0
     psi_max:        float = 4.5
 
     light_level_init:           int = 7
@@ -81,9 +81,9 @@ class OceanEnvCfg(DirectRLEnvCfg):
     mesh_root:  str = join("isaac-sim", "extsUser","OceanSim", "oceansim_asset", "collected_rock")
 
     # ── 보상 가중치 ──────────────────────────────────────────────────────────
-    k_c:                float = 100.0    # 1.0 | 50.0
-    k_x:                float = 1.0    # 0.02
-    c_step:             float = 2.0    # 2.0 | 0.08
+    k_c:                float = 5.0    # 1.0 | 50.0
+    k_x:                float = 0.02    # 0.02
+    c_step:             float = 0.1    # 2.0 | 0.08
     coverage_terminal:  float = 0.96    # 0.96
     coverage_bonus:     float = 100.0
     lambda_q:           float = 0.1     # 1.0

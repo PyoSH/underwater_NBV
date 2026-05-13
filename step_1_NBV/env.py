@@ -367,6 +367,8 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         n   = len(env_ids)
         env_ids_t = torch.as_tensor(env_ids, dtype = torch.long, device=self.device)
 
+        self._randomize_rock_pose(env_ids)
+
         self._sph_theta[env_ids]    = torch.rand(n, device=self.device) * 2.0 * math.pi
         self._sph_phi[env_ids]      = torch.rand(n, device=self.device) * (cfg.phi_max - cfg.phi_min) + cfg.phi_min
         self._sph_psi[env_ids]      = torch.rand(n, device=self.device) * (cfg.psi_max - cfg.psi_min) + cfg.psi_min

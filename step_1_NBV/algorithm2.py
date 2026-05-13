@@ -16,7 +16,7 @@ class PPOConfig:
     ppo_epochs:     int   = 6      # 4 → 10: NBV 희소 보상 환경에서 샘플 효율 향상
     minibatch_size: int   = 256
     clip_eps:       float = 0.2
-    ent_coef:       float = 0.01    # 0.05 → 0.01: 단일 Categorical 분포 엔트로피 스케일 조정
+    ent_coef:       float = 0.05    # 0.05 → 0.01: 단일 Categorical 분포 엔트로피 스케일 조정
     vf_coef:        float = 0.5
     max_grad_norm:  float = 0.5
     gamma:          float = 0.99    # 장거리 Δcoverage 보상 반영
