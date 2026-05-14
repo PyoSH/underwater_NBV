@@ -42,8 +42,8 @@ class OceanSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.CuboidCfg(
             size=(10.0, 10.0, 0.25),
             collision_props=sim_utils.CollisionPropertiesCfg(),
-            # visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.15, 0.15, 0.15)),
-            visual_material=wall_material,
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.50, 0.50, 0.50)),
+            # visual_material=wall_material,    # 조명 영향 큼!!
         ),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, floorDepth)),
     )

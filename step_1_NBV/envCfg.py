@@ -96,3 +96,9 @@ class OceanEnvCfg(DirectRLEnvCfg):
     # ── 디버그 시각화 ─────────────────────────────────────────────────────────
     debug_vis:        bool = False  # 방향 마커 활성화 여부
     debug_vis_env_id: int  = -1     # -1: 전체 env, 0~N-1: 특정 env 만 시각화
+
+    # ── 평가 모드 (고정 시작 위치) ───────────────────────────────────────────
+    eval_mode:  bool  = False
+    eval_theta: float = 0.0
+    eval_phi:   float = math.radians(45)
+    eval_psi:   float = 4.5

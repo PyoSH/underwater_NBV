@@ -21,7 +21,7 @@ parser.add_argument("--ckpt_dir",           type=str,   default="./checkpoints_s
 parser.add_argument("--save_interval",      type=int,   default=50_000)
 parser.add_argument("--resume",             type=str,   default=None)
 parser.add_argument("--wandb_project",      type=str,   default="RL_NBV")
-parser.add_argument("--wandb_name",         type=str,   default=None)
+parser.add_argument("--wandb_name",         type=str,   default="scanRL")
 parser.add_argument("--eval_interval",      type=int,   default=10_000)
 parser.add_argument("--eval_episodes",      type=int,   default=5)
 

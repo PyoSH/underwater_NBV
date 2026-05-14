@@ -367,14 +367,18 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         n   = len(env_ids)
         env_ids_t = torch.as_tensor(env_ids, dtype = torch.long, device=self.device)
 
-        self._randomize_rock_pose(env_ids)
-
-        self._sph_theta[env_ids]    = torch.rand(n, device=self.device) * 2.0 * math.pi
-        self._sph_phi[env_ids]      = torch.rand(n, device=self.device) * (cfg.phi_max - cfg.phi_min) + cfg.phi_min
-        self._sph_psi[env_ids]      = torch.rand(n, device=self.device) * (cfg.psi_max - cfg.psi_min) + cfg.psi_min
-        # self._sph_theta[env_ids]    = 0.0
-        # self._sph_phi[env_ids]      = math.radians(89.0)
-        # self._sph_psi[env_ids]      = 1.0
+        if cfg.eval_mode:
+            self._sph_theta[env_ids]    = cfg.eval_theta
+            self._sph_phi[env_ids]      = cfg.eval_phi
+            self._sph_psi[env_ids]      = cfg.eval_psi
+            # self._sph_theta[env_ids]    = 0.0
+            # self._sph_phi[env_ids]      = math.radians(89.0)
+            # self._sph_psi[env_ids]      = 1.0
+        else:
+            self._randomize_rock_pose(env_ids)
+            self._sph_theta[env_ids]    = torch.rand(n, device=self.device) * 2.0 * math.pi
+            self._sph_phi[env_ids]      = torch.rand(n, device=self.device) * (cfg.phi_max - cfg.phi_min) + cfg.phi_min
+            self._sph_psi[env_ids]      = torch.rand(n, device=self.device) * (cfg.psi_max - cfg.psi_min) + cfg.psi_min
         
         self._light_level[env_ids]  = cfg.light_level_init
         self._update_light_intensity(self._light_level)
