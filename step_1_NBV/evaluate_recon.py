@@ -46,6 +46,7 @@ from env             import OceanEnv
 from algorithm2      import Actor, make_env_action
 from evaluate_utils  import save_episode_results
 
+ACTION_NAMES = ["+θ", "-θ", "-φ", "+φ", "-ψ", "+ψ"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 체크포인트 로드
@@ -82,6 +83,8 @@ def evaluate_recon(env: OceanEnv, actor: Actor, device: torch.device,
     ep_len    = torch.zeros(E, device=device, dtype=torch.long)
     completed  = [0] * E
     ep_counter = [0] * E
+
+    step_logs = [[] for _ in range(E)]   # (ep_step, act_idx, coverage, reward)
 
     cam_trajs = [[] for _ in range(E)]
     cov_hists = [[] for _ in range(E)]
@@ -131,6 +134,14 @@ def evaluate_recon(env: OceanEnv, actor: Actor, device: torch.device,
                 surf_snap  [eid] = env._surf_vol  [eid].cpu().numpy().copy()
                 origin_snap[eid] = env._vol_origin[eid].cpu().numpy().copy()
 
+                act_idx = pose_act[eid].item()
+                cov     = env.curr_coverage[eid].item()
+                rew     = reward[eid].item()
+                step_logs[eid].append((int(ep_len[eid].item()), act_idx, cov, rew))
+                print(f"    step={int(ep_len[eid].item()):3d}  "
+                        f"act={ACTION_NAMES[act_idx]}({act_idx})  "
+                        f"cov={cov:.4f}  rew={rew:+.5f}")
+
             # ── done: 스냅샷으로 저장 ────────────────────────────────────────
             for eid in done_any.nonzero(as_tuple=True)[0].tolist():
                 if completed[eid] < n_episodes:
@@ -139,6 +150,18 @@ def evaluate_recon(env: OceanEnv, actor: Actor, device: torch.device,
                     print(f"  [ep done] env={eid}  ep={ep_counter[eid]:3d}"
                         f"  {status}  len={ep_len[eid].item():.0f}"
                         f"  cov={final_cov:.4f}")
+                    
+                    import csv
+                    log_dir  = out_dir / f"ep_{ep_counter[eid]:03d}_env{eid}"
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    log_path = log_dir / "step_log.csv"
+                    with open(log_path, "w", newline="") as f:
+                        w = csv.writer(f)
+                        w.writerow(["step", "action_idx", "action_name", "coverage", "reward"])
+                        for s, a, c, r in step_logs[eid]:
+                            w.writerow([s, a, ACTION_NAMES[a], f"{c:.6f}", f"{r:.6f}"])
+                    print(f"  [log] step_log → {log_path}")
+
                     save_episode_results(
                         out_dir, ep_counter[eid], eid,
                         tsdf_snap[eid], weight_snap[eid],
@@ -157,6 +180,8 @@ def evaluate_recon(env: OceanEnv, actor: Actor, device: torch.device,
                 rgb_imgs [eid] = []
                 ep_return[eid] = 0.0
                 ep_len   [eid] = 0
+                
+                step_logs[eid] = []
 
             obs_img    = next_obs["policy"]
             obs_scalar = next_obs["extra_info"]

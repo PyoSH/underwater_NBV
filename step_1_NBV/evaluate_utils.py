@@ -193,7 +193,7 @@ def save_trajectory_plot(path: str, cam_traj: list,
 def save_coverage_plot(path: str, coverage_hist: list):
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(coverage_hist, linewidth=1.5)
-    ax.axhline(y=0.96, color="r", linestyle="--", linewidth=1, label="terminal (0.96)")
+    ax.axhline(y=0.96, color="r", linestyle="--", linewidth=1, label="terminal")
     ax.set_xlabel("Step"); ax.set_ylabel("Coverage")
     ax.set_ylim(0, 1.05)
     ax.set_title("Coverage over Steps")
