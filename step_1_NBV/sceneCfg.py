@@ -18,7 +18,7 @@ from sensors.ImagingSonar.ImagingSonarCfg import ImagingSonarCfg
 _ROT_45Z = (math.cos(math.radians(22.5)), 0.0, 0.0, math.sin(math.radians(22.5)))
 
 floorDepth = -3.25
-wallHeight = 5.0
+wallHeight = 5.5
 wallWidth = 0.01
 wallLength = 10.0
 
@@ -90,7 +90,7 @@ class OceanSceneCfg(InteractiveSceneCfg):
     rock: AssetBaseCfg = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Object",
         spawn=sim_utils.UsdFileCfg(usd_path=ROCK_USD),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -3.0), rot=_ROT_45Z),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -2.5), rot=_ROT_45Z),
     )
  
     # ── 센서 리그 (동적 강체, 하늘색) ────────────────────────────────────────

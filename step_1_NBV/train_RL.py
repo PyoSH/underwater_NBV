@@ -328,7 +328,7 @@ def main():
 
         # ── 체크포인트 ────────────────────────────────────────────────────────
         if rollout_idx % args.save_interval == 0:
-            ckpt_path = ckpt_dir / f"step_{global_step:010d}.pt"                    
+            ckpt_path = ckpt_dir / f"rl_NBV_step_{global_step:010d}.pt"                    
             torch.save({
                 "global_step": global_step,                                         
                 "rollout_idx": rollout_idx,                                         

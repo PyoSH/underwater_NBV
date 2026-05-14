@@ -306,7 +306,7 @@ def main():
 
         # ── 체크포인트 ────────────────────────────────────────────────────────
         if global_step % args.save_interval == 0 and global_step > 0:
-            ckpt_path = ckpt_dir / f"step_{global_step:010d}.pt"
+            ckpt_path = ckpt_dir / f"scanRL_step_{global_step:010d}.pt"
             torch.save({
                 "global_step": global_step,
                 "q_net":       q_net.state_dict(),

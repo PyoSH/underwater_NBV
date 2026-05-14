@@ -9,8 +9,8 @@ from os.path import join
 
 @configclass
 class VisualConfig:
-    h:  int = 64    # 84
-    w:  int = 64    # 84
+    h:  int = 84    # 84
+    w:  int = 84    # 84
     k:  int = 5     # num of past frames
     num_seq_actor:     int = 6
     num_seq_critic:    int = 6
@@ -84,7 +84,7 @@ class OceanEnvCfg(DirectRLEnvCfg):
     k_c:                float = 5.0    # 1.0 | 50.0
     k_x:                float = 0.02    # 0.02
     c_step:             float = 0.1    # 2.0 | 0.08
-    coverage_terminal:  float = 0.96    # 0.96
+    coverage_terminal:  float = 0.86    # 0.96
     coverage_bonus:     float = 100.0
     lambda_q:           float = 0.1     # 1.0
 

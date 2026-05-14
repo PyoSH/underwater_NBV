@@ -375,10 +375,10 @@ class EnvUtilsMixin:
 
           # ── 2. 랜덤 회전 ──────────────────────────────────────────
           yaw   = float(np.random.uniform(  0.0, 360.0))   # 전방위 azimuth
-          pitch = float(np.random.uniform(-60.0,  60.0))   # 너무 뒤집히지 않게 제한
-          roll  = float(np.random.uniform(-60.0,  60.0))
+          pitch = float(np.random.uniform(-30.0,  30.0))   # 너무 뒤집히지 않게 제한
+          roll  = float(np.random.uniform(-30.0,  30.0))
           xformable.AddRotateXYZOp().Set(Gf.Vec3f(roll, pitch, yaw))
 
           # ── 3. 랜덤 스케일 (균일) ─────────────────────────────────
-          scale = float(np.random.uniform(0.8, 1.2))
+          scale = float(np.random.uniform(0.8, 1.5))
           xformable.AddScaleOp().Set(Gf.Vec3f(scale, scale, scale))

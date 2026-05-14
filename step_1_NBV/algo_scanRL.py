@@ -33,7 +33,7 @@ class DQNConfig:
 #   Conv(64, k=3, s=1): floor((6-3)/1)+1  = 4
 #   Flatten: 64 * 4 * 4 = 1024
 # ══════════════════════════════════════════════════════════════════════════════
-_CNN_OUT = 64 * 4 * 4
+_CNN_OUT = 64 * 7 * 7
 
 
 def _build_cnn(in_ch: int) -> nn.Sequential:
