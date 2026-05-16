@@ -88,6 +88,9 @@ class OceanEnvCfg(DirectRLEnvCfg):
     coverage_bonus:     float = 100.0
     lambda_q:           float = 0.1     # 1.0
 
+    k_still:            float = 0.05   # stall penalty (delta_cov < threshold일 때)
+    stall_thr:          float = 1e-4   # coverage 증가 최소 임계값
+
     # ── 카메라 센서 ──────────────────────────────────────────────────────────
     water_dr:           WaterParamRangeCfg = WaterParamRangeCfg()
     water_dr_enabled:   bool = False

@@ -341,14 +341,17 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         reward_coverage = cfg.k_c* delta_coverage
         reward_contrast = cfg.lambda_q  * delta_contrast
         reward_penalty  = (cfg.k_x * dist_moved) + (cfg.c_step)
-
-        self._last_rew_coverage = reward_coverage   # (num_envs,)                           
-        self._last_rew_contrast = reward_contrast                                           
-        self._last_rew_penalty  = reward_penalty 
-        self._last_success_reward = success_reward
-        # print(f"Total reward per step = {reward_coverage - reward_penalty + success_reward}")
+  
+        stall_mask      = (delta_coverage < cfg.stall_thr).float()
+        reward_stall    = cfg.k_still * stall_mask
         
-        return reward_coverage - reward_penalty + success_reward
+        self._last_rew_coverage = reward_coverage
+        self._last_rew_contrast = reward_contrast
+        self._last_rew_penalty  = reward_penalty
+        self._last_rew_stall    = reward_stall
+        self._last_success_reward = success_reward
+
+        return reward_coverage - reward_penalty - reward_stall + success_reward
     
     # ── 종료 조건 ─────────────────────────────────────────────────────────────
 
