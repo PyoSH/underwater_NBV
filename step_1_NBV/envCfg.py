@@ -49,7 +49,7 @@ class OceanEnvCfg(DirectRLEnvCfg):
     episode_length_s: float = 5.0
 
     # ── RL 공간 크기 ─────────────────────────────────────────────────────────
-    
+    use_visit_map:  bool = False
     
     visual: VisualConfig = VisualConfig()
     observation_space:  tuple = (visual.num_seq_actor, visual.h, visual.w)     # 2D gray image sequence for actor

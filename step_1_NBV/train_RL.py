@@ -20,7 +20,7 @@ parser.add_argument("--ent_coef",       type=float, default=0.05)
 parser.add_argument("--vf_coef",        type=float, default=0.5)                    
 parser.add_argument("--max_grad_norm",  type=float, default=0.5)
 parser.add_argument("--lr_decay",       action="store_true")                        
-parser.add_argument("--ckpt_dir",       type=str,   default="./checkpoints")
+parser.add_argument("--ckpt_dir",       type=str,   default="/workspace/checkpoints")
 parser.add_argument("--save_interval",  type=int,   default=200)                    
 parser.add_argument("--resume",         type=str,   default=None)
 parser.add_argument("--wandb_project",  type=str,   default="RL_NBV")
@@ -28,6 +28,7 @@ parser.add_argument("--wandb_name",     type=str,   default=None)
 parser.add_argument("--eval_interval",  type=int,   default=10,
                     help="run eval every N rollouts (0 = disabled)")
 parser.add_argument("--eval_episodes",  type=int,   default=5)
+parser.add_argument("--use_visit_map",  action="store_true")
 AppLauncher.add_app_launcher_args(parser)                                           
                 
 if "--enable_cameras" not in sys.argv:                                              
@@ -44,9 +45,9 @@ import wandb
 sys.path.insert(0, os.path.dirname(__file__))
 from envCfg   import OceanEnvCfg                                                    
 from env      import OceanEnv                                                       
-from algorithm2 import (Actor, Critic, RolloutBuffer, PPOConfig,
-                        make_env_action, explained_variance, ppo_update)            
-                                                                                    
+# from algorithm2 import (Actor, Critic, RolloutBuffer, PPOConfig,
+#                         make_env_action, explained_variance, ppo_update)            
+from algorithm3 import (Actor, Critic, RolloutBuffer, PPOConfig, make_env_action, explained_variance, ppo_update)                  
 
 def run_eval(env, actor, device, n_episodes: int) -> dict:
     actor.eval()
@@ -77,7 +78,7 @@ def run_eval(env, actor, device, n_episodes: int) -> dict:
                 if completed[eid] < n_episodes:
                     results["returns"]  .append(ep_return[eid].item())
                     results["lengths"]  .append(ep_len[eid].item())
-                    results["coverages"].append(env.curr_coverage[eid].item())
+                    results["coverages"].append(env._terminal_coverage[eid].item())
                     results["successes"].append(float(terminated[eid].item()))
                     completed[eid] += 1
                 ep_return[eid] = 0.0
@@ -98,23 +99,36 @@ def main():
     # ── 환경 ─────────────────────────────────────────────────────────────────
     env_cfg = OceanEnvCfg()
     env_cfg.scene.num_envs = args.num_envs                                          
+
+    if args.use_visit_map:
+        env_cfg.visual.num_seq_actor = 2
+        env_cfg.visual.num_seq_critic = 2
+
+        env_cfg.use_visit_map = True
+        env_cfg.observation_space = (
+            env_cfg.visual.num_seq_actor + 1,
+            env_cfg.visual.h, env_cfg.visual.w
+        )
+        env_cfg.state_space = (
+            env_cfg.visual.num_seq_critic + 1,
+            env_cfg.visual.h, env_cfg.visual.w
+        )
     # env_cfg.sim.dt         = 1.0 / 30.0
                                                                                     
     env    = OceanEnv(cfg=env_cfg, render_mode="rgb_array")                         
     device = env.device                                                             
     E      = env.num_envs                                                           
     H, W   = env_cfg.visual.h, env_cfg.visual.w                                     
-    K_img  = env_cfg.visual.num_seq_actor
-    K_dep  = env_cfg.visual.num_seq_critic                                          
+    K_img  = env_cfg.visual.num_seq_actor  + (1 if args.use_visit_map else 0)
+    K_dep  = env_cfg.visual.num_seq_critic + (1 if args.use_visit_map else 0)
+    s_dim_critic = 4 if args.use_visit_map else 3
     T      = args.rollout_steps
                                                                                     
     # ── 네트워크 & 옵티마이저 ─────────────────────────────────────────────────    
     actor     = Actor (img_ch=K_img, scalar_dim=3).to(device)                       
-    critic    = Critic(depth_ch=K_dep, scalar_dim=3).to(device)                                   
-    optimizer = torch.optim.Adam(                                                   
-        list(actor.parameters()) + list(critic.parameters()),
-        lr=args.lr, eps=1e-5,                                                       
-    )           
+    critic    = Critic(depth_ch=K_dep, scalar_dim=s_dim_critic).to(device)                                   
+    optimizer_actor = torch.optim.Adam(actor.parameters(), lr=args.lr)
+    optimizer_critic = torch.optim.Adam(critic.parameters(), lr = args.lr * 2)
     ppo_cfg = PPOConfig(                                                            
         ppo_epochs=args.ppo_epochs,
         minibatch_size=args.minibatch_size,                                         
@@ -133,7 +147,8 @@ def main():
         ckpt = torch.load(args.resume, map_location=device)
         actor    .load_state_dict(ckpt["actor"])                                    
         critic   .load_state_dict(ckpt["critic"])
-        optimizer.load_state_dict(ckpt["optimizer"])                                
+        optimizer_actor.load_state_dict(ckpt["optimizer_actor"])
+        optimizer_critic.load_state_dict(ckpt["optimizer_critic"])
         global_step = ckpt.get("global_step", 0)
         rollout_idx = ckpt.get("rollout_idx",  0)                                   
         last_log_step = global_step
@@ -152,17 +167,17 @@ def main():
         wandb.watch(critic, log="gradients", log_freq=200)                          
 
     # ── 버퍼 & 에피소드 트래커 ───────────────────────────────────────────────     
-    buf = RolloutBuffer(T, E, K_img, K_dep, H, W, scalar_dim=3, device=device)
-                                                                                    
+    buf = RolloutBuffer(T, E, K_img, K_dep, H, W, scalar_dim=3, scalar_dim_critic = s_dim_critic, device=device)
     obs, _     = env.reset()
-    obs_img    = obs["policy"]                                                      
-    obs_scalar = obs["extra_info"]                                                  
+    obs_img    = obs["policy"]
+    obs_scalar = obs["extra_info"]
     obs_depth  = obs["critic"]
-                                                                                    
+    obs_scalar_c = obs["critic_scalar"]
+
     ep_return = torch.zeros(E, device=device)
-    ep_len    = torch.zeros(E, device=device, dtype=torch.long)                     
-    finished  = dict(returns=[], lengths=[], coverages=[], terminated=[])                          
-                                                                                    
+    ep_len    = torch.zeros(E, device=device, dtype=torch.long)           
+    finished  = dict(returns=[], lengths=[], coverages=[], terminated=[])
+
     ckpt_dir = Path(args.ckpt_dir)                                                  
     ckpt_dir.mkdir(parents=True, exist_ok=True)                                     
     t0 = time.time()
@@ -174,8 +189,11 @@ def main():
 
         if args.lr_decay:                                                           
             frac = max(1.0 - global_step / args.total_steps, 0.0)
-            for pg in optimizer.param_groups:                                       
-                pg["lr"] = args.lr * frac                                           
+            
+            for pg in optimizer_actor.param_groups:
+                pg["lr"] = args.lr * frac
+            for pg in optimizer_critic.param_groups:
+                pg["lr"] = args.lr * 2 *frac
 
         buf.reset()
         actor.eval(); critic.eval()
@@ -186,7 +204,7 @@ def main():
         for _ in range(T):                                                          
             with torch.no_grad():
                 pose_act, logprob, _ = actor.sample(obs_img, obs_scalar)
-                value = critic(obs_depth, obs_scalar)
+                value = critic(obs_depth, obs_scalar_c)
 
             env_action = make_env_action(pose_act, E, device)
             next_obs, reward, terminated, truncated, _ = env.step(env_action)
@@ -197,7 +215,7 @@ def main():
             terminated_f    = terminated.float()
             done_any        = (terminated | truncated)
                 
-            buf.add(obs_img, obs_scalar, obs_depth,
+            buf.add(obs_img, obs_scalar, obs_scalar_c, obs_depth,
                     pose_act, logprob, reward, terminated_f, value)
                                                                                     
             ep_return += reward
@@ -206,23 +224,24 @@ def main():
             for eid in done_any.nonzero(as_tuple=True)[0].tolist():
                 finished["returns"]   .append(ep_return[eid].item())
                 finished["lengths"]   .append(ep_len[eid].item())
-                finished["coverages"] .append(env.curr_coverage[eid].item())
+                finished["coverages"] .append(env._terminal_coverage[eid].item())
                 finished["terminated"].append(float(terminated[eid].item()))
                 ep_return[eid] = 0.0
                 ep_len[eid]    = 0                                                  
                                                                                     
             obs_img    = next_obs["policy"]                                         
             obs_scalar = next_obs["extra_info"]
-            obs_depth  = next_obs["critic"]                                         
+            obs_depth  = next_obs["critic"]  
+            obs_scalar_c = next_obs["critic_scalar"]                                       
             global_step += E
 
         # ── GAE & PPO ─────────────────────────────────────────────────────────    
         with torch.no_grad():
-            last_val = critic(obs_depth, obs_scalar)                                            
+            last_val = critic(obs_depth, obs_scalar_c)
         buf.compute_gae(last_val, args.gamma, args.gae_lambda)                      
 
-        actor.train(); critic.train()                                               
-        stats = ppo_update(actor, critic, optimizer, buf, ppo_cfg)
+        actor.train(); critic.train()                                
+        stats = ppo_update(actor, critic, optimizer_actor, optimizer_critic, buf, ppo_cfg)
         rollout_idx += 1                                                            
                 
         # ── 로그 ─────────────────────────────────────────────────────────────     
@@ -237,13 +256,14 @@ def main():
             "train/approx_kl":          stats["approx_kl"],
             "train/explained_variance": ev,
             "train/early_stop":         float(stats["early_stop"]),
-            "train/learning_rate":      optimizer.param_groups[0]["lr"],
+            "train/lr_actor":           optimizer_actor.param_groups[0]["lr"],
+            "train/lr_critic":          optimizer_critic.param_groups[0]["lr"],
             "train/fps":                fps,
             "train/global_step":        global_step,
             "reward/coverage":          np.mean(rew_cov_list),
             "reward/penalty":           np.mean(rew_pen_list),
             "reward/success":           np.mean(rew_succ_list),
-            "train/coverage_mean":      env.curr_coverage.mean().item(),
+            # "train/coverage_mean":      env.curr_coverage.mean().item(),
             "env0/theta_deg":           math.degrees(env._sph_theta[0].item()),
             "env0/phi_deg":             math.degrees(env._sph_phi[0].item()),
             "env0/psi":                 env._sph_psi[0].item(),
@@ -291,9 +311,9 @@ def main():
             )                                                                               
             print(
                 f"  [reward]"
-                f"  cov={env._last_rew_coverage.mean().item():+.4f}"
-                f"  penalty={-env._last_rew_penalty.mean().item():.4f}"
-                f"  success={env._last_success_reward.mean().item():+.4f}"
+                f"  cov={np.mean(rew_cov_list):+.4f}"
+                f"  penalty={np.mean(rew_pen_list):.4f}"
+                f"  success={np.mean(rew_succ_list):+.4f}"
                 f"  net={buf.rewards.mean().item():+.4f}",
                 flush=True,
             )               
@@ -323,6 +343,7 @@ def main():
             obs_img    = obs["policy"]
             obs_scalar = obs["extra_info"] 
             obs_depth  = obs["critic"]
+            obs_scalar_c = obs["critic_scalar"]
             ep_return  = torch.zeros(E, device=device)
             ep_len     = torch.zeros(E, device=device, dtype=torch.long)
 
@@ -334,11 +355,10 @@ def main():
                 "rollout_idx": rollout_idx,                                         
                 "actor":       actor.state_dict(),
                 "critic":      critic.state_dict(),                                 
-                "optimizer":   optimizer.state_dict(),
+                "optimizer_actor":   optimizer_actor.state_dict(),
+                "optimizer_critic":   optimizer_critic.state_dict(),
                 "args":        vars(args),                                          
             }, ckpt_path)
-            if use_wandb:                                                           
-                wandb.save(str(ckpt_path))
             print(f"[ckpt] → {ckpt_path}", flush=True)                              
 
     env.close()

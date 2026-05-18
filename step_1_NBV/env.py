@@ -26,13 +26,30 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
     # ── 초기화 ───────────────────────────────────────────────────────────────
     def __init__(self, cfg: OceanEnvCfg, render_mode: str | None = None):
         if cfg.debug_vis:
+            self._setup_vis_markers()        
+            self._debug_save_dir = Path("./debug_obs")
+            self._debug_save_dir.mkdir(parents=True, exist_ok=True)
+            self._debug_save_every = 1 
+            self._debug_frame_idx = 0
+            
+            self._debug_seq_dir = Path("./debug_seq")
+            self._debug_seq_dir.mkdir(parents=True, exist_ok=True)
+            self._debug_seq_every = 6
+            self._debug_seq_step = 0
+
             cfg.scene.camera.enable_viewport = True
             cfg.scene.camera.viewport_env_id = 0
             
         super().__init__(cfg, render_mode)
 
+        if cfg.use_visit_map:
+            self._visit_map = torch.zeros(
+                self.num_envs, cfg.visual.h, cfg.visual.w, device=self.device
+            )
+
         self._image_buffer = torch.zeros((self.num_envs, self.cfg.visual.num_seq_actor, self.cfg.visual.h, self.cfg.visual.w), device=self.device)
         self._depth_buffer = torch.zeros((self.num_envs, self.cfg.visual.num_seq_critic, self.cfg.visual.h, self.cfg.visual.w), device=self.device)
+
 
         self._sph_theta   = torch.zeros(self.num_envs, device=self.device)
         self._sph_phi     = torch.zeros(self.num_envs, device=self.device)
@@ -51,7 +68,8 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         self._prev_contrast = torch.zeros(self.num_envs, device=self.device)
         self.curr_coverage  = torch.zeros(self.num_envs, device=self.device)
         self.curr_contrast  = torch.zeros(self.num_envs, device=self.device)
-
+        self._terminal_coverage = torch.zeros(self.num_envs, device=self.device)
+        
         # RigidObject 핸들 (InteractiveScene 이 자동 생성)
         self._sensor_rig    = self.scene["sensor_rig"]
         self._camera        = self.scene["camera"]
@@ -61,17 +79,6 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         self._actions   = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
         
         self._prev_cam_pos = torch.zeros(self.num_envs, 3, device=self.device) # this var doesn't use right now, but it will be in reward function.
-
-        self._setup_vis_markers()        
-        self._debug_save_dir = Path("./debug_obs")
-        self._debug_save_dir.mkdir(parents=True, exist_ok=True)
-        self._debug_save_every = 1 
-        self._debug_frame_idx = 0
-        
-        self._debug_seq_dir = Path("./debug_seq")
-        self._debug_seq_dir.mkdir(parents=True, exist_ok=True)
-        self._debug_seq_every = 6
-        self._debug_seq_step = 0
 
     # ── 방향 시각화 마커 ──────────────────────────────────────────────────────
 
@@ -258,6 +265,26 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         """카메라 리그 월드 자세 쿼터니언 [w,x,y,z] (num_envs, 4)."""
         return self._sensor_rig.data.root_quat_w        
 
+    def _update_visit_map(self) -> torch.Tensor:
+        """현재 (θ,φ) 위치를 2D 맵에 누적하고 정규화된 맵 반환 (E, H, W)."""
+        H, W = self.cfg.visual.h, self.cfg.visual.w
+        cfg = self.cfg
+
+        u = ((self._sph_theta % (2 * math.pi)) / (2 * math.pi) * W).long().clamp(0, W - 1)
+        v = ((self._sph_phi - cfg.phi_min) / (cfg.phi_max - cfg.phi_min) * H).long().clamp(0, H - 1)
+        
+        flat = self._visit_map.view(self.num_envs, -1)
+        flat.scatter_add_(
+            1,
+            (v * W + u).unsqueeze(1),
+            torch.ones(self.num_envs, 1, device=self.device)
+        )
+        # self._visit_map = flat.reshape(self.num_envs, H, W)
+
+        max_val = self._visit_map.reshape(self.num_envs, -1).max(dim=1).values.clamp(min=1)
+        
+        return self._visit_map / max_val.view(self.num_envs, 1, 1)   # (E, H, W), [0,1]
+
     # ── 관측 ─────────────────────────────────────────────────────────────────
     def _get_observations(self) -> dict:
         # image buffer updating - need to be implemented
@@ -297,8 +324,24 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
             (self._sph_psi - self.cfg.psi_min) / (self.cfg.psi_max - self.cfg.psi_min),
             # curr_contrast,
             # (self._light_level.float()-1.0)/7.0,
-        ], dim=-1)
+        ], dim=-1)        
 
+        if self.cfg.use_visit_map:
+            visit_map = self._update_visit_map()                   # (E, H, W)
+            policy_obs = torch.cat(
+                [self._image_buffer, visit_map.unsqueeze(1)], dim=1
+            )  # (E, num_seq_actor+1, H, W)
+            critic_obs = torch.cat(
+                [self._depth_buffer, visit_map.unsqueeze(1)], dim=1
+            )  # (E, num_seq_critic+1, H, W)
+            scalar_critic = torch.cat(
+                [scalar_obs, self.curr_coverage.unsqueeze(-1)], dim=-1
+            )  # (E, 4)
+        else:
+            policy_obs    = self._image_buffer    # (E, num_seq_actor, H, W)
+            critic_obs    = self._depth_buffer    # (E, num_seq_critic, H, W)
+            scalar_critic = scalar_obs            # (E, 3)
+        
         # 방향 마커 실시간 업데이트 (PhysX runtime 데이터 사용)
         # if self.cfg.debug_vis:
             # self._update_vis_markers()
@@ -307,9 +350,10 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         # self._save_debug_sequence()
 
         return {
-            "policy": self._image_buffer,     # Actor: 광학 이미지 시퀀스 (6, 84, 84)
-            "extra_info": scalar_obs,         # Actor: 5개 수치 데이터
-            "critic": self._depth_buffer      # Critic: GT Depth 시퀀스 (Privileged)
+            "policy":        policy_obs,
+            "extra_info":    scalar_obs,      # Actor scalar는 항상 dim=3
+            "critic":        critic_obs,
+            "critic_scalar": scalar_critic,   # Critic scalar: dim=3 or 4
         }
 
     
@@ -374,9 +418,6 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
             self._sph_theta[env_ids]    = cfg.eval_theta
             self._sph_phi[env_ids]      = cfg.eval_phi
             self._sph_psi[env_ids]      = cfg.eval_psi
-            # self._sph_theta[env_ids]    = 0.0
-            # self._sph_phi[env_ids]      = math.radians(89.0)
-            # self._sph_psi[env_ids]      = 1.0
         else:
             self._randomize_rock_pose(env_ids)
             self._sph_theta[env_ids]    = torch.rand(n, device=self.device) * 2.0 * math.pi
@@ -429,7 +470,12 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
 
         self._prev_coverage[env_ids] = 0.0
         self._prev_contrast[env_ids] = 0.0
+        self._terminal_coverage[env_ids] = self.curr_coverage[env_ids]
+        self.curr_coverage[env_ids]  = 0.0
         self._prev_cam_pos[env_ids]  = cam_pos_new
+
+        if self.cfg.use_visit_map:
+            self._visit_map[env_ids] = 0.0
 
         if cfg.water_dr_enabled:
             self._randomize_water_params()

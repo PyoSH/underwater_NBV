@@ -243,7 +243,7 @@ def main():
                 "reward/coverage":      np.mean(rew_cov_list)  if rew_cov_list  else 0.0,
                 "reward/penalty":       np.mean(rew_pen_list)  if rew_pen_list  else 0.0,
                 "reward/success":       np.mean(rew_succ_list) if rew_succ_list else 0.0,
-                "train/coverage_mean":  env.curr_coverage.mean().item(),
+                # "train/coverage_mean":  env.curr_coverage.mean().item(),
             }
 
             if loss_list:
@@ -275,9 +275,9 @@ def main():
             )
             print(
                 f"  [reward]"
-                f"  cov={env._last_rew_coverage.mean().item():+.4f}"
-                f"  penalty={-env._last_rew_penalty.mean().item():.4f}"
-                f"  success={env._last_success_reward.mean().item():+.4f}",
+                f"  cov={np.mean(rew_cov_list):+.4f}"
+                f"  penalty={np.mean(rew_pen_list):.4f}"
+                f"  success={np.mean(rew_succ_list):+.4f}"
                 flush=True,
             )
 
