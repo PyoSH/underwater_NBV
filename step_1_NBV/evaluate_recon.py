@@ -43,29 +43,61 @@ import torch
 sys.path.insert(0, os.path.dirname(__file__))
 from envCfg          import OceanEnvCfg
 from env             import OceanEnv
-from algorithm2      import Actor, make_env_action
+from algorithm3      import Actor, make_env_action
+from algo_scanRL     import QNetwork
 from evaluate_utils  import save_episode_results
 
 ACTION_NAMES = ["+θ", "-θ", "-φ", "+φ", "-ψ", "+ψ"]
 
+
+def _is_scanrl(ckpt: dict) -> bool:
+    return "q_net" in ckpt
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 체크포인트 로드
 # ─────────────────────────────────────────────────────────────────────────────
-def load_actor(checkpoint_path: str, env_cfg: OceanEnvCfg,
-                device: torch.device) -> Actor:
-    ckpt  = torch.load(checkpoint_path, map_location=device)
-    actor = Actor(img_ch=env_cfg.visual.num_seq_actor, scalar_dim=3).to(device)
-    actor.load_state_dict(ckpt["actor"])
-    actor.eval()
-    print(f"[ckpt] loaded → {checkpoint_path}(step={ckpt.get('global_step','?')})")
+def load_model(checkpoint_path: str, device: torch.device):
+    """
+    algo_scanRL / algorithm2 / algorithm3 체크포인트를 모두 지원.
+    algorithm2 Actor와 algorithm3 Actor는 동일 구조이므로 algorithm3으로 통합 로드.
 
-    return actor
+    Returns:
+        model         : 네트워크 (eval 모드)
+        greedy_fn     : (obs_img, obs_scalar) -> pose_act  공통 인터페이스
+        use_visit_map : bool
+        K_img         : int
+    """
+    ckpt       = torch.load(checkpoint_path, map_location=device)
+    saved_args = ckpt.get("args", {})
+    use_visit_map = saved_args.get("use_visit_map", False)
+
+    if _is_scanrl(ckpt):
+        K_img  = ckpt["q_net"]["cnn.0.weight"].shape[1]
+        model  = QNetwork(in_ch=K_img).to(device)
+        model.load_state_dict(ckpt["q_net"])
+        greedy_fn = lambda img, scalar: model(img).argmax(dim=-1)
+        algo_name = "scanrl"
+    else:
+        # algorithm2 / algorithm3 모두 algorithm3.Actor로 로드 (구조 동일)
+        K_img  = ckpt["actor"]["cnn.0.weight"].shape[1]
+        model  = Actor(img_ch=K_img, scalar_dim=3).to(device)
+        model.load_state_dict(ckpt["actor"])
+        greedy_fn = lambda img, scalar: model.greedy(img, scalar)
+        algo_name = "ppo3" if "optimizer_actor" in ckpt else "ppo2"
+
+    model.eval()
+    print(f"[ckpt] loaded → {checkpoint_path}  "
+          f"algo={algo_name}  K_img={K_img}  "
+          f"use_visit_map={use_visit_map}  "
+          f"step={ckpt.get('global_step','?')}")
+    return model, greedy_fn, use_visit_map, K_img
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 메인 평가 루프
 # ─────────────────────────────────────────────────────────────────────────────
-def evaluate_recon(env: OceanEnv, actor: Actor, device: torch.device,
+def evaluate_recon(env: OceanEnv, greedy_fn, device: torch.device,
                     n_episodes: int, max_steps: int, out_dir: Path):
     E = env.num_envs
     if max_steps == 0:
@@ -102,7 +134,7 @@ def evaluate_recon(env: OceanEnv, actor: Actor, device: torch.device,
             if min(completed) >= n_episodes:
                 break
 
-            pose_act   = actor.greedy(obs_img, obs_scalar)
+            pose_act   = greedy_fn(obs_img, obs_scalar)
             env_action = make_env_action(pose_act, E, device)
 
             next_obs, reward, terminated, truncated, _ = env.step(env_action)
@@ -194,24 +226,41 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # 체크포인트를 먼저 peek해 env_cfg 구성 결정
+    ckpt_peek     = torch.load(args.checkpoint, map_location="cpu")
+    saved_args    = ckpt_peek.get("args", {})
+    use_visit_map = saved_args.get("use_visit_map", False)
+    if _is_scanrl(ckpt_peek):
+        K_img = ckpt_peek["q_net"]["cnn.0.weight"].shape[1]
+    else:
+        K_img = ckpt_peek["actor"]["cnn.0.weight"].shape[1]
+    num_seq = K_img - (1 if use_visit_map else 0)
+    del ckpt_peek
+
     env_cfg = OceanEnvCfg()
-    env_cfg.scene.num_envs = args.num_envs
-    env_cfg.debug_vis = True
-    env_cfg.eval_mode = True
-    env_cfg.tsdf.voxel_size = 0.025
-    env_cfg.tsdf.vol_dim    = (80, 80, 80)
+    env_cfg.scene.num_envs    = args.num_envs
+    env_cfg.debug_vis         = True
+    env_cfg.eval_mode         = True
+    env_cfg.tsdf.voxel_size   = 0.025
+    env_cfg.tsdf.vol_dim      = (80, 80, 80)
     env_cfg.tsdf.trunc_margin = 0.025
 
+    if use_visit_map:
+        env_cfg.visual.num_seq_actor  = num_seq
+        env_cfg.visual.num_seq_critic = num_seq
+        env_cfg.use_visit_map         = True
+        env_cfg.observation_space     = (K_img, env_cfg.visual.h, env_cfg.visual.w)
+        env_cfg.state_space           = (K_img, env_cfg.visual.h, env_cfg.visual.w)
 
     env    = OceanEnv(cfg=env_cfg, render_mode="rgb_array" if args.render else None)
     device = env.device
-    actor  = load_actor(args.checkpoint, env_cfg, device)
+    model, greedy_fn, _, _ = load_model(args.checkpoint, device)
 
     print(f"\n[recon] start  num_envs={args.num_envs}  "
         f"num_episodes={args.num_episodes}")
     print(f"[recon] output → {out_dir.resolve()}\n")
 
-    evaluate_recon(env, actor, device,
+    evaluate_recon(env, greedy_fn, device,
                     n_episodes=args.num_episodes,
                     max_steps=args.max_steps,
                     out_dir=out_dir)
