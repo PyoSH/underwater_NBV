@@ -251,3 +251,20 @@ def save_episode_results(out_dir: Path, ep_idx: int, env_id: int,
 
     final_cov = coverage_hist[-1] if coverage_hist else 0.0
     print(f"[ep {ep_idx:03d}] done → {ep_dir}  final_cov={final_cov:.4f}\n")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 외부 뷰 동영상 저장
+# ─────────────────────────────────────────────────────────────────────────────
+def save_episode_video(path: str, frames: list, fps: int = 10):
+    try:
+        import imageio
+    except ImportError:
+        print("[video] imageio 없음 → pip install 'imageio[ffmpeg]'")
+        return
+    if not frames:
+        return
+    with imageio.get_writer(path, fps=fps) as writer:
+        for frame in frames:
+            writer.append_data(frame)
+    print(f"[save] ext video     → {path}  ({len(frames)} frames)")

@@ -39,19 +39,25 @@ simulation_app = app_launcher.app
 
 import numpy as np
 import torch
+import isaaclab.sim as sim_utils
 
 sys.path.insert(0, os.path.dirname(__file__))
 from envCfg          import OceanEnvCfg
 from env             import OceanEnv
 from algorithm3      import Actor, make_env_action
 from algo_scanRL     import QNetwork
-from evaluate_utils  import save_episode_results
+from algo_GenNBV     import Actor as GenNBVActor
+from evaluate_utils  import save_episode_results, save_episode_video
 
 ACTION_NAMES = ["+θ", "-θ", "-φ", "+φ", "-ψ", "+ψ"]
 
 
 def _is_scanrl(ckpt: dict) -> bool:
     return "q_net" in ckpt
+
+
+def _is_gennbv(ckpt: dict) -> bool:
+    return "actor" in ckpt and "embed.geo.conv.0.weight" in ckpt["actor"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -78,6 +84,21 @@ def load_model(checkpoint_path: str, device: torch.device):
         model.load_state_dict(ckpt["q_net"])
         greedy_fn = lambda img, scalar: model(img).argmax(dim=-1)
         algo_name = "scanrl"
+        is_gennbv = False
+    elif _is_gennbv(ckpt):
+        from algo_GenNBV import SemanticEncoder
+        M      = ckpt["actor"]["embed.sem.conv.0.weight"].shape[1]
+        n_flat = ckpt["actor"]["embed.sem.proj.weight"].shape[1]
+        H = W  = next(
+            s for s in range(32, 256)
+            if SemanticEncoder(in_ch=M, H=s, W=s).proj.weight.shape[1] == n_flat
+        )
+        model  = GenNBVActor(img_ch=M, scalar_dim=3, H=H, W=W).to(device)
+        model.load_state_dict(ckpt["actor"])
+        greedy_fn = lambda vox, img, scalar: model.greedy(vox, img, scalar)
+        algo_name = "gennbv"
+        K_img  = M
+        is_gennbv = True
     else:
         # algorithm2 / algorithm3 모두 algorithm3.Actor로 로드 (구조 동일)
         K_img  = ckpt["actor"]["cnn.0.weight"].shape[1]
@@ -85,23 +106,29 @@ def load_model(checkpoint_path: str, device: torch.device):
         model.load_state_dict(ckpt["actor"])
         greedy_fn = lambda img, scalar: model.greedy(img, scalar)
         algo_name = "ppo3" if "optimizer_actor" in ckpt else "ppo2"
+        is_gennbv = False
 
     model.eval()
+    hw_str = f"  H=W={H}" if algo_name == "gennbv" else ""
     print(f"[ckpt] loaded → {checkpoint_path}  "
-          f"algo={algo_name}  K_img={K_img}  "
+          f"algo={algo_name}  K_img={K_img}{hw_str}  "
           f"use_visit_map={use_visit_map}  "
           f"step={ckpt.get('global_step','?')}")
-    return model, greedy_fn, use_visit_map, K_img
+    return model, greedy_fn, use_visit_map, K_img, is_gennbv
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 메인 평가 루프
 # ─────────────────────────────────────────────────────────────────────────────
 def evaluate_recon(env: OceanEnv, greedy_fn, device: torch.device,
-                    n_episodes: int, max_steps: int, out_dir: Path):
+                    n_episodes: int, max_steps: int, out_dir: Path,
+                    is_gennbv: bool = False):
     E = env.num_envs
     if max_steps == 0:
         max_steps = env.max_episode_length * n_episodes * 2
+
+    ext_cam    = env.scene["ext_camera"]
+    ext_frames = [[] for _ in range(E)]
 
     obs, _     = env.reset()
     obs_img    = obs["policy"]
@@ -134,7 +161,17 @@ def evaluate_recon(env: OceanEnv, greedy_fn, device: torch.device,
             if min(completed) >= n_episodes:
                 break
 
-            pose_act   = greedy_fn(obs_img, obs_scalar)
+            if is_gennbv:
+                observed = env._weight_vol > 0
+                vox = torch.stack([
+                    (~observed).float(),
+                    (observed & (env._tsdf_vol  > 0)).float(),
+                    (observed & (env._tsdf_vol <= 0)).float(),
+                ], dim=1)
+                img = env._image_buffer[:, -2:, :, :]
+                pose_act = greedy_fn(vox, img, obs_scalar)
+            else:
+                pose_act = greedy_fn(obs_img, obs_scalar)
             env_action = make_env_action(pose_act, E, device)
 
             next_obs, reward, terminated, truncated, _ = env.step(env_action)
@@ -158,6 +195,10 @@ def evaluate_recon(env: OceanEnv, greedy_fn, device: torch.device,
                 ))
                 rgb_imgs[eid].append(
                     env._camera.data.output["uw_rgb"][eid, :, :, :3]
+                    .cpu().numpy().copy().astype(np.uint8)
+                )
+                ext_frames[eid].append(
+                    ext_cam.data.output["rgb"][eid, :, :, :3]
                     .cpu().numpy().copy().astype(np.uint8)
                 )
 
@@ -203,13 +244,19 @@ def evaluate_recon(env: OceanEnv, greedy_fn, device: torch.device,
                         cam_poses[eid], rgb_imgs[eid], K_cache,
                         env.rock_pos[eid].cpu().numpy(),
                     )
+                    save_episode_video(
+                        str(log_dir / "ext_view.mp4"),
+                        ext_frames[eid],
+                        fps=10,
+                    )
                     completed[eid]  += 1
                     ep_counter[eid] += 1
 
-                cam_trajs[eid] = []
-                cov_hists[eid] = []
-                cam_poses[eid] = []
-                rgb_imgs [eid] = []
+                cam_trajs[eid]  = []
+                cov_hists[eid]  = []
+                cam_poses[eid]  = []
+                rgb_imgs [eid]  = []
+                ext_frames[eid] = []
                 ep_return[eid] = 0.0
                 ep_len   [eid] = 0
                 
@@ -232,6 +279,9 @@ def main():
     use_visit_map = saved_args.get("use_visit_map", False)
     if _is_scanrl(ckpt_peek):
         K_img = ckpt_peek["q_net"]["cnn.0.weight"].shape[1]
+    elif _is_gennbv(ckpt_peek):
+        K_img = ckpt_peek["actor"]["embed.sem.conv.0.weight"].shape[1]
+        # GenNBV는 img 2프레임 + voxel 별도 입력 — num_seq_actor=2, h/w는 load_model에서 자동 검출
     else:
         K_img = ckpt_peek["actor"]["cnn.0.weight"].shape[1]
     num_seq = K_img - (1 if use_visit_map else 0)
@@ -244,6 +294,9 @@ def main():
     env_cfg.tsdf.voxel_size   = 0.025
     env_cfg.tsdf.vol_dim      = (80, 80, 80)
     env_cfg.tsdf.trunc_margin = 0.025
+    env_cfg.visual.h          = 64
+    env_cfg.visual.w          = 64
+
 
     if use_visit_map:
         env_cfg.visual.num_seq_actor  = num_seq
@@ -252,9 +305,27 @@ def main():
         env_cfg.observation_space     = (K_img, env_cfg.visual.h, env_cfg.visual.w)
         env_cfg.state_space           = (K_img, env_cfg.visual.h, env_cfg.visual.w)
 
+    from isaaclab.sensors import CameraCfg
+    env_cfg.scene.ext_camera = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/ExtCamera",
+        update_period=0,
+        height=480,
+        width=640,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=18.0,
+            clipping_range=(0.1, 30.0),
+        ),
+        offset=CameraCfg.OffsetCfg(
+            pos=(-5.5, 0.0, 4.0),
+            rot=(0.9239, 0.0, 0.3827, 0.0),  # X축 +49.4° → (0,-6,4)에서 (0,0,-3) 조준
+            convention="world",
+        ),
+    )
+
     env    = OceanEnv(cfg=env_cfg, render_mode="rgb_array" if args.render else None)
     device = env.device
-    model, greedy_fn, _, _ = load_model(args.checkpoint, device)
+    model, greedy_fn, _, _, is_gennbv = load_model(args.checkpoint, device)
 
     print(f"\n[recon] start  num_envs={args.num_envs}  "
         f"num_episodes={args.num_episodes}")
@@ -263,7 +334,8 @@ def main():
     evaluate_recon(env, greedy_fn, device,
                     n_episodes=args.num_episodes,
                     max_steps=args.max_steps,
-                    out_dir=out_dir)
+                    out_dir=out_dir,
+                    is_gennbv=is_gennbv)
 
     try:
         env.close()

@@ -218,6 +218,7 @@ def main():
     env_cfg.debug_vis = True
     env_cfg.eval_mode = True
     env_cfg.tsdf.voxel_size = 0.025
+    env_cfg.tsdf.trunc_margin = 0.025
     env_cfg.tsdf.vol_dim    = (80, 80, 80)
 
 
