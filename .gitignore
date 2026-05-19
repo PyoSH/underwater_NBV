@@ -3,3 +3,6 @@ __pycache__/
 *$py.class
 
 /ref_paper
+/robots
+/step_1_NBV/wandb
+/step_1_NBV/checkpoints
