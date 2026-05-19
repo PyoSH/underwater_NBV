@@ -228,9 +228,6 @@ def ppo_update(actor: Actor, critic: Critic,
             )
 
             approx_kl_mb = (data["logprobs"][mb] - new_logp).mean().item()
-            if approx_kl_mb > cfg.target_kl:
-                early_stop = True
-                break
 
             ratio  = (new_logp - data["logprobs"][mb]).exp()
             mb_adv = adv[mb]

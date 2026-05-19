@@ -17,7 +17,7 @@ parser.add_argument("--eps_end",            type=float, default=0.05)
 parser.add_argument("--eps_decay",          type=float, default=0.999)
 parser.add_argument("--target_update_freq", type=int,   default=1_000)
 parser.add_argument("--min_replay",         type=int,   default=1_000)
-parser.add_argument("--ckpt_dir",           type=str,   default="./checkpoints_scanrl")
+parser.add_argument("--ckpt_dir",           type=str,   default="/workspace/checkpoints")
 parser.add_argument("--save_interval",      type=int,   default=50_000)
 parser.add_argument("--resume",             type=str,   default=None)
 parser.add_argument("--wandb_project",      type=str,   default="RL_NBV")
@@ -35,6 +35,7 @@ app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
 # ── AppLauncher 이후 import ───────────────────────────────────────────────────
+import math
 import numpy as np
 import torch
 import wandb
@@ -103,6 +104,18 @@ def main():
     # ── 환경 ──────────────────────────────────────────────────────────────────
     env_cfg = OceanEnvCfg()
     env_cfg.scene.num_envs = args.num_envs
+    env_cfg.k_c = 1.0
+    env_cfg.c_step = 2.0
+    env_cfg.coverage_bonus = 100.0
+    env_cfg.k_x = 0.02
+    env_cfg.k_still = 0.0
+
+    env_cfg.phi_min   = math.radians(20)
+    env_cfg.phi_max   = math.radians(70)
+    env_cfg.delta_phi = math.radians(25)
+
+    env_cfg.visual.num_seq_actor = 6
+    env_cfg.visual.num_seq_critic = 6
 
     env    = OceanEnv(cfg=env_cfg, render_mode="rgb_array")
     device = env.device
@@ -159,6 +172,8 @@ def main():
         wandb.watch(q_net, log="gradients", log_freq=500)
 
     ckpt_dir = Path(args.ckpt_dir)
+    if use_wandb:
+        ckpt_dir = ckpt_dir / wandb.run.name
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
 
@@ -277,7 +292,7 @@ def main():
                 f"  [reward]"
                 f"  cov={np.mean(rew_cov_list):+.4f}"
                 f"  penalty={np.mean(rew_pen_list):.4f}"
-                f"  success={np.mean(rew_succ_list):+.4f}"
+                f"  success={np.mean(rew_succ_list):+.4f}",
                 flush=True,
             )
 
@@ -315,8 +330,6 @@ def main():
                 "epsilon":     epsilon,
                 "args":        vars(args),
             }, ckpt_path)
-            if use_wandb:
-                wandb.save(str(ckpt_path))
             print(f"[ckpt] → {ckpt_path}", flush=True)
 
     env.close()

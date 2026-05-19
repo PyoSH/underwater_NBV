@@ -27,7 +27,7 @@ parser.add_argument("--wandb_project",  type=str,   default="RL_NBV")
 parser.add_argument("--wandb_name",     type=str,   default=None)
 parser.add_argument("--eval_interval",  type=int,   default=10,
                     help="run eval every N rollouts (0 = disabled)")
-parser.add_argument("--eval_episodes",  type=int,   default=5)
+parser.add_argument("--eval_episodes",  type=int,   default=20)
 parser.add_argument("--use_visit_map",  action="store_true")
 AppLauncher.add_app_launcher_args(parser)                                           
                 
@@ -98,13 +98,16 @@ def run_eval(env, actor, device, n_episodes: int) -> dict:
 def main():                                                                         
     # ── 환경 ─────────────────────────────────────────────────────────────────
     env_cfg = OceanEnvCfg()
-    env_cfg.scene.num_envs = args.num_envs                                          
+    env_cfg.scene.num_envs = args.num_envs
+    env_cfg.coverage_terminal = 0.82
+    env_cfg.c_step = 0.03
 
     if args.use_visit_map:
         env_cfg.visual.num_seq_actor = 2
         env_cfg.visual.num_seq_critic = 2
 
         env_cfg.use_visit_map = True
+        env_cfg.k_explore     = 0.1
         env_cfg.observation_space = (
             env_cfg.visual.num_seq_actor + 1,
             env_cfg.visual.h, env_cfg.visual.w
@@ -114,6 +117,12 @@ def main():
             env_cfg.visual.h, env_cfg.visual.w
         )
     # env_cfg.sim.dt         = 1.0 / 30.0
+    # elevation 3 단계로 제한
+    # env_cfg.phi_min   = math.radians(20)
+    # env_cfg.phi_max   = math.radians(70)
+    # env_cfg.delta_phi = math.radians(25)
+
+    # 거리 단계도 3단계로 제한 (구현 필요)
                                                                                     
     env    = OceanEnv(cfg=env_cfg, render_mode="rgb_array")                         
     device = env.device                                                             
@@ -178,7 +187,9 @@ def main():
     ep_len    = torch.zeros(E, device=device, dtype=torch.long)           
     finished  = dict(returns=[], lengths=[], coverages=[], terminated=[])
 
-    ckpt_dir = Path(args.ckpt_dir)                                                  
+    ckpt_dir = Path(args.ckpt_dir)
+    if use_wandb:
+        ckpt_dir = ckpt_dir / wandb.run.name
     ckpt_dir.mkdir(parents=True, exist_ok=True)                                     
     t0 = time.time()
                                                                                     
@@ -198,7 +209,7 @@ def main():
         buf.reset()
         actor.eval(); critic.eval()
 
-        rew_cov_list, rew_pen_list, rew_succ_list = [], [], []
+        rew_cov_list, rew_pen_list, rew_succ_list, rew_exp_list, rew_stall_list = [], [], [], [], []
                                                                                     
         # ── Rollout 수집 ──────────────────────────────────────────────────────    
         for _ in range(T):                                                          
@@ -211,6 +222,8 @@ def main():
             rew_cov_list .append(env._last_rew_coverage  .mean().item())
             rew_pen_list .append(env._last_rew_penalty   .mean().item())
             rew_succ_list.append(env._last_success_reward.mean().item())
+            rew_exp_list  .append(env._last_rew_explore   .mean().item())
+            rew_stall_list.append(env._last_rew_stall     .mean().item())
             # done = (terminated | truncated).float()
             terminated_f    = terminated.float()
             done_any        = (terminated | truncated)
@@ -263,6 +276,8 @@ def main():
             "reward/coverage":          np.mean(rew_cov_list),
             "reward/penalty":           np.mean(rew_pen_list),
             "reward/success":           np.mean(rew_succ_list),
+            "reward/explore":           np.mean(rew_exp_list),
+            "reward/stall":             np.mean(rew_stall_list),
             # "train/coverage_mean":      env.curr_coverage.mean().item(),
             "env0/theta_deg":           math.degrees(env._sph_theta[0].item()),
             "env0/phi_deg":             math.degrees(env._sph_phi[0].item()),
@@ -314,6 +329,8 @@ def main():
                 f"  cov={np.mean(rew_cov_list):+.4f}"
                 f"  penalty={np.mean(rew_pen_list):.4f}"
                 f"  success={np.mean(rew_succ_list):+.4f}"
+                f"  explore={np.mean(rew_exp_list):+.4f}"
+                f"  stall={np.mean(rew_stall_list):.4f}"
                 f"  net={buf.rewards.mean().item():+.4f}",
                 flush=True,
             )               

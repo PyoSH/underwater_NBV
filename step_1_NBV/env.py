@@ -274,11 +274,9 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         v = ((self._sph_phi - cfg.phi_min) / (cfg.phi_max - cfg.phi_min) * H).long().clamp(0, H - 1)
         
         flat = self._visit_map.view(self.num_envs, -1)
-        flat.scatter_add_(
-            1,
-            (v * W + u).unsqueeze(1),
-            torch.ones(self.num_envs, 1, device=self.device)
-        )
+        idx  = (v * W + u).unsqueeze(1)                              # (E, 1)
+        self._last_visit_new = (flat.gather(1, idx).squeeze(1) == 0).float()  # (E,)
+        flat.scatter_add_(1, idx, torch.ones(self.num_envs, 1, device=self.device))
         # self._visit_map = flat.reshape(self.num_envs, H, W)
 
         max_val = self._visit_map.reshape(self.num_envs, -1).max(dim=1).values.clamp(min=1)
@@ -389,13 +387,19 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         stall_mask      = (delta_coverage < cfg.stall_thr).float()
         reward_stall    = cfg.k_still * stall_mask
         
+        if self.cfg.use_visit_map and self.cfg.k_explore > 0.0:
+            reward_explore = self.cfg.k_explore * self._last_visit_new
+        else:
+            reward_explore = torch.zeros(self.num_envs, device=self.device)
+
         self._last_rew_coverage = reward_coverage
         self._last_rew_contrast = reward_contrast
         self._last_rew_penalty  = reward_penalty
         self._last_rew_stall    = reward_stall
+        self._last_rew_explore  = reward_explore
         self._last_success_reward = success_reward
 
-        return reward_coverage - reward_penalty - reward_stall + success_reward
+        return reward_coverage - reward_penalty - reward_stall + success_reward + reward_explore
     
     # ── 종료 조건 ─────────────────────────────────────────────────────────────
 

@@ -46,7 +46,7 @@ class OceanEnvCfg(DirectRLEnvCfg):
     scene: OceanSceneCfg = OceanSceneCfg(num_envs=1, env_spacing=10.0)
 
     # ── 에피소드 ─────────────────────────────────────────────────────────────
-    episode_length_s: float = 5.0
+    episode_length_s: float = 0.8333   # 50 steps (50 * 1/60)
 
     # ── RL 공간 크기 ─────────────────────────────────────────────────────────
     use_visit_map:  bool = False
@@ -85,11 +85,13 @@ class OceanEnvCfg(DirectRLEnvCfg):
     k_x:                float = 0.02    # 0.02
     c_step:             float = 0.1    # 2.0 | 0.08
     coverage_terminal:  float = 0.86    # 0.96
-    coverage_bonus:     float = 100.0
+    coverage_bonus:     float = 30.0
     lambda_q:           float = 0.1     # 1.0
 
     k_still:            float = 0.05   # stall penalty (delta_cov < threshold일 때)
     stall_thr:          float = 1e-4   # coverage 증가 최소 임계값
+
+    k_explore:          float = 0.0    # 새 (θ,φ) 위치 방문 시 exploration bonus
 
     # ── 카메라 센서 ──────────────────────────────────────────────────────────
     water_dr:           WaterParamRangeCfg = WaterParamRangeCfg()
