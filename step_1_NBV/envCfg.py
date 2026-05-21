@@ -82,6 +82,7 @@ class OceanEnvCfg(DirectRLEnvCfg):
 
     # ── 보상 가중치 ──────────────────────────────────────────────────────────
     k_c:                float = 5.0    # 1.0 | 50.0
+    k_c_q:              float = 0.0    # quality-weighted coverage reward (genNBV_quality 전용)
     k_x:                float = 0.02    # 0.02
     c_step:             float = 0.1    # 2.0 | 0.08
     coverage_terminal:  float = 0.86    # 0.96

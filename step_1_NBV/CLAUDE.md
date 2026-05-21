@@ -55,8 +55,9 @@
 
 **Voxel 관측 채널**:
 - ch0: `weight == 0` → 미관측
-- ch1: `weight > 0 & tsdf > 0` → free space로 관측됨
-- ch2: `quality_vol / Q_sat` clamp(0,1) → quality 누적값 (연속)
+- ch1: `weight > 0 & tsdf > 0` → TSDF가 free space로 분류
+- ch2: `quality_vol / Q_sat` clamp(0,1) → 관측 품질 누적값 (해석 B: tsdf 무관, weight>0이면 누적)
+- ch1=1이면서 ch2>0인 voxel 가능 (free space이지만 가까이서 관측됨)
 
 ---
 
@@ -219,17 +220,20 @@ quality > 0:          48.5%
 observed but quality=0: 37.2%  ← TSDF 오분류
 ```
 
-### 제안 수정
+### 적용된 수정 (해석 B)
 
 ```python
-# 수정 전
+# 수정 전 (해석 A: TSDF 확정 surface만 누적)
 surface_mask = (self._weight_vol > 0) & (self._tsdf_vol <= 0)
 
-# 수정 후
+# 수정 후 (해석 B: 관측된 voxel이면 누적, TSDF 무관)
 surface_mask = self._weight_vol > 0
 ```
 
-tsdf 조건 제거 시 coverage_q 상한 ≈ binary_coverage (~0.85). quality는 "얼마나 가까이서 관측했는가"를 측정하며 TSDF 확정 여부와 무관하다.
+- coverage_q 상한: binary_coverage (~0.85)까지 열림
+- NBUV Fisher 정보 합산 원래 formulation에 충실 (관측 정보량, TSDF 확정 불필요)
+- coverage_q = "GT surface를 얼마나 가까이서 관측했는가" (재구성 품질 아님)
+- 논문 프레이밍: "quality-aware observation planning"
 
 ---
 
@@ -287,9 +291,9 @@ def _reset_idx(self, env_ids) -> None:
 
 ## 14. 다음 수행 사항
 
-1. **`_compute_quality()` tsdf 조건 제거**: `surface_mask = self._weight_vol > 0`
+1. ~~`_compute_quality()` tsdf 조건 제거~~ **완료** (`surface_mask = self._weight_vol > 0`)
 2. 수정 후 학습 재시작 → coverage_q가 binary coverage 수준(~0.85)까지 상승하는지 확인
-3. coverage_q 상승 시 coverage_terminal 재조정 검토 (0.52 → 0.65~0.75)
+3. coverage_q 상승 확인 시 coverage_terminal 재조정 검토 (0.52 → 0.65~0.75)
 4. length 감소 확인 (coverage_q 상승 → success 빈도 증가 → 에피소드 단축)
 
 ---
