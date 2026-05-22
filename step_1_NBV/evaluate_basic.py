@@ -49,10 +49,10 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(__file__))
-from envCfg         import OceanEnvCfg
-from env            import OceanEnv
-from algorithm2     import make_env_action
-from evaluate_utils import save_episode_results
+from envCfg             import OceanEnvCfg
+from env_GenNBV_quality import OceanEnvGenNBVQuality
+from algorithm2         import make_env_action
+from evaluate_utils     import save_episode_results, save_episode_video
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 궤도 정책
@@ -91,119 +91,144 @@ def orbital_action(ep_step: int, E: int, device: torch.device,
 # ─────────────────────────────────────────────────────────────────────────────
 # 평가 루프
 # ─────────────────────────────────────────────────────────────────────────────
-def evaluate_base(env: OceanEnv, device: torch.device,
+TIMEOUT_STEPS = 50
+
+ACTION_NAMES = ["+θ", "-θ", "+φ", "-φ", "-ψ", "+ψ"]
+
+def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
                 n_episodes: int, max_steps: int, out_dir: Path):
     E = env.num_envs
-    if max_steps == 0:
-        max_steps = env.max_episode_length * n_episodes * 2
 
-    # phi_max 에 닿기까지 하강 가능한 링 수
     cfg = env.cfg
     max_rings = int((cfg.phi_max - cfg.phi_min) / cfg.delta_phi)
 
-    env.reset()
     _K = env._camera.data.intrinsic_matrices[0].cpu().numpy()
     K_cache = (float(_K[0,0]), float(_K[1,1]), float(_K[0,2]), float(_K[1,2]))
 
-    ep_return      = torch.zeros(E, device=device)
-    ep_len         = torch.zeros(E, device=device, dtype=torch.long)
-    ep_step        = [0] * E   # env 별 에피소드 내 스텝 (궤도 정책용)
-    phi_rings_done = [False] * E  # phi_max 도달 여부
-    phi_ring_cnt   = [0] * E      # 현재까지 EL_DOWN 발행 횟수
-    completed      = [0] * E
-    ep_counter     = [0] * E
-
-    cam_trajs = [[] for _ in range(E)]
-    cov_hists = [[] for _ in range(E)]
-    cam_poses = [[] for _ in range(E)]
-    rgb_imgs  = [[] for _ in range(E)]
-
     Nx, Ny, Nz = cfg.tsdf.vol_dim
-    tsdf_snap   = [np.zeros((Nx, Ny, Nz), np.float32) for _ in range(E)]
-    weight_snap = [np.zeros((Nx, Ny, Nz), np.float32) for _ in range(E)]
-    surf_snap   = [np.zeros((Nx, Ny, Nz), bool)        for _ in range(E)]
-    origin_snap = [np.zeros(3,            np.float32)  for _ in range(E)]
+
+    ext_cam = env.scene["ext_camera"]
+
+    print(f"\n[base] start  num_envs={E}  num_episodes={n_episodes}  timeout={TIMEOUT_STEPS}")
+    print(f"[base] policy : orbital  (STEPS_PER_RING={STEPS_PER_RING}  max_rings={max_rings})")
+    print(f"[base] output → {out_dir.resolve()}\n")
 
     with torch.no_grad():
-        for _step in range(max_steps):
-            if min(completed) >= n_episodes:
-                break
+        for ep_idx in range(n_episodes):
+            env.reset()
 
-            # ── 궤도 행동 생성 ────────────────────────────────────────────
-            action = orbital_action(ep_step[0], E, device, phi_rings_done)
+            phi_rings_done = False
+            phi_ring_cnt   = 0
 
-            # EL_DOWN 발행 여부 추적 (phi ring 카운터 갱신)
-            pos  = ep_step[0] % STEPS_PER_RING
-            ring = ep_step[0] // STEPS_PER_RING
-            if pos == 0 and ring > 0:
-                for eid in range(E):
-                    if not phi_rings_done[eid]:
-                        phi_ring_cnt[eid] += 1
-                        if phi_ring_cnt[eid] >= max_rings:
-                            phi_rings_done[eid] = True
+            step_log   = []
+            cov_hist   = []
+            cov_q_hist = []
+            cam_traj   = []
+            cam_poses  = []
+            rgb_imgs   = []
+            ext_frames = []
 
-            next_obs, reward, terminated, truncated, _ = env.step(action)
-            done_any = terminated | truncated
+            tsdf_snap     = np.zeros((Nx, Ny, Nz), np.float32)
+            weight_snap   = np.zeros((Nx, Ny, Nz), np.float32)
+            surf_snap     = np.zeros((Nx, Ny, Nz), bool)
+            origin_snap   = np.zeros(3,             np.float32)
+            rock_pos_snap = env.rock_pos[0].cpu().numpy().copy()
 
-            ep_return += reward
-            ep_len    += 1
-            for eid in range(E):
-                ep_step[eid] += 1
+            done_reason = "timeout"
 
-            # ── non-done: 데이터 수집 + 스냅샷 갱신 ─────────────────────
-            for eid in range(E):
-                if completed[eid] >= n_episodes or done_any[eid]:
-                    continue
+            for ep_step in range(1, TIMEOUT_STEPS + 1):
+                # EL_DOWN 카운터 갱신
+                pos  = (ep_step - 1) % STEPS_PER_RING
+                ring = (ep_step - 1) // STEPS_PER_RING
+                if pos == 0 and ring > 0 and not phi_rings_done:
+                    phi_ring_cnt += 1
+                    if phi_ring_cnt >= max_rings:
+                        phi_rings_done = True
 
-                cam_trajs[eid].append(env.cam_pos[eid].cpu().numpy().copy())
-                cov_hists[eid].append(env.curr_coverage[eid].item())
+                action = orbital_action(ep_step - 1, E, device, [phi_rings_done])
+                act_idx = int(action[0].argmax().item()) if action.dim() > 1 else int(action[0].item())
+
+                _, reward, terminated, truncated, _ = env.step(action)
+
+                is_env_done = terminated[0].item() or truncated[0].item()
+                if is_env_done:
+                    done_reason = "SUCCESS" if terminated[0] else "timeout_env"
+                    break
+
+                cov_bin = env.curr_coverage[0].item()
+                cov_q   = env.curr_coverage_q[0].item()
+                rew     = reward[0].item()
+
+                cam_traj.append(env.cam_pos[0].cpu().numpy().copy())
+                cov_hist.append(cov_bin)
+                cov_q_hist.append(cov_q)
 
                 cp = env._build_cam_pose()
-                cam_poses[eid].append((
-                    cp[eid, :3, :3].cpu().numpy().copy(),
-                    cp[eid, :3,  3].cpu().numpy().copy(),
+                cam_poses.append((
+                    cp[0, :3, :3].cpu().numpy().copy(),
+                    cp[0, :3,  3].cpu().numpy().copy(),
                 ))
-                rgb_imgs[eid].append(
-                    env._camera.data.output["uw_rgb"][eid, :, :, :3]
+                rgb_imgs.append(
+                    env._camera.data.output["uw_rgb"][0, :, :, :3]
+                    .cpu().numpy().copy().astype(np.uint8)
+                )
+                ext_frames.append(
+                    ext_cam.data.output["rgb"][0, :, :, :3]
                     .cpu().numpy().copy().astype(np.uint8)
                 )
 
-                tsdf_snap  [eid] = env._tsdf_vol  [eid].cpu().numpy().copy()
-                weight_snap[eid] = env._weight_vol[eid].cpu().numpy().copy()
-                surf_snap  [eid] = env._surf_vol  [eid].cpu().numpy().copy()
-                origin_snap[eid] = env._vol_origin[eid].cpu().numpy().copy()
+                tsdf_snap     = env._tsdf_vol  [0].cpu().numpy().copy()
+                weight_snap   = env._weight_vol[0].cpu().numpy().copy()
+                surf_snap     = env._surf_vol  [0].cpu().numpy().copy()
+                origin_snap   = env._vol_origin[0].cpu().numpy().copy()
+                rock_pos_snap = env.rock_pos   [0].cpu().numpy().copy()
 
-            # ── done: 스냅샷으로 저장 ────────────────────────────────────
-            for eid in done_any.nonzero(as_tuple=True)[0].tolist():
-                if completed[eid] < n_episodes:
-                    status    = "SUCCESS" if terminated[eid].item() else "timeout"
-                    final_cov = cov_hists[eid][-1] if cov_hists[eid] else 0.0
-                    print(f"  [ep done] env={eid}  ep={ep_counter[eid]:3d}"
-                        f"  {status}  len={ep_len[eid].item():.0f}"
-                        f"  cov={final_cov:.4f}")
+                step_log.append((ep_step, act_idx, cov_bin, cov_q, rew))
+                print(f"    step={ep_step:3d}  act={ACTION_NAMES[act_idx]}({act_idx})  "
+                      f"cov_bin={cov_bin:.4f}  cov_q={cov_q:.4f}  rew={rew:+.5f}")
 
-                    save_episode_results(
-                        out_dir, ep_counter[eid], eid,
-                        tsdf_snap[eid], weight_snap[eid],
-                        surf_snap[eid], origin_snap[eid],
-                        cfg.tsdf.voxel_size,
-                        cam_trajs[eid], cov_hists[eid],
-                        cam_poses[eid], rgb_imgs[eid], K_cache,
-                        env.rock_pos[eid].cpu().numpy(),
-                    )
-                    completed[eid]  += 1
-                    ep_counter[eid] += 1
+            # ── 에피소드 저장 ─────────────────────────────────────────────────
+            import csv
+            coverage_bin = cov_hist[-1]   if cov_hist   else 0.0
+            coverage_q   = cov_q_hist[-1] if cov_q_hist else 0.0
+            n_steps      = len(cov_hist)
 
-                # 다음 에피소드 초기화
-                cam_trajs     [eid] = []
-                cov_hists     [eid] = []
-                cam_poses     [eid] = []
-                rgb_imgs      [eid] = []
-                ep_step       [eid] = 0
-                phi_ring_cnt  [eid] = 0
-                phi_rings_done[eid] = False
-                ep_return     [eid] = 0.0
-                ep_len        [eid] = 0
+            print(f"  [ep done] ep={ep_idx:3d}  {done_reason}  steps={n_steps}  "
+                  f"coverage_bin={coverage_bin:.4f}  coverage_q={coverage_q:.4f}")
+
+            log_dir = out_dir / f"ep_{ep_idx:03d}_env0"
+            log_dir.mkdir(parents=True, exist_ok=True)
+
+            log_path = log_dir / "step_log.csv"
+            with open(log_path, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["step", "action_idx", "action_name",
+                            "coverage_bin", "coverage_q", "reward"])
+                for s, a, cb, cq, r in step_log:
+                    w.writerow([s, a, ACTION_NAMES[a],
+                                f"{cb:.6f}", f"{cq:.6f}", f"{r:.6f}"])
+            print(f"  [log] step_log → {log_path}")
+
+            np.save(str(log_dir / "coverage_bin_hist.npy"),
+                    np.array(cov_hist,   dtype=np.float32))
+            np.save(str(log_dir / "coverage_q_hist.npy"),
+                    np.array(cov_q_hist, dtype=np.float32))
+
+            save_episode_results(
+                out_dir, ep_idx, 0,
+                tsdf_snap, weight_snap,
+                surf_snap, origin_snap,
+                cfg.tsdf.voxel_size,
+                cam_traj, cov_hist,
+                cam_poses, rgb_imgs, K_cache,
+                rock_pos_snap,
+                coverage_q_hist=cov_q_hist,
+            )
+            save_episode_video(
+                str(log_dir / "ext_view.mp4"),
+                ext_frames,
+                fps=10,
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -215,21 +240,46 @@ def main():
 
     env_cfg = OceanEnvCfg()
     env_cfg.scene.num_envs = args.num_envs
-    env_cfg.debug_vis = True
-    env_cfg.eval_mode = True
-    env_cfg.tsdf.voxel_size = 0.025
+    env_cfg.debug_vis      = True
+    env_cfg.eval_mode      = True
+
+    # evaluate_recon.py와 동일한 TSDF 해상도/품질 파라미터
+    env_cfg.tsdf.vol_dim      = (80, 80, 80)
+    env_cfg.tsdf.voxel_size   = 0.025
     env_cfg.tsdf.trunc_margin = 0.025
-    env_cfg.tsdf.vol_dim    = (80, 80, 80)
+    env_cfg.visual.h          = 64
+    env_cfg.visual.w          = 64
 
+    env_cfg.coverage_terminal = 0.82
+    env_cfg.coverage_bonus    = 30.0
+    env_cfg.k_c_q             = 5.0
+    env_cfg.k_c               = 0.0
+    env_cfg.k_x               = 0.0
+    env_cfg.c_step            = 0.02
+    env_cfg.k_still           = 0.05
+    env_cfg.water_dr_enabled  = False
 
-    env    = OceanEnv(cfg=env_cfg, render_mode="rgb_array" if args.render else None)
+    from isaaclab.sensors import CameraCfg
+    import isaaclab.sim as sim_utils
+    env_cfg.scene.ext_camera = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/ExtCamera",
+        update_period=0,
+        height=480,
+        width=640,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=18.0,
+            clipping_range=(0.1, 30.0),
+        ),
+        offset=CameraCfg.OffsetCfg(
+            pos=(-5.5, 0.0, 4.0),
+            rot=(0.9239, 0.0, 0.3827, 0.0),
+            convention="world",
+        ),
+    )
+
+    env    = OceanEnvGenNBVQuality(cfg=env_cfg, render_mode="rgb_array" if args.render else None)
     device = env.device
-
-    print(f"\n[base] start  num_envs={args.num_envs}  "
-        f"num_episodes={args.num_episodes}")
-    max_rings = round((env_cfg.phi_max - env_cfg.phi_min) / env_cfg.delta_phi)
-    print(f"[base] policy : orbital  (STEPS_PER_RING={STEPS_PER_RING}, max_rings={max_rings})")
-    print(f"[base] output → {out_dir.resolve()}\n")
 
     evaluate_base(env, device,
                 n_episodes=args.num_episodes,

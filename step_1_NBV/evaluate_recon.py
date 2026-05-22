@@ -143,210 +143,162 @@ def evaluate_recon(env: OceanEnvGenNBVQuality, greedy_fn, device: torch.device,
                    n_episodes: int, max_steps: int, out_dir: Path,
                    is_gennbv: bool = False, quality_vox: bool = True):
     E = env.num_envs
-    if max_steps == 0:
-        max_steps = TIMEOUT_STEPS * n_episodes * 2 + 100
 
-    ext_cam    = env.scene["ext_camera"]
-    ext_frames = [[] for _ in range(E)]
-
-    obs, _     = env.reset()
-    obs_img    = obs["policy"]
-    obs_scalar = obs["extra_info"]
+    ext_cam = env.scene["ext_camera"]
 
     _K = env._camera.data.intrinsic_matrices[0].cpu().numpy()
     K_cache = (float(_K[0,0]), float(_K[1,1]), float(_K[0,2]), float(_K[1,2]))
 
-    ep_return = torch.zeros(E, device=device)
-    ep_len    = torch.zeros(E, device=device, dtype=torch.long)
-    completed  = [0] * E
-    ep_counter = [0] * E
+    Nx, Ny, Nz = env.cfg.tsdf.vol_dim
 
-    # step_logs: (ep_step, act_idx, cov_bin, cov_q, reward)
-    step_logs = [[] for _ in range(E)]
-
-    cam_trajs    = [[] for _ in range(E)]
-    cov_hists    = [[] for _ in range(E)]   # binary coverage per step
-    cov_q_hists  = [[] for _ in range(E)]   # quality coverage per step
-    cam_poses    = [[] for _ in range(E)]
-    rgb_imgs     = [[] for _ in range(E)]
-
-    Nx, Ny, Nz  = env.cfg.tsdf.vol_dim
-    tsdf_snap   = [np.zeros((Nx, Ny, Nz), np.float32) for _ in range(E)]
-    weight_snap = [np.zeros((Nx, Ny, Nz), np.float32) for _ in range(E)]
-    surf_snap   = [np.zeros((Nx, Ny, Nz), bool)        for _ in range(E)]
-    origin_snap = [np.zeros(3,            np.float32)  for _ in range(E)]
-
-    # 공통 종료 조건: stall 추적
-    stall_counter   = [0]   * E
-    prev_coverage_q = [0.0] * E
+    print(f"\n[recon] start  num_envs={E}  num_episodes={n_episodes}  "
+          f"stall_steps={STALL_STEPS}  timeout={TIMEOUT_STEPS}")
+    print(f"[recon] output → {out_dir}\n")
 
     with torch.no_grad():
-        for _step in range(max_steps):
-            if min(completed) >= n_episodes:
-                break
+        for ep_idx in range(n_episodes):
+            obs, _     = env.reset()
+            obs_img    = obs["policy"]
+            obs_scalar = obs["extra_info"]
 
-            # ── 행동 선택 ─────────────────────────────────────────────────────
-            if is_gennbv:
-                if quality_vox:
-                    vox = env._get_vox_actor()      # (E, 3, Nx, Ny, Nz) quality ch2
+            step_log   = []
+            cov_hist   = []
+            cov_q_hist = []
+            cam_traj   = []
+            cam_poses  = []
+            rgb_imgs   = []
+            ext_frames = []
+
+            stall_counter = 0
+            prev_q        = 0.0
+
+            # 스냅샷: 비종료 스텝마다 갱신 → 마지막 유효 상태 보존
+            tsdf_snap     = np.zeros((Nx, Ny, Nz), np.float32)
+            weight_snap   = np.zeros((Nx, Ny, Nz), np.float32)
+            surf_snap     = np.zeros((Nx, Ny, Nz), bool)
+            origin_snap   = np.zeros(3,             np.float32)
+            rock_pos_snap = env.rock_pos[0].cpu().numpy().copy()
+
+            done_reason = "timeout"
+
+            for ep_step in range(1, TIMEOUT_STEPS + 1):
+                # ── 행동 선택 ─────────────────────────────────────────────────
+                if is_gennbv:
+                    if quality_vox:
+                        vox = env._get_vox_actor()
+                    else:
+                        observed = env._weight_vol > 0
+                        vox = torch.stack([
+                            (~observed).float(),
+                            (observed & (env._tsdf_vol > 0)).float(),
+                            (observed & (env._tsdf_vol <= 0)).float(),
+                        ], dim=1)
+                    img = env._image_buffer[:, -2:, :, :]
+                    pose_act = greedy_fn(vox, img, obs_scalar)
                 else:
-                    observed = env._weight_vol > 0
-                    vox = torch.stack([
-                        (~observed).float(),
-                        (observed & (env._tsdf_vol > 0)).float(),
-                        (observed & (env._tsdf_vol <= 0)).float(),
-                    ], dim=1)
-                img = env._image_buffer[:, -2:, :, :]
-                pose_act = greedy_fn(vox, img, obs_scalar)
-            else:
-                pose_act = greedy_fn(obs_img, obs_scalar)
-            env_action = make_env_action(pose_act, E, device)
+                    pose_act = greedy_fn(obs_img, obs_scalar)
 
-            next_obs, reward, terminated, truncated, _ = env.step(env_action)
+                env_action = make_env_action(pose_act, E, device)
+                next_obs, reward, terminated, truncated, _ = env.step(env_action)
 
-            ep_return += reward
-            ep_len    += 1
-
-            # ── 공통 종료 조건 계산 ───────────────────────────────────────────
-            stall_fired  = torch.zeros(E, dtype=torch.bool, device=device)
-            timeout_fired = ep_len >= TIMEOUT_STEPS
-
-            for eid in range(E):
-                if completed[eid] >= n_episodes:
-                    continue
-                cov_q_now = env.curr_coverage_q[eid].item()
-                delta_q   = abs(cov_q_now - prev_coverage_q[eid])
+                # ── stall 판정 (데이터 수집 전) ───────────────────────────────
+                cov_q_now = env.curr_coverage_q[0].item()
+                delta_q   = abs(cov_q_now - prev_q)
                 if delta_q < STALL_DELTA_Q:
-                    stall_counter[eid] += 1
+                    stall_counter += 1
                 else:
-                    stall_counter[eid] = 0
-                prev_coverage_q[eid] = cov_q_now
-                if stall_counter[eid] >= STALL_STEPS:
-                    stall_fired[eid] = True
+                    stall_counter = 0
+                prev_q = cov_q_now
 
-            # env의 done (success or env-internal timeout) + 우리 custom done
-            done_any = terminated | truncated | stall_fired | timeout_fired
+                stall_fired = stall_counter >= STALL_STEPS
+                is_env_done = terminated[0].item() or truncated[0].item()
 
-            # stall/timeout으로 인한 강제 리셋 (env가 자체 done하지 않은 경우)
-            force_reset_mask = (stall_fired | timeout_fired) & ~(terminated | truncated)
-            force_ids = force_reset_mask.nonzero(as_tuple=True)[0].tolist()
-            if force_ids:
-                env._reset_idx(force_ids)
-                # force-reset envs의 obs_scalar를 새 에피소드 초기값으로 갱신
-                fresh_obs = env._get_observations()
-                for eid in force_ids:
-                    next_obs["extra_info"][eid] = fresh_obs["extra_info"][eid]
+                if stall_fired:
+                    done_reason = "stall"
+                    break
+                if is_env_done:
+                    done_reason = "SUCCESS" if terminated[0] else "timeout"
+                    break
 
-            # ── non-done: 데이터 수집 + 스냅샷 갱신 ─────────────────────────
-            for eid in range(E):
-                if completed[eid] >= n_episodes or done_any[eid]:
-                    continue
+                # ── 정상 스텝: 데이터 수집 + 스냅샷 갱신 ─────────────────────
+                cov_bin = env.curr_coverage[0].item()
+                cov_q   = cov_q_now
+                act_idx = pose_act[0].item()
+                rew     = reward[0].item()
 
-                cov_bin = env.curr_coverage[eid].item()
-                cov_q   = env.curr_coverage_q[eid].item()
-                act_idx = pose_act[eid].item()
-                rew     = reward[eid].item()
-
-                cam_trajs[eid].append(env.cam_pos[eid].cpu().numpy().copy())
-                cov_hists[eid].append(cov_bin)
-                cov_q_hists[eid].append(cov_q)
+                cam_traj.append(env.cam_pos[0].cpu().numpy().copy())
+                cov_hist.append(cov_bin)
+                cov_q_hist.append(cov_q)
 
                 cp = env._build_cam_pose()
-                cam_poses[eid].append((
-                    cp[eid, :3, :3].cpu().numpy().copy(),
-                    cp[eid, :3,  3].cpu().numpy().copy(),
+                cam_poses.append((
+                    cp[0, :3, :3].cpu().numpy().copy(),
+                    cp[0, :3,  3].cpu().numpy().copy(),
                 ))
-                rgb_imgs[eid].append(
-                    env._camera.data.output["uw_rgb"][eid, :, :, :3]
+                rgb_imgs.append(
+                    env._camera.data.output["uw_rgb"][0, :, :, :3]
                     .cpu().numpy().copy().astype(np.uint8)
                 )
-                ext_frames[eid].append(
-                    ext_cam.data.output["rgb"][eid, :, :, :3]
+                ext_frames.append(
+                    ext_cam.data.output["rgb"][0, :, :, :3]
                     .cpu().numpy().copy().astype(np.uint8)
                 )
 
-                tsdf_snap  [eid] = env._tsdf_vol  [eid].cpu().numpy().copy()
-                weight_snap[eid] = env._weight_vol[eid].cpu().numpy().copy()
-                surf_snap  [eid] = env._surf_vol  [eid].cpu().numpy().copy()
-                origin_snap[eid] = env._vol_origin[eid].cpu().numpy().copy()
+                tsdf_snap     = env._tsdf_vol  [0].cpu().numpy().copy()
+                weight_snap   = env._weight_vol[0].cpu().numpy().copy()
+                surf_snap     = env._surf_vol  [0].cpu().numpy().copy()
+                origin_snap   = env._vol_origin[0].cpu().numpy().copy()
+                rock_pos_snap = env.rock_pos   [0].cpu().numpy().copy()
 
-                step_logs[eid].append(
-                    (int(ep_len[eid].item()), act_idx, cov_bin, cov_q, rew)
-                )
-                print(f"    step={int(ep_len[eid].item()):3d}  "
+                step_log.append((ep_step, act_idx, cov_bin, cov_q, rew))
+                print(f"    step={ep_step:3d}  "
                       f"act={ACTION_NAMES[act_idx]}({act_idx})  "
                       f"cov_bin={cov_bin:.4f}  cov_q={cov_q:.4f}  rew={rew:+.5f}")
 
-            # ── done: 저장 ───────────────────────────────────────────────────
-            for eid in done_any.nonzero(as_tuple=True)[0].tolist():
-                if completed[eid] < n_episodes:
-                    # curr_coverage_q는 _reset_idx() 이후 이미 0으로 클리어됨.
-                    # _terminal_coverage_q는 _reset_idx() 내에서 reset 직전에 저장됨.
-                    coverage_q   = env._terminal_coverage_q[eid].item()
-                    coverage_bin = cov_hists[eid][-1] if cov_hists[eid] else 0.0
-                    steps        = int(ep_len[eid].item())
+                obs_img    = next_obs["policy"]
+                obs_scalar = next_obs["extra_info"]
 
-                    if terminated[eid]:
-                        status = "SUCCESS"
-                    elif stall_fired[eid]:
-                        status = "stall"
-                    else:
-                        status = "timeout"
+            # ── 에피소드 종료: 저장 ────────────────────────────────────────────
+            coverage_bin = cov_hist[-1]   if cov_hist   else 0.0
+            coverage_q   = cov_q_hist[-1] if cov_q_hist else 0.0
+            n_steps      = len(cov_hist)
 
-                    print(f"  [ep done] env={eid}  ep={ep_counter[eid]:3d}  {status}  "
-                          f"steps={steps}  "
-                          f"coverage_bin={coverage_bin:.4f}  coverage_q={coverage_q:.4f}")
+            print(f"  [ep done] ep={ep_idx:3d}  {done_reason}  steps={n_steps}  "
+                  f"coverage_bin={coverage_bin:.4f}  coverage_q={coverage_q:.4f}")
 
-                    log_dir  = out_dir / f"ep_{ep_counter[eid]:03d}_env{eid}"
-                    log_dir.mkdir(parents=True, exist_ok=True)
+            log_dir = out_dir / f"ep_{ep_idx:03d}_env0"
+            log_dir.mkdir(parents=True, exist_ok=True)
 
-                    log_path = log_dir / "step_log.csv"
-                    with open(log_path, "w", newline="") as f:
-                        w = csv.writer(f)
-                        w.writerow(["step", "action_idx", "action_name",
-                                    "coverage_bin", "coverage_q", "reward"])
-                        for s, a, cb, cq, r in step_logs[eid]:
-                            w.writerow([s, a, ACTION_NAMES[a],
-                                        f"{cb:.6f}", f"{cq:.6f}", f"{r:.6f}"])
-                    print(f"  [log] step_log → {log_path}")
+            log_path = log_dir / "step_log.csv"
+            with open(log_path, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["step", "action_idx", "action_name",
+                            "coverage_bin", "coverage_q", "reward"])
+                for s, a, cb, cq, r in step_log:
+                    w.writerow([s, a, ACTION_NAMES[a],
+                                f"{cb:.6f}", f"{cq:.6f}", f"{r:.6f}"])
+            print(f"  [log] step_log → {log_path}")
 
-                    np.save(str(log_dir / "coverage_bin_hist.npy"),
-                            np.array(cov_hists[eid],   dtype=np.float32))
-                    np.save(str(log_dir / "coverage_q_hist.npy"),
-                            np.array(cov_q_hists[eid], dtype=np.float32))
+            np.save(str(log_dir / "coverage_bin_hist.npy"),
+                    np.array(cov_hist,   dtype=np.float32))
+            np.save(str(log_dir / "coverage_q_hist.npy"),
+                    np.array(cov_q_hist, dtype=np.float32))
 
-                    save_episode_results(
-                        out_dir, ep_counter[eid], eid,
-                        tsdf_snap[eid], weight_snap[eid],
-                        surf_snap[eid], origin_snap[eid],
-                        env.cfg.tsdf.voxel_size,
-                        cam_trajs[eid], cov_hists[eid],
-                        cam_poses[eid], rgb_imgs[eid], K_cache,
-                        env.rock_pos[eid].cpu().numpy(),
-                    )
-                    save_episode_video(
-                        str(log_dir / "ext_view.mp4"),
-                        ext_frames[eid],
-                        fps=10,
-                    )
-                    completed[eid]  += 1
-                    ep_counter[eid] += 1
-
-                # per-episode 상태 초기화
-                cam_trajs[eid]    = []
-                cov_hists[eid]    = []
-                cov_q_hists[eid]  = []
-                cam_poses[eid]    = []
-                rgb_imgs[eid]     = []
-                ext_frames[eid]   = []
-                ep_return[eid]    = 0.0
-                ep_len[eid]       = 0
-                step_logs[eid]    = []
-                stall_counter[eid]   = 0
-                prev_coverage_q[eid] = 0.0
-
-            obs_img    = next_obs["policy"]
-            obs_scalar = next_obs["extra_info"]
+            save_episode_results(
+                out_dir, ep_idx, 0,
+                tsdf_snap, weight_snap,
+                surf_snap, origin_snap,
+                env.cfg.tsdf.voxel_size,
+                cam_traj, cov_hist,
+                cam_poses, rgb_imgs, K_cache,
+                rock_pos_snap,
+                coverage_q_hist=cov_q_hist,
+            )
+            save_episode_video(
+                str(log_dir / "ext_view.mp4"),
+                ext_frames,
+                fps=10,
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -375,12 +327,15 @@ def main():
     env_cfg.scene.num_envs    = args.num_envs
     env_cfg.debug_vis         = True
     env_cfg.eval_mode         = True
-    # 학습과 동일한 voxel / image 해상도 (공정 비교)
-    env_cfg.tsdf.vol_dim      = (40, 40, 40)
-    env_cfg.tsdf.voxel_size   = 0.05
-    env_cfg.tsdf.trunc_margin = 0.05
-    env_cfg.visual.h          = 64
-    env_cfg.visual.w          = 64
+
+    env_cfg.tsdf.vol_dim      = (80, 80, 80)
+    env_cfg.tsdf.voxel_size   = 0.025
+    env_cfg.tsdf.trunc_margin = 0.025
+    # ScanRL은 84×84로 학습됨 (fc.0.weight shape 512×3136 → 84×84 기준)
+    # GenNBV/PPO는 64×64로 평가 (TSDF 해상도 개선)
+    if not is_scanrl_peek:
+        env_cfg.visual.h = 64
+        env_cfg.visual.w = 64
     # ScanRL: 이미지 채널 수 = K_img 프레임; GenNBV quality: 학습 고정값 2
     if is_scanrl_peek:
         env_cfg.visual.num_seq_actor  = K_img

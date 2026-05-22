@@ -190,9 +190,11 @@ def save_trajectory_plot(path: str, cam_traj: list,
     print(f"[save] trajectory    → {path}")
 
 
-def save_coverage_plot(path: str, coverage_hist: list):
+def save_coverage_plot(path: str, coverage_hist: list, coverage_q_hist: list | None = None):
     fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(coverage_hist, linewidth=1.5)
+    ax.plot(coverage_hist, linewidth=1.5, label="binary")
+    if coverage_q_hist:
+        ax.plot(coverage_q_hist, linewidth=1.5, linestyle="--", label="quality")
     ax.axhline(y=0.96, color="r", linestyle="--", linewidth=1, label="terminal")
     ax.set_xlabel("Step"); ax.set_ylabel("Coverage")
     ax.set_ylim(0, 1.05)
@@ -214,7 +216,8 @@ def save_episode_results(out_dir: Path, ep_idx: int, env_id: int,
                         cam_traj: list, coverage_hist: list,
                         cam_poses: list, rgb_imgs: list,
                         K_cache: tuple | None,
-                        rock_pos: np.ndarray):
+                        rock_pos: np.ndarray,
+                        coverage_q_hist: list | None = None):
     ep_dir = out_dir / f"ep_{ep_idx:03d}_env{env_id}"
     ep_dir.mkdir(parents=True, exist_ok=True)
     vox = voxel_size
@@ -245,7 +248,7 @@ def save_episode_results(out_dir: Path, ep_idx: int, env_id: int,
 
     # 플롯
     if cam_traj:
-        save_coverage_plot(str(ep_dir / "coverage_curve.png"), coverage_hist)
+        save_coverage_plot(str(ep_dir / "coverage_curve.png"), coverage_hist, coverage_q_hist)
         save_trajectory_plot(str(ep_dir / "trajectory.png"),
                             cam_traj, rock_pos, verts_world)
 
