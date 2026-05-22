@@ -407,6 +407,7 @@ def main():
                 "optimizer_actor": optimizer_actor .state_dict(),
                 "optimizer_critic":optimizer_critic.state_dict(),
                 "args":            vars(args),
+                "env_type":        "gennbv_quality",
             }, ckpt_path)
             print(f"[ckpt] → {ckpt_path}", flush=True)
 

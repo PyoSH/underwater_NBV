@@ -1,4 +1,4 @@
-# OceanRL NBV — 프로젝트 전체 현황 (2026-05-21)
+# OceanRL NBV — 프로젝트 전체 현황 (2026-05-22)
 
 ---
 
@@ -37,7 +37,9 @@
 | `env_GenNBV.py` | Binary coverage 환경 (부모 클래스) |
 | `env_reward.py` | TSDF 적분, binary coverage 계산 |
 | `envCfg.py` | 환경 설정 및 보상 가중치 |
+| `evaluate_recon.py` | **공통 평가 스크립트** (모든 비교 알고리즘에 동일 조건 적용) |
 | `algorithm2.py` | PPO Actor/Critic 네트워크 (CNN + LSTM) |
+| `algo_GenNBV.py` | GenNBV Actor/Critic (3D CNN + 2D CNN + MLP) |
 | `train_RL.py` | 구버전 PPO (binary coverage) |
 | `train_scanRL.py` | DQN 학습 (사용 보류) |
 
@@ -273,6 +275,7 @@ def _reset_idx(self, env_ids) -> None:
 | UW_NBV_1 | coverage_terminal=0.52로 하향, c_step=0.02 | coverage_q ~0.48, success ~15%, length 소폭 감소 |
 | UW_NBV_diag | 진단 run (버그 있음) | never=0.791 → coverage_q와 불일치, 무효 |
 | UW_NBV_diag2 | 진단 run (버그 수정) | never=0.515, full=0.479 → coverage_q=0.483 일치 ✓ |
+| **UW_NBV_2** | **해석 B + coverage_terminal=0.82 + ent_coef=0.10** | **step ~522K: EVAL cov_q=0.82-0.83, success=0.76-0.93, diag/GT full=0.81 ✓** |
 
 ---
 
@@ -292,9 +295,11 @@ def _reset_idx(self, env_ids) -> None:
 ## 14. 다음 수행 사항
 
 1. ~~`_compute_quality()` tsdf 조건 제거~~ **완료** (`surface_mask = self._weight_vol > 0`)
-2. 수정 후 학습 재시작 → coverage_q가 binary coverage 수준(~0.85)까지 상승하는지 확인
-3. coverage_q 상승 확인 시 coverage_terminal 재조정 검토 (0.52 → 0.65~0.75)
-4. length 감소 확인 (coverage_q 상승 → success 빈도 증가 → 에피소드 단축)
+2. ~~수정 후 학습 재시작~~ **완료** (UW_NBV_2, step ~522K, EVAL success ~0.82)
+3. ~~evaluate_recon.py 차원 불일치 수정~~ **완료** (ch2 mismatch 수정, 공통 평가 조건 적용)
+4. UW_NBV_2 학습 계속 → 1M step까지 진행 후 최종 체크포인트로 evaluate_recon 실행
+5. 비교 실험: ScanRL / 기존 PPO / 수동 궤도 에 동일 조건 evaluate_recon 실행
+6. coverage_q 커브 비교 그래프 작성 (coverage_q_hist.npy 활용)
 
 ---
 
@@ -302,11 +307,58 @@ def _reset_idx(self, env_ids) -> None:
 
 ```bash
 # 실시간 로그
-docker exec env_pyoten tail -f /workspace/logs/train_UW_NBV_1.log
+docker exec env_pyoten tail -f /workspace/logs/train_UW_NBV_2.log
 
 # 최신 체크포인트
-ls -lt /workspace/pyoten/checkpoints/UW_NBV_1/
+ls -lt /workspace/pyoten/checkpoints/UW_NBV_2/
 
 # 프로세스 확인
-docker exec env_pyoten pgrep -a python.sh
+docker exec env_pyoten pgrep -af python3 | grep train
 ```
+
+---
+
+## 16. evaluate_recon.py 공통 평가 설계
+
+### 환경: 항상 `OceanEnvGenNBVQuality`
+모든 비교 알고리즘에 동일한 환경 사용 → quality metric 공정 비교.
+
+### 공통 종료 조건
+```
+stall:   delta_coverage_q < 0.01 이 5스텝 연속 → 조기 종료
+timeout: ep_len >= 50 스텝
+```
+환경의 내부 종료(coverage_q >= 0.82, 성공 판정)도 그대로 유지.
+
+### 출력 구조
+```
+recon_output/
+  ep_000_env0/
+    step_log.csv           # step, action, coverage_bin, coverage_q, reward
+    coverage_bin_hist.npy  # 스텝별 binary coverage
+    coverage_q_hist.npy    # 스텝별 quality coverage
+    ext_view.mp4           # 외부 카메라 영상
+    mesh.ply               # 복원 메시
+```
+
+### 실행 예시
+```bash
+docker exec env_pyoten bash -c "cd /workspace/Programing/OceanRL_test/step_1_NBV && \
+DISPLAY=:99 /workspace/isaac-sim/python.sh evaluate_recon.py \
+    --checkpoint /workspace/checkpoints/UW_NBV_2/genNBV_quality_step_0000522240.pt \
+    --num_episodes 30 \
+    --out_dir ./recon_output/UW_NBV_2_522k \
+> /workspace/logs/eval_UW_NBV_2.log 2>&1"
+```
+
+### 알고리즘 판별 (자동)
+- `q_net` 키 → ScanRL
+- `actor` + `embed.geo.conv.0.weight` 키 → GenNBV (우리 모델 포함)
+- 그 외 → PPO (algorithm2/3)
+
+### 주의: evaluate_recon.py에서 `num_seq` 변수
+```python
+num_seq = K_img - (1 if use_visit_map else 0)
+```
+이 값은 GenNBV 체크포인트에서 K_img=2(image channels)를 읽으므로 `num_seq=2`.
+use_visit_map=False이면 env_cfg에 적용되지 않아 무해함.
