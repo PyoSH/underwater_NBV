@@ -5,4 +5,6 @@ __pycache__/
 /ref_paper
 /robots
 /step_1_NBV/wandb
-/step_1_NBV/checkpoints
+/step_1_NBV/checkpoints*
+/step_1_NBV/recon_output
+/step_1_NBV/recon_output_base
