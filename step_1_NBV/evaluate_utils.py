@@ -75,6 +75,47 @@ def fuse_highres_tsdf(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 고해상도 Quality 계산 (fuse_highres_tsdf 이후 호출)
+# ─────────────────────────────────────────────────────────────────────────────
+def fuse_highres_quality(
+    cam_positions: list,
+    vol_origin: np.ndarray,
+    weight_hires: np.ndarray,
+    mu: float = 0.217,
+    voxel_size: float = 0.025,
+) -> np.ndarray:
+    """
+    cam_positions : list of (3,) world-space camera positions (cam_traj)
+    weight_hires  : (Nx, Ny, Nz) from fuse_highres_tsdf — observed mask
+    반환          : quality_vol (Nx, Ny, Nz) — max exp(-μd) over steps
+    """
+    Nx, Ny, Nz = weight_hires.shape
+    vox = voxel_size
+
+    xi = (np.arange(Nx, dtype=np.float32) + 0.5) * vox
+    yi = (np.arange(Ny, dtype=np.float32) + 0.5) * vox
+    zi = (np.arange(Nz, dtype=np.float32) + 0.5) * vox
+    gx, gy, gz = np.meshgrid(xi, yi, zi, indexing='ij')
+    vox_world = (
+        np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=-1) + vol_origin
+    )  # (N, 3)
+
+    observed_flat = (weight_hires > 0).ravel()
+    quality_flat  = np.zeros(Nx * Ny * Nz, np.float32)
+
+    for cam_pos in cam_positions:
+        dist        = np.linalg.norm(vox_world - cam_pos[np.newaxis, :], axis=-1)
+        quality_new = np.exp(-mu * dist).astype(np.float32)
+        quality_flat = np.where(
+            observed_flat,
+            np.maximum(quality_flat, quality_new),
+            quality_flat,
+        )
+
+    return quality_flat.reshape(Nx, Ny, Nz)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 3D 복원: TSDF Marching Cubes
 # ─────────────────────────────────────────────────────────────────────────────
 def reconstruct_mesh(tsdf_vol: np.ndarray,

@@ -56,7 +56,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from envCfg             import OceanEnvCfg
 from env_GenNBV_quality import OceanEnvGenNBVQuality
 from algorithm2         import make_env_action
-from evaluate_utils     import save_episode_results, save_episode_video
+from evaluate_utils     import save_episode_results, save_episode_video, fuse_highres_tsdf, fuse_highres_quality
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 궤도 정책
@@ -102,6 +102,7 @@ ACTION_NAMES = ["+θ", "-θ", "+φ", "-φ", "-ψ", "+ψ"]
 def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
                 n_episodes: int, max_steps: int, out_dir: Path):
     E = env.num_envs
+    timeout = max_steps if max_steps > 0 else TIMEOUT_STEPS
 
     cfg = env.cfg
     max_rings = int((cfg.phi_max - cfg.phi_min) / cfg.delta_phi)
@@ -113,7 +114,7 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
 
     ext_cam = env.scene["ext_camera"]
 
-    print(f"\n[base] start  num_envs={E}  num_episodes={n_episodes}  timeout={TIMEOUT_STEPS}")
+    print(f"\n[base] start  num_envs={E}  num_episodes={n_episodes}  timeout={timeout}")
     print(f"[base] policy : orbital  (STEPS_PER_RING={STEPS_PER_RING}  max_rings={max_rings})")
     print(f"[base] output → {out_dir.resolve()}\n")
 
@@ -130,17 +131,19 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
             cam_traj   = []
             cam_poses  = []
             rgb_imgs   = []
+            depth_imgs = []
             ext_frames = []
 
             tsdf_snap     = np.zeros((Nx, Ny, Nz), np.float32)
             weight_snap   = np.zeros((Nx, Ny, Nz), np.float32)
+            quality_snap  = np.zeros((Nx, Ny, Nz), np.float32)
             surf_snap     = np.zeros((Nx, Ny, Nz), bool)
             origin_snap   = np.zeros(3,             np.float32)
             rock_pos_snap = env.rock_pos[0].cpu().numpy().copy()
 
             done_reason = "timeout"
 
-            for ep_step in range(1, TIMEOUT_STEPS + 1):
+            for ep_step in range(1, timeout + 1):
                 # EL_DOWN 카운터 갱신
                 pos  = (ep_step - 1) % STEPS_PER_RING
                 ring = (ep_step - 1) // STEPS_PER_RING
@@ -176,16 +179,21 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
                     env._camera.data.output["uw_rgb"][0, :, :, :3]
                     .cpu().numpy().copy().astype(np.uint8)
                 )
+                _d = env._camera.data.output["distance_to_camera"][0]
+                if _d.dim() == 3:
+                    _d = _d.squeeze(-1)
+                depth_imgs.append(_d.cpu().numpy().copy())
                 ext_frames.append(
                     ext_cam.data.output["rgb"][0, :, :, :3]
                     .cpu().numpy().copy().astype(np.uint8)
                 )
 
-                tsdf_snap     = env._tsdf_vol  [0].cpu().numpy().copy()
-                weight_snap   = env._weight_vol[0].cpu().numpy().copy()
-                surf_snap     = env._surf_vol  [0].cpu().numpy().copy()
-                origin_snap   = env._vol_origin[0].cpu().numpy().copy()
-                rock_pos_snap = env.rock_pos   [0].cpu().numpy().copy()
+                tsdf_snap     = env._tsdf_vol   [0].cpu().numpy().copy()
+                weight_snap   = env._weight_vol [0].cpu().numpy().copy()
+                quality_snap  = env._quality_vol[0].cpu().numpy().copy()
+                surf_snap     = env._surf_vol   [0].cpu().numpy().copy()
+                origin_snap   = env._vol_origin [0].cpu().numpy().copy()
+                rock_pos_snap = env.rock_pos    [0].cpu().numpy().copy()
 
                 step_log.append((ep_step, act_idx, cov_bin, cov_q, rew))
                 print(f"    step={ep_step:3d}  act={ACTION_NAMES[act_idx]}({act_idx})  "
@@ -217,6 +225,28 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
                     np.array(cov_hist,   dtype=np.float32))
             np.save(str(log_dir / "coverage_q_hist.npy"),
                     np.array(cov_q_hist, dtype=np.float32))
+            np.save(str(log_dir / "quality_vol.npy"),  quality_snap)
+            np.save(str(log_dir / "weight_vol.npy"),   weight_snap)
+            np.save(str(log_dir / "tsdf_vol.npy"),     tsdf_snap)
+
+            # 고해상도 TSDF + quality 재융합
+            tsdf_hi = weight_hi = quality_hi = None
+            if depth_imgs and cam_poses:
+                tsdf_hi, weight_hi = fuse_highres_tsdf(
+                    depth_imgs, cam_poses, K_cache, origin_snap,
+                    vol_dim=(80, 80, 80), voxel_size=0.025, trunc_margin=0.025,
+                )
+            if weight_hi is not None and cam_traj:
+                quality_hi = fuse_highres_quality(
+                    cam_traj, origin_snap, weight_hi,
+                    mu=0.217, voxel_size=0.025,
+                )
+
+            if tsdf_hi is not None:
+                np.save(str(log_dir / "tsdf_vol_hires.npy"),    tsdf_hi)
+                np.save(str(log_dir / "weight_vol_hires.npy"),  weight_hi)
+            if quality_hi is not None:
+                np.save(str(log_dir / "quality_vol_hires.npy"), quality_hi)
 
             save_episode_results(
                 out_dir, ep_idx, 0,
@@ -227,6 +257,9 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
                 cam_poses, rgb_imgs, K_cache,
                 rock_pos_snap,
                 coverage_q_hist=cov_q_hist,
+                tsdf_hires=tsdf_hi,
+                weight_hires=weight_hi,
+                voxel_hires=0.025,
             )
             save_episode_video(
                 str(log_dir / "ext_view.mp4"),

@@ -58,7 +58,7 @@ from env_GenNBV_quality import OceanEnvGenNBVQuality
 from algorithm3         import Actor, make_env_action
 from algo_scanRL        import QNetwork
 from algo_GenNBV        import Actor as GenNBVActor
-from evaluate_utils     import save_episode_results, save_episode_video, fuse_highres_tsdf
+from evaluate_utils     import save_episode_results, save_episode_video, fuse_highres_tsdf, fuse_highres_quality
 
 ACTION_NAMES = ["+θ", "-θ", "-φ", "+φ", "-ψ", "+ψ"]
 
@@ -149,6 +149,7 @@ def evaluate_recon(env: OceanEnvGenNBVQuality, greedy_fn, device: torch.device,
                    n_episodes: int, max_steps: int, out_dir: Path,
                    is_gennbv: bool = False, quality_vox: bool = True):
     E = env.num_envs
+    timeout = max_steps if max_steps > 0 else TIMEOUT_STEPS
 
     ext_cam = env.scene["ext_camera"]
 
@@ -158,7 +159,7 @@ def evaluate_recon(env: OceanEnvGenNBVQuality, greedy_fn, device: torch.device,
     Nx, Ny, Nz = env.cfg.tsdf.vol_dim
 
     print(f"\n[recon] start  num_envs={E}  num_episodes={n_episodes}  "
-          f"stall_steps={STALL_STEPS}  timeout={TIMEOUT_STEPS}")
+          f"stall_steps={STALL_STEPS}  timeout={timeout}")
     print(f"[recon] output → {out_dir}\n")
 
     with torch.no_grad():
@@ -182,13 +183,14 @@ def evaluate_recon(env: OceanEnvGenNBVQuality, greedy_fn, device: torch.device,
             # 스냅샷: 비종료 스텝마다 갱신 → 마지막 유효 상태 보존
             tsdf_snap     = np.zeros((Nx, Ny, Nz), np.float32)
             weight_snap   = np.zeros((Nx, Ny, Nz), np.float32)
+            quality_snap  = np.zeros((Nx, Ny, Nz), np.float32)
             surf_snap     = np.zeros((Nx, Ny, Nz), bool)
             origin_snap   = np.zeros(3,             np.float32)
             rock_pos_snap = env.rock_pos[0].cpu().numpy().copy()
 
             done_reason = "timeout"
 
-            for ep_step in range(1, TIMEOUT_STEPS + 1):
+            for ep_step in range(1, timeout + 1):
                 # ── 행동 선택 ─────────────────────────────────────────────────
                 if is_gennbv:
                     if quality_vox:
@@ -255,11 +257,12 @@ def evaluate_recon(env: OceanEnvGenNBVQuality, greedy_fn, device: torch.device,
                     .cpu().numpy().copy().astype(np.uint8)
                 )
 
-                tsdf_snap     = env._tsdf_vol  [0].cpu().numpy().copy()
-                weight_snap   = env._weight_vol[0].cpu().numpy().copy()
-                surf_snap     = env._surf_vol  [0].cpu().numpy().copy()
-                origin_snap   = env._vol_origin[0].cpu().numpy().copy()
-                rock_pos_snap = env.rock_pos   [0].cpu().numpy().copy()
+                tsdf_snap     = env._tsdf_vol   [0].cpu().numpy().copy()
+                weight_snap   = env._weight_vol [0].cpu().numpy().copy()
+                quality_snap  = env._quality_vol[0].cpu().numpy().copy()
+                surf_snap     = env._surf_vol   [0].cpu().numpy().copy()
+                origin_snap   = env._vol_origin [0].cpu().numpy().copy()
+                rock_pos_snap = env.rock_pos    [0].cpu().numpy().copy()
 
                 step_log.append((ep_step, act_idx, cov_bin, cov_q, rew))
                 print(f"    step={ep_step:3d}  "
@@ -294,14 +297,28 @@ def evaluate_recon(env: OceanEnvGenNBVQuality, greedy_fn, device: torch.device,
                     np.array(cov_hist,   dtype=np.float32))
             np.save(str(log_dir / "coverage_q_hist.npy"),
                     np.array(cov_q_hist, dtype=np.float32))
+            np.save(str(log_dir / "quality_vol.npy"),  quality_snap)
+            np.save(str(log_dir / "weight_vol.npy"),   weight_snap)
+            np.save(str(log_dir / "tsdf_vol.npy"),     tsdf_snap)
 
-            # 고해상도 TSDF 재융합 (RL env와 독립, mesh 품질 향상용)
-            tsdf_hi = weight_hi = None
+            # 고해상도 TSDF + quality 재융합 (RL env와 독립, 시각화/mesh 품질 향상용)
+            tsdf_hi = weight_hi = quality_hi = None
             if depth_imgs and cam_poses:
                 tsdf_hi, weight_hi = fuse_highres_tsdf(
                     depth_imgs, cam_poses, K_cache, origin_snap,
                     vol_dim=(80, 80, 80), voxel_size=0.025, trunc_margin=0.025,
                 )
+            if weight_hi is not None and cam_traj:
+                quality_hi = fuse_highres_quality(
+                    cam_traj, origin_snap, weight_hi,
+                    mu=0.217, voxel_size=0.025,
+                )
+
+            if tsdf_hi is not None:
+                np.save(str(log_dir / "tsdf_vol_hires.npy"),    tsdf_hi)
+                np.save(str(log_dir / "weight_vol_hires.npy"),  weight_hi)
+            if quality_hi is not None:
+                np.save(str(log_dir / "quality_vol_hires.npy"), quality_hi)
 
             save_episode_results(
                 out_dir, ep_idx, 0,
@@ -417,9 +434,10 @@ def main():
     device = env.device
     model, greedy_fn, is_gennbv, quality_vox, _ = load_model(args.checkpoint, device)
 
+    _timeout = args.max_steps if args.max_steps > 0 else TIMEOUT_STEPS
     print(f"\n[recon] start  num_envs={args.num_envs}  "
           f"num_episodes={args.num_episodes}  "
-          f"stall_steps={STALL_STEPS}  timeout={TIMEOUT_STEPS}")
+          f"stall_steps={STALL_STEPS}  timeout={_timeout}")
     print(f"[recon] output → {out_dir.resolve()}\n")
 
     evaluate_recon(env, greedy_fn, device,
