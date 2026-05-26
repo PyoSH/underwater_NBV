@@ -247,14 +247,14 @@ def main():
     env_cfg.debug_vis      = True
     env_cfg.eval_mode      = True
 
-    # evaluate_recon.py와 동일한 TSDF 해상도/품질 파라미터
-    env_cfg.tsdf.vol_dim      = (80, 80, 80)
-    env_cfg.tsdf.voxel_size   = 0.025
-    env_cfg.tsdf.trunc_margin = 0.025
+    # evaluate_recon.py와 동일한 TSDF 해상도/품질 파라미터 (학습 설정과 일치)
+    env_cfg.tsdf.vol_dim      = (40, 40, 40)
+    env_cfg.tsdf.voxel_size   = 0.05
+    env_cfg.tsdf.trunc_margin = 0.05
     env_cfg.visual.h          = 64
     env_cfg.visual.w          = 64
 
-    env_cfg.coverage_terminal = 0.82
+    env_cfg.coverage_terminal = 0.65   # max 메트릭 상한 ~0.805의 81%
     env_cfg.coverage_bonus    = 30.0
     env_cfg.k_c_q             = 5.0
     env_cfg.k_c               = 0.0

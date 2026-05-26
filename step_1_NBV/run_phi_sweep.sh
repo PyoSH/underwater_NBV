@@ -11,7 +11,7 @@ PY=/isaac-sim/python.sh
 LOG_DIR=/workspace/logs
 OUT_BASE=${PROJ}/recon_output/phi_sweep
 
-CKPT_UW_NBV2=${PROJ}/checkpoints/UW_NBV_2/genNBV_quality_step_0000327680.pt
+CKPT_UW_NBV2=${PROJ}/checkpoints/UW_NBV_2/genNBV_quality_step_0000993280.pt
 NUM_EPISODES=15
 DISPLAY_NUM=:99
 
@@ -26,10 +26,9 @@ log_header() {
     echo "════════════════════════════════════════════════"
 }
 
-# phi=20° 은 기존 결과(recon_output/UW_NBV_2_327k, recon_output/basic_orbit) 재활용 가능.
-# 여기서는 35°, 50°, 65°, 80° 만 신규 실행.
+# metric이 sum→max로 변경되었으므로 기존 결과 재활용 불가. 5단계 전체 신규 실행.
 
-for PHI in 35 50 65 80; do
+for PHI in 20 35 50 65 80; do
 
     log_header "UW_NBV_2  eval_phi=${PHI}°"
     DISPLAY=${DISPLAY_NUM} ${PY} "${PROJ}/evaluate_recon.py" \
@@ -51,14 +50,11 @@ for PHI in 35 50 65 80; do
 done
 
 log_header "결과 집계"
-# 기존 phi=20° 결과를 phi_sweep 폴더에 심볼릭 링크로 연결
-ln -sfn "${PROJ}/recon_output/UW_NBV_2_327k" "${OUT_BASE}/UW_NBV_2_phi20"
-ln -sfn "${PROJ}/recon_output/basic_orbit"   "${OUT_BASE}/Manual_phi20"
 
 ${PY} "${PROJ}/analyze_phi_sweep.py" \
     --sweep_dir "${OUT_BASE}" \
     --phi_vals 20 35 50 65 80 \
-    --success_thr 0.82 \
+    --success_thr 0.65 \
     --out_dir "${PROJ}/analysis/phi_sweep" \
     2>&1 | tee "${LOG_DIR}/phi_sweep_analyze.log"
 

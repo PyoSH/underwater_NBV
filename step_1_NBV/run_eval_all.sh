@@ -12,17 +12,17 @@ PY=/isaac-sim/python.sh
 LOG_DIR=/workspace/logs
 OUT_BASE=${PROJ}/recon_output
 
-NUM_EPISODES=3077 
+NUM_EPISODES=20
+NUM_ENVS=4
 DISPLAY_NUM=:99
 
 # ── 체크포인트 ─────────────────────────────────────────────────────────────────
-# CKPT_UW_NBV2=${PROJ}/checkpoints/UW_NBV_2/genNBV_quality_step_0000327680.pt genNBV_quality_step_0000665600.pt
-CKPT_UW_NBV2=${PROJ}/checkpoints/UW_NBV_2/genNBV_quality_step_0000665600.pt
+CKPT_UW_NBV2=${PROJ}/checkpoints/UW_NBV_2/genNBV_quality_step_0000993280.pt
 CKPT_GENNBV=${PROJ}/checkpoints/genNBV/genNBV_step_0000491520.pt
 CKPT_SCANRL=${PROJ}/checkpoints/scanRL_paper/scanRL_step_0000400000.pt
 
 # ── 출력 디렉토리 ──────────────────────────────────────────────────────────────
-OUT_UW_NBV2=${OUT_BASE}/UW_NBV_2_327k
+OUT_UW_NBV2=${OUT_BASE}/UW_NBV_2_993k
 OUT_GENNBV=${OUT_BASE}/genNBV_eval
 OUT_SCANRL=${OUT_BASE}/scanRL_eval
 OUT_ORBIT=${OUT_BASE}/basic_orbit
@@ -42,10 +42,10 @@ log_header() {
 }
 
 # ── Exp 1: UW_NBV_2 (quality model, 327680) ───────────────────────────────────
-log_header "Exp 1/4 — UW_NBV_2 (genNBV_quality, step 327680)"
+log_header "Exp 1/4 — UW_NBV_2 (genNBV_quality, step 993280)"
 DISPLAY=${DISPLAY_NUM} ${PY} "${PROJ}/evaluate_recon.py" \
     --checkpoint "${CKPT_UW_NBV2}" \
-    --num_envs 1 \
+    --num_envs ${NUM_ENVS} \
     --num_episodes ${NUM_EPISODES} \
     --out_dir "${OUT_UW_NBV2}" \
     2>&1 | tee "${LOG_DIR}/eval_UW_NBV2_327k.log"
@@ -54,7 +54,7 @@ DISPLAY=${DISPLAY_NUM} ${PY} "${PROJ}/evaluate_recon.py" \
 log_header "Exp 2/4 — GenNBV binary (step 491520)"
 DISPLAY=${DISPLAY_NUM} ${PY} "${PROJ}/evaluate_recon.py" \
     --checkpoint "${CKPT_GENNBV}" \
-    --num_envs 1 \
+    --num_envs ${NUM_ENVS} \
     --num_episodes ${NUM_EPISODES} \
     --out_dir "${OUT_GENNBV}" \
     2>&1 | tee "${LOG_DIR}/eval_genNBV.log"
@@ -63,7 +63,7 @@ DISPLAY=${DISPLAY_NUM} ${PY} "${PROJ}/evaluate_recon.py" \
 log_header "Exp 3/4 — ScanRL (step 400000)"
 DISPLAY=${DISPLAY_NUM} ${PY} "${PROJ}/evaluate_recon.py" \
     --checkpoint "${CKPT_SCANRL}" \
-    --num_envs 1 \
+    --num_envs ${NUM_ENVS} \
     --num_episodes ${NUM_EPISODES} \
     --out_dir "${OUT_SCANRL}" \
     2>&1 | tee "${LOG_DIR}/eval_scanRL.log"
@@ -71,7 +71,7 @@ DISPLAY=${DISPLAY_NUM} ${PY} "${PROJ}/evaluate_recon.py" \
 # ── Exp 4: Manual Orbit ───────────────────────────────────────────────────────
 log_header "Exp 4/4 — Manual Orbit (orbital policy)"
 DISPLAY=${DISPLAY_NUM} ${PY} "${PROJ}/evaluate_basic.py" \
-    --num_envs 1 \
+    --num_envs ${NUM_ENVS} \
     --num_episodes ${NUM_EPISODES} \
     --out_dir "${OUT_ORBIT}" \
     2>&1 | tee "${LOG_DIR}/eval_orbit.log"
@@ -84,7 +84,7 @@ ${PY} "${PROJ}/analyze_results.py" \
         "GenNBV:${OUT_GENNBV}" \
         "ScanRL:${OUT_SCANRL}" \
         "Manual:${OUT_ORBIT}" \
-    --success_thr 0.82 \
+    --success_thr 0.65 \
     --out_dir "${OUT_ANALYSIS}" \
     2>&1 | tee "${LOG_DIR}/analyze_results.log"
 

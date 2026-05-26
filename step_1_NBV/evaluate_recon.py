@@ -58,7 +58,7 @@ from env_GenNBV_quality import OceanEnvGenNBVQuality
 from algorithm3         import Actor, make_env_action
 from algo_scanRL        import QNetwork
 from algo_GenNBV        import Actor as GenNBVActor
-from evaluate_utils     import save_episode_results, save_episode_video
+from evaluate_utils     import save_episode_results, save_episode_video, fuse_highres_tsdf
 
 ACTION_NAMES = ["+θ", "-θ", "-φ", "+φ", "-ψ", "+ψ"]
 
@@ -173,6 +173,7 @@ def evaluate_recon(env: OceanEnvGenNBVQuality, greedy_fn, device: torch.device,
             cam_traj   = []
             cam_poses  = []
             rgb_imgs   = []
+            depth_imgs = []   # hires TSDF 재융합용 depth 이미지
             ext_frames = []
 
             stall_counter = 0
@@ -245,6 +246,10 @@ def evaluate_recon(env: OceanEnvGenNBVQuality, greedy_fn, device: torch.device,
                     env._camera.data.output["uw_rgb"][0, :, :, :3]
                     .cpu().numpy().copy().astype(np.uint8)
                 )
+                _d = env._camera.data.output["distance_to_camera"][0]
+                if _d.dim() == 3:
+                    _d = _d.squeeze(-1)
+                depth_imgs.append(_d.cpu().numpy().copy())
                 ext_frames.append(
                     ext_cam.data.output["rgb"][0, :, :, :3]
                     .cpu().numpy().copy().astype(np.uint8)
@@ -290,6 +295,14 @@ def evaluate_recon(env: OceanEnvGenNBVQuality, greedy_fn, device: torch.device,
             np.save(str(log_dir / "coverage_q_hist.npy"),
                     np.array(cov_q_hist, dtype=np.float32))
 
+            # 고해상도 TSDF 재융합 (RL env와 독립, mesh 품질 향상용)
+            tsdf_hi = weight_hi = None
+            if depth_imgs and cam_poses:
+                tsdf_hi, weight_hi = fuse_highres_tsdf(
+                    depth_imgs, cam_poses, K_cache, origin_snap,
+                    vol_dim=(80, 80, 80), voxel_size=0.025, trunc_margin=0.025,
+                )
+
             save_episode_results(
                 out_dir, ep_idx, 0,
                 tsdf_snap, weight_snap,
@@ -299,6 +312,9 @@ def evaluate_recon(env: OceanEnvGenNBVQuality, greedy_fn, device: torch.device,
                 cam_poses, rgb_imgs, K_cache,
                 rock_pos_snap,
                 coverage_q_hist=cov_q_hist,
+                tsdf_hires=tsdf_hi,
+                weight_hires=weight_hi,
+                voxel_hires=0.025,
             )
             save_episode_video(
                 str(log_dir / "ext_view.mp4"),
@@ -334,9 +350,11 @@ def main():
     env_cfg.debug_vis         = True
     env_cfg.eval_mode         = True
 
-    env_cfg.tsdf.vol_dim      = (80, 80, 80)
-    env_cfg.tsdf.voxel_size   = 0.025
-    env_cfg.tsdf.trunc_margin = 0.025
+    # TSDF는 학습과 동일한 (40,40,40)/0.05 유지 — GenNBV vox 입력 shape 보장
+    # 고해상도 mesh는 episode 후 fuse_highres_tsdf()로 별도 생성
+    env_cfg.tsdf.vol_dim      = (40, 40, 40)
+    env_cfg.tsdf.voxel_size   = 0.05
+    env_cfg.tsdf.trunc_margin = 0.05
     # ScanRL은 84×84로 학습됨 (fc.0.weight shape 512×3136 → 84×84 기준)
     # GenNBV/PPO는 64×64로 평가 (TSDF 해상도 개선)
     if not is_scanrl_peek:
@@ -366,8 +384,8 @@ def main():
     if args.q_sat is not None:
         env_cfg.q_sat = args.q_sat
 
-    # 공통 quality 파라미터
-    env_cfg.coverage_terminal = 0.82
+    # 공통 quality 파라미터 (coverage_terminal: max metric 달성값 ~0.805 기준 81%)
+    env_cfg.coverage_terminal = 0.65
     env_cfg.coverage_bonus    = 30.0
     env_cfg.k_c_q             = 5.0
     env_cfg.k_c               = 0.0

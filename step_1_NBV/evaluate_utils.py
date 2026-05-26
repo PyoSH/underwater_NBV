@@ -14,6 +14,67 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 고해상도 TSDF 재융합 (episode 종료 후, RL env TSDF와 별도 실행)
+# ─────────────────────────────────────────────────────────────────────────────
+def fuse_highres_tsdf(
+    depth_imgs: list,
+    cam_poses: list,
+    K_cache: tuple,
+    vol_origin: np.ndarray,
+    vol_dim: tuple = (80, 80, 80),
+    voxel_size: float = 0.025,
+    trunc_margin: float = 0.025,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Episode 종료 후 수집된 depth 이미지를 고해상도 TSDF로 재융합.
+    RL env의 TSDF와 독립적으로 실행 — 모델 입력과 무관.
+
+    depth_imgs : list of (H,W) float32 ndarray (meters)
+    cam_poses  : list of (R (3,3), t (3,)) — world→cam
+    K_cache    : (fx, fy, cx, cy)
+    vol_origin : (3,) world-space corner of volume (same as RL env)
+    """
+    Nx, Ny, Nz = vol_dim
+    vox = voxel_size
+    trunc = trunc_margin
+    fx, fy, cx, cy = K_cache
+
+    xi = (np.arange(Nx, dtype=np.float32) + 0.5) * vox
+    yi = (np.arange(Ny, dtype=np.float32) + 0.5) * vox
+    zi = (np.arange(Nz, dtype=np.float32) + 0.5) * vox
+    gx, gy, gz = np.meshgrid(xi, yi, zi, indexing='ij')
+    vox_world = np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=-1) + vol_origin  # (N,3)
+
+    tsdf_flat   = np.zeros(Nx * Ny * Nz, np.float32)
+    weight_flat = np.zeros(Nx * Ny * Nz, np.float32)
+
+    for depth_img, (R, t) in zip(depth_imgs, cam_poses):
+        H, W = depth_img.shape
+        vox_cam = vox_world @ R.T + t                          # (N,3)
+        vox_z   = vox_cam[:, 2]
+        valid_z = vox_z > 1e-4
+        inv_z   = np.where(valid_z, 1.0 / np.maximum(vox_z, 1e-4), 0.0)
+        pu = (fx * vox_cam[:, 0] * inv_z + cx).astype(np.int32)
+        pv = (fy * vox_cam[:, 1] * inv_z + cy).astype(np.int32)
+        in_bounds = valid_z & (pu >= 0) & (pu < W) & (pv >= 0) & (pv < H)
+        su = np.clip(pu, 0, W - 1)
+        sv = np.clip(pv, 0, H - 1)
+        sampled = depth_img[sv, su]
+        sdf = sampled - vox_z
+        tsdf_new = np.clip(sdf / trunc, -1.0, 1.0)
+        mask = in_bounds & (sdf >= -trunc) & (sdf <= trunc)
+        w_new = weight_flat + mask.astype(np.float32)
+        tsdf_flat = np.where(
+            mask,
+            (tsdf_flat * weight_flat + tsdf_new) / np.maximum(w_new, 1e-8),
+            tsdf_flat,
+        )
+        weight_flat = w_new
+
+    return tsdf_flat.reshape(Nx, Ny, Nz), weight_flat.reshape(Nx, Ny, Nz)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 3D 복원: TSDF Marching Cubes
 # ─────────────────────────────────────────────────────────────────────────────
 def reconstruct_mesh(tsdf_vol: np.ndarray,
@@ -217,7 +278,10 @@ def save_episode_results(out_dir: Path, ep_idx: int, env_id: int,
                         cam_poses: list, rgb_imgs: list,
                         K_cache: tuple | None,
                         rock_pos: np.ndarray,
-                        coverage_q_hist: list | None = None):
+                        coverage_q_hist: list | None = None,
+                        tsdf_hires: np.ndarray | None = None,
+                        weight_hires: np.ndarray | None = None,
+                        voxel_hires: float | None = None):
     ep_dir = out_dir / f"ep_{ep_idx:03d}_env{env_id}"
     ep_dir.mkdir(parents=True, exist_ok=True)
     vox = voxel_size
@@ -232,8 +296,13 @@ def save_episode_results(out_dir: Path, ep_idx: int, env_id: int,
     pts_obs = origin_np + (idx_obs + 0.5) * vox
     save_ply_points(str(ep_dir / "observed_voxels.ply"), pts_obs)
 
-    # Marching Cubes 복원
-    verts_world, faces = reconstruct_mesh(tsdf_np, weight_np, origin_np, vox)
+    # Marching Cubes 복원 — hires TSDF 우선 사용
+    use_hi = (tsdf_hires is not None) and (weight_hires is not None)
+    tsdf_for_mesh   = tsdf_hires   if use_hi else tsdf_np
+    weight_for_mesh = weight_hires if use_hi else weight_np
+    vox_for_mesh    = voxel_hires  if (use_hi and voxel_hires) else vox
+
+    verts_world, faces = reconstruct_mesh(tsdf_for_mesh, weight_for_mesh, origin_np, vox_for_mesh)
 
     if verts_world is not None:
         save_ply_mesh(str(ep_dir / "recon_mesh.ply"), verts_world, faces)

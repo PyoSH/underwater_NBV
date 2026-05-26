@@ -1,4 +1,4 @@
-# OceanRL NBV — 프로젝트 전체 현황 (2026-05-22)
+# OceanRL NBV — 프로젝트 전체 현황 (2026-05-26)
 
 ---
 
@@ -81,14 +81,23 @@ OceanSim UWrenderer가 `exp(-μd)` post-process를 **1회만** 적용 → 단방
 Q_vol(v) += q(v)   when surface_mask
 ```
 
-### 포화 임계값
+### 누적 방식: Max 갱신 (2026-05-26 변경)
 
+```python
+# 이전 (Fisher sum): Q_vol += q_new  → 반복 방문 시 무한 누적
+# 현재 (max):        Q_vol = max(Q_vol, q_new)  → 최근접 관측 품질 기록
 ```
-Q_sat = exp(-μ × psi_min) ≈ 0.80
-  psi_min = 1.0m에서 단일 방문 시 포화
-soft_coverage(v) = clip(Q_vol(v) / Q_sat, 0, 1)
-coverage_q = mean over GT surface voxels of soft_coverage(v)
+
+### coverage_q 계산
+
+```python
+coverage_q = mean over GT surface voxels of Q_vol(v)
+           = mean(best quality per voxel)
 ```
+
+- 범위: [0, exp(-μ×psi_min)] ≈ [0, 0.805]  (Q_sat으로 나누지 않음)
+- actor vox ch2: `clip(Q_vol / Q_sat, 0, 1)` (입력 정규화, coverage_q 계산과 별도)
+- `q_sat = 0.80` (envCfg에서 설정, ch2 정규화에만 사용)
 
 ### 수중 DR 범위 (WaterParamRangeCfg)
 
@@ -115,13 +124,14 @@ coverage_q = mean over GT surface voxels of soft_coverage(v)
 | delta_theta/phi | 15° | 스텝당 각도 이동 |
 | delta_psi | 0.20m | 스텝당 거리 이동 |
 | k_c | 5.0 | binary coverage reward (현재 미사용) |
-| **k_c_q** | **5.0** | quality coverage reward 가중치 |
+| **k_c_q** | **0.0** | quality coverage reward 가중치 (envCfg 현재값) |
 | k_x | 0.02 | 이동 거리 패널티 |
-| **c_step** | **0.02** | 스텝당 고정 패널티 |
+| **c_step** | **0.1** | 스텝당 고정 패널티 |
 | k_still | 0.05 | stall 패널티 |
 | stall_thr | 1e-4 | coverage 증가 최소 임계값 |
-| **coverage_terminal** | **0.52** | 성공 판정 임계값 (0.82→0.52로 하향) |
+| **coverage_terminal** | **0.65** | 성공 판정 (max metric 상한 ~0.805의 81%) |
 | coverage_bonus | 30.0 | 성공 보너스 |
+| **q_sat** | **0.80** | vox ch2 정규화용 포화값 (coverage_q 계산에는 미사용) |
 | k_explore | 0.0 | exploration bonus (비활성) |
 
 ---
@@ -275,7 +285,7 @@ def _reset_idx(self, env_ids) -> None:
 | UW_NBV_1 | coverage_terminal=0.52로 하향, c_step=0.02 | coverage_q ~0.48, success ~15%, length 소폭 감소 |
 | UW_NBV_diag | 진단 run (버그 있음) | never=0.791 → coverage_q와 불일치, 무효 |
 | UW_NBV_diag2 | 진단 run (버그 수정) | never=0.515, full=0.479 → coverage_q=0.483 일치 ✓ |
-| **UW_NBV_2** | **해석 B + coverage_terminal=0.82 + ent_coef=0.10** | **step ~522K: EVAL cov_q=0.82-0.83, success=0.76-0.93, diag/GT full=0.81 ✓** |
+| **UW_NBV_2** | **해석 B + coverage_terminal=0.82 + ent_coef=0.10** | **step ~993K 완료. EVAL cov_q=0.82-0.83, success=0.76-0.93 (sum 메트릭 기준)** |
 
 ---
 
@@ -294,27 +304,23 @@ def _reset_idx(self, env_ids) -> None:
 
 ## 14. 다음 수행 사항
 
-1. ~~`_compute_quality()` tsdf 조건 제거~~ **완료** (`surface_mask = self._weight_vol > 0`)
-2. ~~수정 후 학습 재시작~~ **완료** (UW_NBV_2, step ~522K, EVAL success ~0.82)
-3. ~~evaluate_recon.py 차원 불일치 수정~~ **완료** (ch2 mismatch 수정, 공통 평가 조건 적용)
-4. UW_NBV_2 학습 계속 → 1M step까지 진행 후 최종 체크포인트로 evaluate_recon 실행
-5. 비교 실험: ScanRL / 기존 PPO / 수동 궤도 에 동일 조건 evaluate_recon 실행
-6. coverage_q 커브 비교 그래프 작성 (coverage_q_hist.npy 활용)
+1. ~~`_compute_quality()` tsdf 조건 제거~~ **완료**
+2. ~~UW_NBV_2 학습~~ **완료** (step ~993K, 최종 ckpt: `genNBV_quality_step_0000993280.pt`)
+3. ~~evaluate_recon.py 공통 평가 인프라~~ **완료**
+4. ~~coverage_q metric sum→max 재설계~~ **완료** (2026-05-26)
+5. **phi sweep 실험** (로컬 컴퓨터): `run_phi_sweep.sh` — phi 20/35/50/65/80° × UW_NBV_2 vs Manual Orbit
+6. **비교 실험 결과 분석**: `analyze_phi_sweep.py` → `analysis/phi_sweep/phi_sweep.png`
+7. coverage_q 커브 비교 그래프 작성 (coverage_q_hist.npy 활용)
 
 ---
 
-## 15. 학습 모니터링
+## 15. 학습 현황
 
-```bash
-# 실시간 로그
-docker exec env_pyoten tail -f /workspace/logs/train_UW_NBV_2.log
+**UW_NBV_2 완료** (2026-05-23, step ~993K)
+- 최종 체크포인트: `/workspace/pyoten/checkpoints/UW_NBV_2/genNBV_quality_step_0000993280.pt`
+- 학습 프로세스 종료됨
 
-# 최신 체크포인트
-ls -lt /workspace/pyoten/checkpoints/UW_NBV_2/
-
-# 프로세스 확인
-docker exec env_pyoten pgrep -af python3 | grep train
-```
+현재 단계: **평가 실험 진행 중** (로컬 컴퓨터, `run_phi_sweep.sh`)
 
 ---
 
@@ -325,10 +331,17 @@ docker exec env_pyoten pgrep -af python3 | grep train
 
 ### 공통 종료 조건
 ```
-stall:   delta_coverage_q < 0.01 이 5스텝 연속 → 조기 종료
-timeout: ep_len >= 50 스텝
+stall:      delta_coverage_q < 0.01 이 5스텝 연속 → 조기 종료
+timeout:    ep_len >= 50 스텝
+SUCCESS:    coverage_q >= 0.65 (max 메트릭 기준, ~81% 달성)
 ```
-환경의 내부 종료(coverage_q >= 0.82, 성공 판정)도 그대로 유지.
+
+### 추가 인수 (2026-05-26)
+```
+--eval_phi  초기 고도각 (도 단위)
+--eval_psi  초기 거리 (m)
+--q_sat     ch2 정규화 포화값
+```
 
 ### 출력 구조
 ```
@@ -345,20 +358,17 @@ recon_output/
 ```bash
 docker exec env_pyoten bash -c "cd /workspace/Programing/OceanRL_test/step_1_NBV && \
 DISPLAY=:99 /workspace/isaac-sim/python.sh evaluate_recon.py \
-    --checkpoint /workspace/checkpoints/UW_NBV_2/genNBV_quality_step_0000522240.pt \
+    --checkpoint /workspace/checkpoints/UW_NBV_2/genNBV_quality_step_0000993280.pt \
     --num_episodes 30 \
-    --out_dir ./recon_output/UW_NBV_2_522k \
+    --out_dir ./recon_output/UW_NBV_2_993k \
 > /workspace/logs/eval_UW_NBV_2.log 2>&1"
 ```
 
 ### 알고리즘 판별 (자동)
 - `q_net` 키 → ScanRL
-- `actor` + `embed.geo.conv.0.weight` 키 → GenNBV (우리 모델 포함)
+- `actor` + `embed.geo.conv.0.weight` + `env_type=gennbv_quality` → GenNBV Quality (우리 모델)
+- `actor` + `embed.geo.conv.0.weight` (env_type 없음) → GenNBV Binary
 - 그 외 → PPO (algorithm2/3)
 
-### 주의: evaluate_recon.py에서 `num_seq` 변수
-```python
-num_seq = K_img - (1 if use_visit_map else 0)
-```
-이 값은 GenNBV 체크포인트에서 K_img=2(image channels)를 읽으므로 `num_seq=2`.
-use_visit_map=False이면 env_cfg에 적용되지 않아 무해함.
+### 주의: evaluate_recon.py에서 `coverage_terminal`
+새 max 메트릭 기준 상한 ~0.805 → `coverage_terminal = 0.65` (81%). 0.82로 하드코딩 시 SUCCESS 절대 발생 안 함.

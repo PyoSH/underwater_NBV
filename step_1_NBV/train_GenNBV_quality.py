@@ -18,6 +18,7 @@ parser.add_argument("--clip_eps",       type=float, default=0.2)
 parser.add_argument("--ent_coef",       type=float, default=0.05)
 parser.add_argument("--vf_coef",        type=float, default=0.5)
 parser.add_argument("--max_grad_norm",  type=float, default=0.5)
+parser.add_argument("--target_kl",      type=float, default=0.02)
 parser.add_argument("--lr_decay",       action="store_true")
 parser.add_argument("--ckpt_dir",       type=str,   default="/workspace/checkpoints")
 parser.add_argument("--save_interval",  type=int,   default=10)
@@ -45,7 +46,7 @@ import wandb
 sys.path.insert(0, os.path.dirname(__file__))
 from envCfg              import OceanEnvCfg
 from env_GenNBV_quality  import OceanEnvGenNBVQuality
-from algo_GenNBV         import (Actor, Critic, RolloutBuffer, PPOConfig,
+from algo_UW_NBV         import (Actor, Critic, RolloutBuffer, PPOConfig,
                                  make_env_action, explained_variance, ppo_update)
 
 
@@ -125,7 +126,7 @@ def main():
     env_cfg.k_x               = 0.0
     env_cfg.c_step            = 0.02   # 0.1 → 0.02: quality reward와 scale 맞춤
     env_cfg.k_still           = 0.05
-    env_cfg.coverage_terminal = 0.82
+    env_cfg.coverage_terminal = 0.60
     env_cfg.coverage_bonus    = 30.0
 
     env    = OceanEnvGenNBVQuality(cfg=env_cfg, render_mode="rgb_array")
@@ -152,6 +153,7 @@ def main():
         max_grad_norm  = args.max_grad_norm,
         gamma          = args.gamma,
         lam            = args.gae_lambda,
+        target_kl      = args.target_kl,
     )
 
     # ── Rollout Buffer ────────────────────────────────────────────────────────
@@ -282,6 +284,7 @@ def main():
             "train/value_loss":         stats["value_loss"],
             "train/entropy":            stats["entropy"],
             "train/approx_kl":          stats["approx_kl"],
+            "train/early_stop":         float(stats.get("early_stop", False)),
             "train/explained_variance": ev,
             "train/lr_actor":           optimizer_actor .param_groups[0]["lr"],
             "train/lr_critic":          optimizer_critic.param_groups[0]["lr"],
