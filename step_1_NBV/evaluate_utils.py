@@ -356,6 +356,11 @@ def save_episode_results(out_dir: Path, ep_idx: int, env_id: int,
             save_ply_mesh(str(ep_dir / "recon_mesh_colored.ply"),
                         verts_world, faces, colors=vert_colors)
 
+    # 궤적 데이터 저장 (3D 시각화용)
+    if cam_traj:
+        np.save(str(ep_dir / "trajectory_xyz.npy"), np.array(cam_traj, dtype=np.float32))
+    np.save(str(ep_dir / "rock_pos.npy"), rock_pos)
+
     # 플롯
     if cam_traj:
         save_coverage_plot(str(ep_dir / "coverage_curve.png"), coverage_hist, coverage_q_hist)

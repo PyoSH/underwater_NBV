@@ -68,66 +68,92 @@ def load_episodes(result_dir: Path) -> list[dict]:
     return episodes
 
 
-def compute_stats(episodes: list[dict], success_thr: float) -> dict | None:
+MAX_STEPS = 50  # episode budget for AUC normalisation
+
+
+def _auc(hist: np.ndarray) -> float:
+    padded = np.pad(hist, (0, max(0, MAX_STEPS - len(hist))), mode="edge")
+    return float(padded.mean())
+
+
+def compute_stats(episodes: list[dict]) -> dict | None:
     if not episodes:
         return None
     cov_qs   = [e["coverage_q"]   for e in episodes]
     cov_bins = [e["coverage_bin"] for e in episodes]
     ep_lens  = [e["ep_len"]       for e in episodes]
+    aucs_q   = [_auc(e["q_hist"])   for e in episodes]
+    aucs_bin = [_auc(e["bin_hist"]) for e in episodes]
     return {
         "n":            len(episodes),
         "cov_q_mean":   float(np.mean(cov_qs)),
         "cov_q_std":    float(np.std(cov_qs)),
+        "cov_q_max":    float(np.max(cov_qs)),
         "cov_bin_mean": float(np.mean(cov_bins)),
         "cov_bin_std":  float(np.std(cov_bins)),
+        "cov_bin_max":  float(np.max(cov_bins)),
+        "auc_q_mean":   float(np.mean(aucs_q)),
+        "auc_q_std":    float(np.std(aucs_q)),
+        "auc_bin_mean": float(np.mean(aucs_bin)),
+        "auc_bin_std":  float(np.std(aucs_bin)),
         "ep_len_mean":  float(np.mean(ep_lens)),
         "ep_len_std":   float(np.std(ep_lens)),
-        "success_rate": float(np.mean([q >= success_thr for q in cov_qs])),
     }
 
 
-def print_table(stats: dict[str, dict | None], success_thr: float):
-    cols = f"{'Algorithm':<16} {'N':>4}  {'coverage_q':^18}  {'coverage_bin':^18}  {'success%':>9}  {'ep_len':^14}"
+def print_table(stats: dict[str, dict | None]):
+    cols = (f"{'Algorithm':<16} {'N':>4}  {'cov_q mean±std':^20}  {'cov_q max':^10}"
+            f"  {'AUC_q mean±std':^20}  {'cov_bin mean±std':^20}  {'cov_bin max':^11}"
+            f"  {'AUC_bin mean±std':^20}  {'ep_len':^14}")
     sep  = "─" * len(cols)
     print(f"\n{sep}\n{cols}\n{sep}")
     for name, s in stats.items():
         if s is None:
             print(f"{name:<16}  (결과 없음)")
             continue
-        cq = f"{s['cov_q_mean']:.3f} ± {s['cov_q_std']:.3f}"
-        cb = f"{s['cov_bin_mean']:.3f} ± {s['cov_bin_std']:.3f}"
-        sr = f"{s['success_rate']*100:.1f}%"
-        el = f"{s['ep_len_mean']:.1f} ± {s['ep_len_std']:.1f}"
-        print(f"{name:<16} {s['n']:>4}  {cq:^18}  {cb:^18}  {sr:>9}  {el:^14}")
+        cq    = f"{s['cov_q_mean']:.3f} ± {s['cov_q_std']:.3f}"
+        cqmax = f"{s['cov_q_max']:.3f}"
+        aq    = f"{s['auc_q_mean']:.3f} ± {s['auc_q_std']:.3f}"
+        cb    = f"{s['cov_bin_mean']:.3f} ± {s['cov_bin_std']:.3f}"
+        cbmax = f"{s['cov_bin_max']:.3f}"
+        ab    = f"{s['auc_bin_mean']:.3f} ± {s['auc_bin_std']:.3f}"
+        el    = f"{s['ep_len_mean']:.1f} ± {s['ep_len_std']:.1f}"
+        print(f"{name:<16} {s['n']:>4}  {cq:^20}  {cqmax:^10}"
+              f"  {aq:^20}  {cb:^20}  {cbmax:^11}"
+              f"  {ab:^20}  {el:^14}")
     print(sep)
-    print(f"  success threshold = coverage_q ≥ {success_thr}\n")
+    print(f"  AUC normalised by {MAX_STEPS} steps\n")
 
 
-def save_table_csv(stats: dict[str, dict | None], out_path: Path, success_thr: float):
+def save_table_csv(stats: dict[str, dict | None], out_path: Path):
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["algorithm", "n",
-                    "cov_q_mean", "cov_q_std",
-                    "cov_bin_mean", "cov_bin_std",
-                    "success_rate", "ep_len_mean", "ep_len_std",
-                    "success_thr"])
+                    "cov_q_mean", "cov_q_std", "cov_q_max",
+                    "auc_q_mean", "auc_q_std",
+                    "cov_bin_mean", "cov_bin_std", "cov_bin_max",
+                    "auc_bin_mean", "auc_bin_std",
+                    "ep_len_mean", "ep_len_std"])
         for name, s in stats.items():
             if s is None:
                 continue
             w.writerow([name, s["n"],
-                        f"{s['cov_q_mean']:.4f}",   f"{s['cov_q_std']:.4f}",
-                        f"{s['cov_bin_mean']:.4f}",  f"{s['cov_bin_std']:.4f}",
-                        f"{s['success_rate']:.4f}",
-                        f"{s['ep_len_mean']:.2f}",   f"{s['ep_len_std']:.2f}",
-                        success_thr])
+                        f"{s['cov_q_mean']:.4f}",   f"{s['cov_q_std']:.4f}",  f"{s['cov_q_max']:.4f}",
+                        f"{s['auc_q_mean']:.4f}",   f"{s['auc_q_std']:.4f}",
+                        f"{s['cov_bin_mean']:.4f}",  f"{s['cov_bin_std']:.4f}", f"{s['cov_bin_max']:.4f}",
+                        f"{s['auc_bin_mean']:.4f}",  f"{s['auc_bin_std']:.4f}",
+                        f"{s['ep_len_mean']:.2f}",   f"{s['ep_len_std']:.2f}"])
     print(f"[save] {out_path}")
 
 
+# colorblind-friendly palette (Wong 2011)
+PALETTE = ["#E69F00", "#56B4E9", "#009E73", "#D55E00", "#CC79A7", "#0072B2"]
+LINESTYLES = ["-", "--", "-.", ":", "-", "--"]
+
+
 def plot_curves(algo_episodes: dict[str, list[dict]], hist_key: str,
-                ylabel: str, title: str, out_path: Path, success_thr: float):
-    colors     = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
-    linestyles = ["-", "--", "-.", ":", "-", "--"]
-    fig, ax = plt.subplots(figsize=(10, 6))
+                ylabel: str, title: str, out_path: Path):
+    fig, ax = plt.subplots(figsize=(9, 5))
 
     for i, (name, episodes) in enumerate(algo_episodes.items()):
         if not episodes:
@@ -140,23 +166,73 @@ def plot_curves(algo_episodes: dict[str, list[dict]], hist_key: str,
         steps = np.arange(1, max_len + 1)
         mu    = padded.mean(axis=0)
         sigma = padded.std(axis=0)
-        c     = colors[i % len(colors)]
-        ls    = linestyles[i % len(linestyles)]
-        ax.plot(steps, mu, label=name, color=c, linewidth=2,
+        c  = PALETTE[i % len(PALETTE)]
+        ls = LINESTYLES[i % len(LINESTYLES)]
+        ax.plot(steps, mu, label=name, color=c, linewidth=2.5,
                 linestyle=ls, zorder=len(algo_episodes) - i)
         ax.fill_between(steps, mu - sigma, mu + sigma, alpha=0.15, color=c,
                         zorder=len(algo_episodes) - i)
 
-    ax.axhline(y=success_thr, color="red", linestyle="--", linewidth=1,
-               label=f"success thr ({success_thr})")
-    ax.set_xlabel("Step")
-    ax.set_ylabel(ylabel)
-    ax.set_ylim(0, 1.05)
-    ax.set_title(title)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(str(out_path), dpi=150)
+    ax.set_xlabel("Step", fontsize=13)
+    ax.set_ylabel(ylabel, fontsize=13)
+    ax.set_xlim(1, MAX_STEPS)
+    ax.set_ylim(0, 1.0)
+    ax.set_title(title, fontsize=14, fontweight="bold")
+    ax.legend(fontsize=11, framealpha=0.9)
+    ax.tick_params(labelsize=11)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(True, alpha=0.25, linestyle="--")
+    fig.tight_layout()
+    fig.savefig(str(out_path), dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"[save] {out_path}")
+
+
+def plot_bar_chart(stats: dict[str, dict | None], out_path: Path):
+    RENAME = {"UW_NBV_5": "Proposed"}
+    COLOR_MAP = {
+        "Manual":   "#888888",   # 회색
+        "ScanRL":   "#D62728",   # 빨강
+        "GenNBV":   "#AEC6E8",   # 옅은 파랑
+        "Proposed": "#2CA02C",   # 밝은 초록
+    }
+    names  = [RENAME.get(n, n) for n, s in stats.items() if s is not None]
+    s_list = [stats[n] for n in (k for k, s in stats.items() if s is not None)]
+
+    metrics = [
+        ("cov_q_mean",  "cov_q_std",  "Quality-aware Coverage\n(cov_q)"),
+        ("auc_q_mean",  "auc_q_std",  f"AUC Quality-aware\n(AUC_q / {MAX_STEPS} steps)"),
+        ("cov_bin_mean","cov_bin_std", "Binary Coverage\n(cov_bin)"),
+        ("auc_bin_mean","auc_bin_std", f"AUC Binary\n(AUC_bin / {MAX_STEPS} steps)"),
+    ]
+
+    fig, axes = plt.subplots(1, len(metrics), figsize=(14, 4.5), sharey=False)
+
+    x = np.arange(len(names))
+    bar_w = 0.55
+
+    for ax, (mean_key, std_key, label) in zip(axes, metrics):
+        means = [s[mean_key] for s in s_list]
+        stds  = [s[std_key]  for s in s_list]
+        colors = [COLOR_MAP.get(n, PALETTE[i % len(PALETTE)]) for i, n in enumerate(names)]
+        bars = ax.bar(x, means, width=bar_w, color=colors,
+                      edgecolor="white", linewidth=0.8, zorder=3)
+        ax.errorbar(x, means, yerr=stds, fmt="none", color="black",
+                    capsize=4, linewidth=1.5, zorder=4)
+        for bar, val in zip(bars, means):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(stds) * 0.1 + 0.01,
+                    f"{val:.3f}", ha="center", va="bottom", fontsize=9, fontweight="bold")
+        ax.set_xticks(x)
+        ax.set_xticklabels(names, rotation=15, ha="right", fontsize=10)
+        ax.set_xlabel(label, fontsize=11)
+        ax.set_ylim(0, min(1.0, max(means) * 1.4 + 0.05))
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.grid(axis="y", alpha=0.25, linestyle="--", zorder=0)
+        ax.tick_params(axis="y", labelsize=10)
+
+    fig.suptitle("Algorithm Comparison", fontsize=14, fontweight="bold", y=1.01)
+    fig.tight_layout()
+    fig.savefig(str(out_path), dpi=200, bbox_inches="tight")
     plt.close()
     print(f"[save] {out_path}")
 
@@ -165,7 +241,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--results", nargs="+", required=True,
                         help="name:path 형식. 예) UW_NBV_2:./recon_output/UW_NBV_2_327k")
-    parser.add_argument("--success_thr", type=float, default=0.82)
     parser.add_argument("--out_dir", type=str, default="./analysis")
     args = parser.parse_args()
 
@@ -194,17 +269,20 @@ def main():
         eps = load_episodes(d)
         print(f"[load] {name}: {len(eps)} episodes  ← {d}")
         algo_episodes[name] = eps
-        stats[name] = compute_stats(eps, args.success_thr)
+        stats[name] = compute_stats(eps)
 
     # 테이블 출력 + 저장
-    print_table(stats, args.success_thr)
-    save_table_csv(stats, out_dir / "comparison_table.csv", args.success_thr)
+    print_table(stats)
+    save_table_csv(stats, out_dir / "comparison_table.csv")
 
     # 커브 플롯
-    plot_curves(algo_episodes, "q_hist",   "coverage_q",   "Quality Coverage (mean±std)",
-                out_dir / "coverage_q_curve.png",   args.success_thr)
-    plot_curves(algo_episodes, "bin_hist", "coverage_bin", "Binary Coverage (mean±std)",
-                out_dir / "coverage_bin_curve.png", args.success_thr)
+    plot_curves(algo_episodes, "q_hist",   "coverage_q",   "Quality Coverage over Steps (mean±std)",
+                out_dir / "coverage_q_curve.png")
+    plot_curves(algo_episodes, "bin_hist", "coverage_bin", "Binary Coverage over Steps (mean±std)",
+                out_dir / "coverage_bin_curve.png")
+
+    # bar chart
+    plot_bar_chart(stats, out_dir / "bar_chart.png")
 
 
 if __name__ == "__main__":

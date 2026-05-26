@@ -40,6 +40,8 @@ parser.add_argument("--eval_phi",     type=float, default=None,
                     help="초기 고도각 (도 단위). 미지정시 envCfg 기본값(20°) 사용")
 parser.add_argument("--eval_psi",     type=float, default=None,
                     help="초기 거리 (m). 미지정시 envCfg 기본값(4.5m) 사용")
+parser.add_argument("--psi_max",      type=float, default=None,
+                    help="psi 최대 허용 거리 (m). eval_psi보다 크거나 같아야 함")
 
 AppLauncher.add_app_launcher_args(parser)
 if "--enable_cameras" not in sys.argv:
@@ -301,6 +303,8 @@ def main():
         env_cfg.eval_phi = _math.radians(args.eval_phi)
     if args.eval_psi is not None:
         env_cfg.eval_psi = args.eval_psi
+    if args.psi_max is not None:
+        env_cfg.psi_max = args.psi_max
 
     from isaaclab.sensors import CameraCfg
     import isaaclab.sim as sim_utils
