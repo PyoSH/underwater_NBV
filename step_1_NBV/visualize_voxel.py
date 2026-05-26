@@ -53,7 +53,7 @@ def _render_offscreen(coords: np.ndarray, colors: np.ndarray,
     extent = bbox.get_max_bound() - bbox.get_min_bound()
     diag   = float(np.linalg.norm(extent))
 
-    front = np.array([1.0, -1.0, 0.19])
+    front = np.array([1.0, 0.0, 0.09])
     front = front / np.linalg.norm(front)
     eye   = center + front * diag * 1.1
     up    = np.array([0.0, 0.0, 1.0])
@@ -63,7 +63,19 @@ def _render_offscreen(coords: np.ndarray, colors: np.ndarray,
     )
 
     img = renderer.render_to_image()
-    o3d.io.write_image(str(out_path), img)
+
+    # Open3D가 sky/IBL을 혼합해 배경이 연회색으로 나오므로 후처리로 순백 강제
+    img_np = np.asarray(img).copy().astype(np.float32) / 255.0
+    r, g, b = img_np[:, :, 0], img_np[:, :, 1], img_np[:, :, 2]
+    max_c = np.maximum(np.maximum(r, g), b)
+    min_c = np.minimum(np.minimum(r, g), b)
+    saturation = np.where(max_c > 1e-6, (max_c - min_c) / max_c, 0.0)
+    bg_mask = saturation < 0.05   # 회색/흰색 픽셀
+    img_np[bg_mask] = 1.0
+    img_out = (img_np * 255).clip(0, 255).astype(np.uint8)
+
+    import PIL.Image
+    PIL.Image.fromarray(img_out).save(str(out_path))
     print(f"  saved → {out_path}")
 
 
@@ -91,8 +103,10 @@ def visualize_quality(weight_vol: np.ndarray, tsdf_vol: np.ndarray,
         return
 
     coords = np.argwhere(mask) * voxel_size
-    q_vals = np.clip(quality_vol[mask] / Q_SAT, 0.0, 1.0)
-    colors = plt.cm.jet(q_vals)[:, :3]
+    q_raw  = quality_vol[mask]
+    q_min, q_max = float(q_raw.min()), float(q_raw.max())
+    q_vals = np.clip((q_raw - q_min) / max(q_max - q_min, 1e-6), 0.0, 1.0)
+    colors = plt.cm.plasma(q_vals)[:, :3]
 
     _render_offscreen(coords, colors, voxel_size, out_path)
 
