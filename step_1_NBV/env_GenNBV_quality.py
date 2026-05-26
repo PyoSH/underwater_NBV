@@ -45,7 +45,7 @@ class OceanEnvGenNBVQuality(OceanEnvGenNBV):
         self._quality_vol = torch.zeros(
             self.num_envs, Nx, Ny, Nz, device=self.device
         )
-        self._quality_Q_sat = 0.80  # exp(-μ×psi_min) ≈ 0.805: psi_min 단일 방문 포화 기준
+        self._quality_Q_sat = cfg.q_sat  # exp(-μ×psi_min) ≈ 0.805: psi_min 단일 방문 포화 기준
 
         # μ 초기값: atten_coeff_max 채널 평균 (리셋 시 실제 값으로 동기화)
         self._quality_mu = float(
@@ -79,7 +79,7 @@ class OceanEnvGenNBVQuality(OceanEnvGenNBV):
 
     def _compute_quality(self) -> None:
         """
-        현재 관측된 표면 voxel의 quality를 Beer-Lambert로 업데이트 (sum 누적).
+        현재 관측된 표면 voxel의 quality를 Beer-Lambert로 업데이트 (max 갱신).
         _integrate_depth() 완료 후 호출되어야 함 (TSDF 최신 상태 전제).
         """
         centers = (
@@ -92,17 +92,19 @@ class OceanEnvGenNBVQuality(OceanEnvGenNBV):
         # 단방향 Beer-Lambert (OceanSim UWrenderer: exp(-μd) post-process 단회 적용)
         quality_new = torch.exp(-self._quality_mu * dist)
 
-        # 관측된 voxel이면 누적 (TSDF 분류 무관 — 해석 B: 관측 품질 기준)
+        # 관측된 voxel이면 갱신 (TSDF 분류 무관 — 해석 B: 관측 품질 기준)
         surface_mask = self._weight_vol > 0
 
-        # Fisher 정보 합산 (NBUV Eq.20)
-        self._quality_vol = self._quality_vol + quality_new * surface_mask.float()
+        # 최근접 접근 품질 기록 (max): 반복 방문 시 누적 없음
+        self._quality_vol = torch.maximum(
+            self._quality_vol,
+            quality_new * surface_mask.float()
+        )
 
     def _compute_coverage_q(self) -> torch.Tensor:
         """quality-weighted coverage 계산. _compute_quality() 이후 호출."""
-        soft = (self._quality_vol / self._quality_Q_sat).clamp(0.0, 1.0)
-        count = (soft * self._surf_vol.float()).sum(dim=(1, 2, 3))
-        return (count / self._total_surf_voxels).clamp(0.0, 1.0)
+        count = (self._quality_vol * self._surf_vol.float()).sum(dim=(1, 2, 3))
+        return count / self._total_surf_voxels
 
     # ── 보상 override ─────────────────────────────────────────────────────────
 

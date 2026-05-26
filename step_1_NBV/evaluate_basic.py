@@ -36,6 +36,10 @@ parser.add_argument("--num_episodes", type=int, default=3)
 parser.add_argument("--max_steps",    type=int, default=0)
 parser.add_argument("--render",       action="store_true")
 parser.add_argument("--out_dir",      type=str, default="./recon_output_base")
+parser.add_argument("--eval_phi",     type=float, default=None,
+                    help="초기 고도각 (도 단위). 미지정시 envCfg 기본값(20°) 사용")
+parser.add_argument("--eval_psi",     type=float, default=None,
+                    help="초기 거리 (m). 미지정시 envCfg 기본값(4.5m) 사용")
 
 AppLauncher.add_app_launcher_args(parser)
 if "--enable_cameras" not in sys.argv:
@@ -258,6 +262,12 @@ def main():
     env_cfg.c_step            = 0.02
     env_cfg.k_still           = 0.05
     env_cfg.water_dr_enabled  = False
+
+    import math as _math
+    if args.eval_phi is not None:
+        env_cfg.eval_phi = _math.radians(args.eval_phi)
+    if args.eval_psi is not None:
+        env_cfg.eval_psi = args.eval_psi
 
     from isaaclab.sensors import CameraCfg
     import isaaclab.sim as sim_utils

@@ -85,7 +85,7 @@ class OceanEnvCfg(DirectRLEnvCfg):
     k_c_q:              float = 0.0    # quality-weighted coverage reward (genNBV_quality 전용)
     k_x:                float = 0.02    # 0.02
     c_step:             float = 0.1    # 2.0 | 0.08
-    coverage_terminal:  float = 0.86    # 0.96
+    coverage_terminal:  float = 0.65    # max metric 상한 ~0.805 기준, 약 80%
     coverage_bonus:     float = 30.0
     lambda_q:           float = 0.1     # 1.0
 
@@ -108,5 +108,6 @@ class OceanEnvCfg(DirectRLEnvCfg):
     eval_theta: float = 0.0
     eval_phi:   float = math.radians(45)
     eval_psi:   float = 4.5
+    q_sat:      float = 0.80  # coverage_q 포화 임계값 (기본: exp(-μ×psi_min))
 
     

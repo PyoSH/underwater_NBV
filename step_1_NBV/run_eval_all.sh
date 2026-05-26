@@ -12,11 +12,12 @@ PY=/isaac-sim/python.sh
 LOG_DIR=/workspace/logs
 OUT_BASE=${PROJ}/recon_output
 
-NUM_EPISODES=30
+NUM_EPISODES=3077 
 DISPLAY_NUM=:99
 
 # ── 체크포인트 ─────────────────────────────────────────────────────────────────
-CKPT_UW_NBV2=${PROJ}/checkpoints/UW_NBV_2/genNBV_quality_step_0000327680.pt
+# CKPT_UW_NBV2=${PROJ}/checkpoints/UW_NBV_2/genNBV_quality_step_0000327680.pt genNBV_quality_step_0000665600.pt
+CKPT_UW_NBV2=${PROJ}/checkpoints/UW_NBV_2/genNBV_quality_step_0000665600.pt
 CKPT_GENNBV=${PROJ}/checkpoints/genNBV/genNBV_step_0000491520.pt
 CKPT_SCANRL=${PROJ}/checkpoints/scanRL_paper/scanRL_step_0000400000.pt
 

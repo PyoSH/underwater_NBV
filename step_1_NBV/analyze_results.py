@@ -125,7 +125,8 @@ def save_table_csv(stats: dict[str, dict | None], out_path: Path, success_thr: f
 
 def plot_curves(algo_episodes: dict[str, list[dict]], hist_key: str,
                 ylabel: str, title: str, out_path: Path, success_thr: float):
-    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+    colors     = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+    linestyles = ["-", "--", "-.", ":", "-", "--"]
     fig, ax = plt.subplots(figsize=(10, 6))
 
     for i, (name, episodes) in enumerate(algo_episodes.items()):
@@ -140,8 +141,11 @@ def plot_curves(algo_episodes: dict[str, list[dict]], hist_key: str,
         mu    = padded.mean(axis=0)
         sigma = padded.std(axis=0)
         c     = colors[i % len(colors)]
-        ax.plot(steps, mu, label=name, color=c, linewidth=2)
-        ax.fill_between(steps, mu - sigma, mu + sigma, alpha=0.15, color=c)
+        ls    = linestyles[i % len(linestyles)]
+        ax.plot(steps, mu, label=name, color=c, linewidth=2,
+                linestyle=ls, zorder=len(algo_episodes) - i)
+        ax.fill_between(steps, mu - sigma, mu + sigma, alpha=0.15, color=c,
+                        zorder=len(algo_episodes) - i)
 
     ax.axhline(y=success_thr, color="red", linestyle="--", linewidth=1,
                label=f"success thr ({success_thr})")

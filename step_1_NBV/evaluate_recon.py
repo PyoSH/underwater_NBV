@@ -32,6 +32,12 @@ parser.add_argument("--num_episodes", type=int, default=30)
 parser.add_argument("--max_steps",    type=int, default=0)
 parser.add_argument("--render",       action="store_true")
 parser.add_argument("--out_dir",      type=str, default="./recon_output")
+parser.add_argument("--eval_phi",     type=float, default=None,
+                    help="초기 고도각 (도 단위). 미지정시 envCfg 기본값(20°) 사용")
+parser.add_argument("--eval_psi",     type=float, default=None,
+                    help="초기 거리 (m). 미지정시 envCfg 기본값(4.5m) 사용")
+parser.add_argument("--q_sat",        type=float, default=None,
+                    help="coverage_q 포화 임계값. 미지정시 envCfg 기본값(0.80) 사용")
 
 AppLauncher.add_app_launcher_args(parser)
 if "--enable_cameras" not in sys.argv:
@@ -350,6 +356,15 @@ def main():
         env_cfg.use_visit_map         = True
         env_cfg.observation_space     = (K_img, env_cfg.visual.h, env_cfg.visual.w)
         env_cfg.state_space           = (K_img, env_cfg.visual.h, env_cfg.visual.w)
+
+    # 초기 카메라 위치 오버라이드
+    import math as _math
+    if args.eval_phi is not None:
+        env_cfg.eval_phi = _math.radians(args.eval_phi)
+    if args.eval_psi is not None:
+        env_cfg.eval_psi = args.eval_psi
+    if args.q_sat is not None:
+        env_cfg.q_sat = args.q_sat
 
     # 공통 quality 파라미터
     env_cfg.coverage_terminal = 0.82
