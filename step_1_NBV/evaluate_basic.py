@@ -27,6 +27,7 @@ from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.image as mpimg
 
 from isaaclab.app import AppLauncher
 
@@ -124,6 +125,12 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
         for ep_idx in range(n_episodes):
             env.reset()
 
+            if env.cfg.water_dr_enabled:
+                print(f"  [DR] ep={ep_idx}  mu={env._quality_mu:.4f}  Q_sat={env._quality_Q_sat:.4f}")
+            img_dir = out_dir / f"ep_{ep_idx:03d}_dr_images"
+            if env.cfg.water_dr_enabled:
+                img_dir.mkdir(parents=True, exist_ok=True)
+
             phi_rings_done = False
             phi_ring_cnt   = 0
 
@@ -158,6 +165,11 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
                 act_idx = int(action[0].argmax().item()) if action.dim() > 1 else int(action[0].item())
 
                 _, reward, terminated, truncated, _ = env.step(action)
+
+                if env.cfg.water_dr_enabled:
+                    for eid in range(E):
+                        img = env._camera.data.output["uw_rgb"][eid, :, :, :3].cpu().numpy().astype(np.uint8)
+                        mpimg.imsave(str(img_dir / f"step{ep_step:03d}_env{eid}.png"), img)
 
                 is_env_done = terminated[0].item() or truncated[0].item()
                 if is_env_done:
@@ -296,7 +308,7 @@ def main():
     env_cfg.k_x               = 0.0
     env_cfg.c_step            = 0.02
     env_cfg.k_still           = 0.05
-    env_cfg.water_dr_enabled  = False
+    env_cfg.water_dr_enabled  = True
 
     import math as _math
     if args.eval_phi is not None:
