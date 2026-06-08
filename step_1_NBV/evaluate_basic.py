@@ -27,6 +27,7 @@ from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.image as mpimg
 
 from isaaclab.app import AppLauncher
 
@@ -124,6 +125,13 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
         for ep_idx in range(n_episodes):
             env.reset()
 
+            if env.cfg.water_dr_enabled:
+                jerlov = getattr(env, "_current_jerlov_type", "random")
+                print(f"  [DR] ep={ep_idx}  type={jerlov}  mu={env._quality_mu:.4f}  Q_sat={env._quality_Q_sat:.4f}")
+            img_dir = out_dir / f"ep_{ep_idx:03d}_dr_images"
+            if env.cfg.water_dr_enabled:
+                img_dir.mkdir(parents=True, exist_ok=True)
+
             phi_rings_done = False
             phi_ring_cnt   = 0
 
@@ -158,6 +166,17 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
                 act_idx = int(action[0].argmax().item()) if action.dim() > 1 else int(action[0].item())
 
                 _, reward, terminated, truncated, _ = env.step(action)
+
+                if env.cfg.water_dr_enabled:
+                    for eid in range(E):
+                        try:
+                            raw = env._camera.data.output["uw_rgb"]
+                            img = raw[eid, :, :, :3].cpu().numpy().copy().astype(np.uint8)
+                            save_path = str(img_dir / f"step{ep_step:03d}_env{eid}.png")
+                            mpimg.imsave(save_path, img)
+                            print(f"  [DR img] saved → {save_path}  shape={img.shape}")
+                        except Exception as e:
+                            print(f"  [DR img] ERROR env{eid} step{ep_step}: {e}")
 
                 is_env_done = terminated[0].item() or truncated[0].item()
                 if is_env_done:
@@ -296,7 +315,8 @@ def main():
     env_cfg.k_x               = 0.0
     env_cfg.c_step            = 0.02
     env_cfg.k_still           = 0.05
-    env_cfg.water_dr_enabled  = False
+    env_cfg.water_dr_enabled  = True
+    env_cfg.jerlov_dr_enabled = True
 
     import math as _math
     if args.eval_phi is not None:

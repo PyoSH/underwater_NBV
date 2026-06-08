@@ -4,6 +4,7 @@ import math
 from typing import Sequence
 
 import numpy as np
+from jerlov_presets import JERLOV_PRESETS
 import torch
 import os
 
@@ -488,16 +489,21 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         # self._save_surf_pc(env_id=0)
 
     def _randomize_water_params(self) -> None:
-        dr = self.cfg.water_dr
+        if self.cfg.jerlov_dr_enabled:
+            chosen = str(np.random.choice(self.cfg.jerlov_types))
+            self._current_jerlov_type = chosen
+            self._camera.set_water_params(**JERLOV_PRESETS[chosen])
+        else:
+            dr = self.cfg.water_dr
 
-        def rand_tuple(mn, mx):
-            return tuple(float(np.random.uniform(mn[i], mx[i])) for i in range(3))
+            def rand_tuple(mn, mx):
+                return tuple(float(np.random.uniform(mn[i], mx[i])) for i in range(3))
 
-        self._camera.set_water_params(
-            backscatter_value = rand_tuple(dr.backscatter_value_min,
-                                        dr.backscatter_value_max),
-            atten_coeff       = rand_tuple(dr.atten_coeff_min,
-                                        dr.atten_coeff_max),
-            backscatter_coeff = rand_tuple(dr.backscatter_coeff_min,
-                                        dr.backscatter_coeff_max),
-        )
+            self._camera.set_water_params(
+                backscatter_value = rand_tuple(dr.backscatter_value_min,
+                                              dr.backscatter_value_max),
+                atten_coeff       = rand_tuple(dr.atten_coeff_min,
+                                              dr.atten_coeff_max),
+                backscatter_coeff = rand_tuple(dr.backscatter_coeff_min,
+                                              dr.backscatter_coeff_max),
+            )
