@@ -168,8 +168,14 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
 
                 if env.cfg.water_dr_enabled:
                     for eid in range(E):
-                        img = env._camera.data.output["uw_rgb"][eid, :, :, :3].cpu().numpy().astype(np.uint8)
-                        mpimg.imsave(str(img_dir / f"step{ep_step:03d}_env{eid}.png"), img)
+                        try:
+                            raw = env._camera.data.output["uw_rgb"]
+                            img = raw[eid, :, :, :3].cpu().numpy().copy().astype(np.uint8)
+                            save_path = str(img_dir / f"step{ep_step:03d}_env{eid}.png")
+                            mpimg.imsave(save_path, img)
+                            print(f"  [DR img] saved → {save_path}  shape={img.shape}")
+                        except Exception as e:
+                            print(f"  [DR img] ERROR env{eid} step{ep_step}: {e}")
 
                 is_env_done = terminated[0].item() or truncated[0].item()
                 if is_env_done:
