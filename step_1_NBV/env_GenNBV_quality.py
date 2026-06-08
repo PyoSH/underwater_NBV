@@ -26,6 +26,7 @@ quality 정의 (Beer-Lambert, OceanSim UWrenderer 단방향 감쇠):
 종료: coverage_q >= coverage_terminal
 """
 from __future__ import annotations
+import math
 import torch
 from env_GenNBV import OceanEnvGenNBV
 from envCfg import OceanEnvCfg
@@ -132,7 +133,7 @@ class OceanEnvGenNBVQuality(OceanEnvGenNBV):
 
         cfg = self.cfg
 
-        goal_reached   = (self.curr_coverage_q >= cfg.coverage_terminal).float()
+        goal_reached   = ((self.curr_coverage_q / self._quality_Q_sat) >= cfg.coverage_terminal).float()
         success_reward = goal_reached * cfg.coverage_bonus
 
         reward_coverage = cfg.k_c_q * delta_coverage_q
@@ -166,7 +167,7 @@ class OceanEnvGenNBVQuality(OceanEnvGenNBV):
     # ── 종료 조건 override ────────────────────────────────────────────────────
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        terminated = self.curr_coverage_q >= self.cfg.coverage_terminal
+        terminated = (self.curr_coverage_q / self._quality_Q_sat) >= self.cfg.coverage_terminal
         truncated  = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, truncated
 
@@ -221,3 +222,4 @@ class OceanEnvGenNBVQuality(OceanEnvGenNBV):
         if self.cfg.water_dr_enabled:
             c = self._camera._atten_coeff   # wp.vec3f
             self._quality_mu = (c.x + c.y + c.z) / 3.0
+            self._quality_Q_sat = math.exp(-self._quality_mu * self.cfg.psi_min)

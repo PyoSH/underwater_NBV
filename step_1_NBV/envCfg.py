@@ -96,7 +96,7 @@ class OceanEnvCfg(DirectRLEnvCfg):
 
     # ── 카메라 센서 ──────────────────────────────────────────────────────────
     water_dr:           WaterParamRangeCfg = WaterParamRangeCfg()
-    water_dr_enabled:   bool = False
+    water_dr_enabled:   bool = True
     
 
     # ── 디버그 시각화 ─────────────────────────────────────────────────────────
