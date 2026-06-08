@@ -126,7 +126,8 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
             env.reset()
 
             if env.cfg.water_dr_enabled:
-                print(f"  [DR] ep={ep_idx}  mu={env._quality_mu:.4f}  Q_sat={env._quality_Q_sat:.4f}")
+                jerlov = getattr(env, "_current_jerlov_type", "random")
+                print(f"  [DR] ep={ep_idx}  type={jerlov}  mu={env._quality_mu:.4f}  Q_sat={env._quality_Q_sat:.4f}")
             img_dir = out_dir / f"ep_{ep_idx:03d}_dr_images"
             if env.cfg.water_dr_enabled:
                 img_dir.mkdir(parents=True, exist_ok=True)
@@ -315,6 +316,7 @@ def main():
     env_cfg.c_step            = 0.02
     env_cfg.k_still           = 0.05
     env_cfg.water_dr_enabled  = True
+    env_cfg.jerlov_dr_enabled = True
 
     import math as _math
     if args.eval_phi is not None:

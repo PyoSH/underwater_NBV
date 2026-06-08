@@ -3,6 +3,9 @@ import pandas as pd
 import cv2
 import os
 
+if not hasattr(np, 'trapezoid'):   # NumPy < 2.0 호환
+    np.trapezoid = np.trapz
+
 # ---------------------------------------------------------------------------
 # Reference: Akkaynak & Treibitz, "A Revised Underwater Image Formation Model"
 #            IEEE CVPR 2018

@@ -97,6 +97,8 @@ class OceanEnvCfg(DirectRLEnvCfg):
     # ── 카메라 센서 ──────────────────────────────────────────────────────────
     water_dr:           WaterParamRangeCfg = WaterParamRangeCfg()
     water_dr_enabled:   bool = True
+    jerlov_dr_enabled:  bool = False   # True: Jerlov type 이산 DR (water_dr 대체)
+    jerlov_types:       tuple = ("IB", "II", "III", "1C", "3C", "5C")
     
 
     # ── 디버그 시각화 ─────────────────────────────────────────────────────────
