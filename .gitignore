@@ -8,3 +8,4 @@ __pycache__/
 /step_1_NBV/checkpoints*
 /step_1_NBV/recon_output
 /step_1_NBV/recon_output_base
+/recon_output*

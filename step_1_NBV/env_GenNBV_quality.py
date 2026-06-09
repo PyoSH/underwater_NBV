@@ -49,9 +49,7 @@ class OceanEnvGenNBVQuality(OceanEnvGenNBV):
         self._quality_Q_sat = cfg.q_sat  # exp(-μ×psi_min) ≈ 0.805: psi_min 단일 방문 포화 기준
 
         # μ 초기값: atten_coeff_max 채널 평균 (리셋 시 실제 값으로 동기화)
-        self._quality_mu = float(
-            sum(cfg.water_dr.atten_coeff_max) / len(cfg.water_dr.atten_coeff_max)
-        )
+        self._quality_mu = float(0.1)
 
         # quality-weighted coverage 추적
         self.curr_coverage_q = torch.zeros(self.num_envs, device=self.device)
@@ -219,7 +217,7 @@ class OceanEnvGenNBVQuality(OceanEnvGenNBV):
         self._prev_coverage_q[env_ids]     = 0.0
 
         # μ 동기화: _randomize_water_params() 이후 실제 값 반영
-        if self.cfg.water_dr_enabled:
+        if self.cfg.jerlov_dr_enabled:
             c = self._camera._atten_coeff   # wp.vec3f
             self._quality_mu = (c.x + c.y + c.z) / 3.0
             self._quality_Q_sat = math.exp(-self._quality_mu * self.cfg.psi_min)

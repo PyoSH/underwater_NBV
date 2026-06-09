@@ -33,8 +33,8 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--num_envs",     type=int, default=1)
-parser.add_argument("--num_episodes", type=int, default=3)
-parser.add_argument("--max_steps",    type=int, default=0)
+parser.add_argument("--num_episodes", type=int, default=6)
+parser.add_argument("--max_steps",    type=int, default=10)
 parser.add_argument("--render",       action="store_true")
 parser.add_argument("--out_dir",      type=str, default="./recon_output_base")
 parser.add_argument("--eval_phi",     type=float, default=None,
@@ -121,15 +121,18 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
     print(f"[base] policy : orbital  (STEPS_PER_RING={STEPS_PER_RING}  max_rings={max_rings})")
     print(f"[base] output → {out_dir.resolve()}\n")
 
+    TYPES = ["IB", "II", "III", "1C", "3C", "5C"]
+
     with torch.no_grad():
         for ep_idx in range(n_episodes):
+            env.cfg.jerlov_types = (TYPES[ep_idx% len(TYPES)],)
             env.reset()
 
-            if env.cfg.water_dr_enabled:
-                jerlov = getattr(env, "_current_jerlov_type", "random")
+            if env.cfg.jerlov_dr_enabled:
+                jerlov = env._current_jerlov_type
                 print(f"  [DR] ep={ep_idx}  type={jerlov}  mu={env._quality_mu:.4f}  Q_sat={env._quality_Q_sat:.4f}")
             img_dir = out_dir / f"ep_{ep_idx:03d}_dr_images"
-            if env.cfg.water_dr_enabled:
+            if env.cfg.jerlov_dr_enabled:
                 img_dir.mkdir(parents=True, exist_ok=True)
 
             phi_rings_done = False
