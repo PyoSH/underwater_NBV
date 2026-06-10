@@ -92,9 +92,10 @@ class ImagingSonar(Camera):
 
         self._frame_id: int = 0
 
-        # Pre-register output keys — _data 직접 접근 (data 프로퍼티는 render 트리거)
-        self._data.output["sonar_map"]   = None
-        self._data.output["sonar_image"] = None
+        # NOTE: sonar_map/sonar_image는 _data.output에 사전 등록하지 않음.
+        # Camera._update_buffers_impl은 len(_data.output)==0 조건으로 최초 초기화를 판단하므로,
+        # 여기서 키를 추가하면 else 분기에서 KeyError가 발생함.
+        # _apply_sonar_pipeline에서 self.data 프로퍼티로 지연 초기화 후 직접 추가함.
 
         # Viewport
         self._sonar_provider = None
@@ -122,11 +123,12 @@ class ImagingSonar(Camera):
     def _apply_sonar_pipeline(self) -> None:
 
         # ── 1. Fetch Isaac Lab Camera outputs ──────────────────────────
-        # _data 직접 접근: data 프로퍼티는 _update_outdated_buffers()를 재트리거해
-        # 첫 렌더 시 미등록 키에 대한 per-env 인덱스 할당으로 KeyError 발생
-        depth_t    = self._data.output.get("distance_to_camera")  # (N,H,W,1)|(N,H,W)
-        normals_t  = self._data.output.get("normals")             # (N,H,W,4)
-        sem_t      = self._data.output.get("semantic_segmentation")  # (N,H,W,1)|(N,H,W)
+        # self.data 프로퍼티 사용: _update_outdated_buffers() → _update_buffers_impl() 지연 호출.
+        # scene.update()는 force_recompute=False이므로 _update_buffers_impl을 직접 호출하지 않음.
+        # 최초 호출 시 len(_data.output)==0 → _create_annotator_data()로 정상 초기화됨.
+        depth_t    = self.data.output.get("distance_to_camera")  # (N,H,W,1)|(N,H,W)
+        normals_t  = self.data.output.get("normals")             # (N,H,W,4)
+        sem_t      = self.data.output.get("semantic_segmentation")  # (N,H,W,1)|(N,H,W)
 
         if depth_t is None or normals_t is None or sem_t is None:
             return
