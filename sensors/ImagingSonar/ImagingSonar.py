@@ -349,7 +349,8 @@ class ImagingSonar(Camera):
         sem_out = sem_np.reshape(N, H*W)
 
         for n in range(N):
-            d = depth_np[n].reshape(-1)                     # (H*W,)
+            d = depth_np[n].reshape(-1).copy()              # (H*W,)
+            d[~np.isfinite(d)] = 0.0                        # inf/NaN → 0 (소나 min_range 미만, 빈 처리)
             pcl_out[n, :, 0] = (us - cx) / fx * d
             pcl_out[n, :, 1] = (vs - cy) / fy * d
             pcl_out[n, :, 2] = d
