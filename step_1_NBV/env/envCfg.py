@@ -2,7 +2,7 @@ from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 # from dataclasses import field
-from sceneCfg import OceanSceneCfg
+from .sceneCfg import OceanSceneCfg
 from collections import deque
 import math
 from os.path import join

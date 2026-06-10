@@ -55,11 +55,11 @@ simulation_app = app_launcher.app
 import numpy as np
 import torch
 
-sys.path.insert(0, os.path.dirname(__file__))
-from envCfg             import OceanEnvCfg
-from env_GenNBV_quality import OceanEnvGenNBVQuality
-from algorithm2         import make_env_action
-from evaluate_utils     import save_episode_results, save_episode_video, fuse_highres_tsdf, fuse_highres_quality
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from env.envCfg              import OceanEnvCfg
+from env.env_GenNBV_quality  import OceanEnvGenNBVQuality
+from algorithm.algorithm2    import make_env_action
+from evaluate.evaluate_utils import save_episode_results, save_episode_video, fuse_highres_tsdf, fuse_highres_quality
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 궤도 정책

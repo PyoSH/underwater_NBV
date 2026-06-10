@@ -40,9 +40,9 @@ app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
 # ── AppLauncher 이후 import ───────────────────────────────────────────────────
-sys.path.insert(0, os.path.dirname(__file__))
-from envCfg import OceanEnvCfg
-from env    import OceanEnv
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from env.envCfg import OceanEnvCfg
+from env.env    import OceanEnv
 
 if __name__ == "__main__":
     cfg = OceanEnvCfg()

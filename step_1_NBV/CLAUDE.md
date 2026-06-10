@@ -1,4 +1,4 @@
-# OceanRL NBV — 프로젝트 전체 현황 (2026-05-26)
+# OceanRL NBV — 프로젝트 전체 현황 (2026-05-27)
 
 ---
 
@@ -286,6 +286,9 @@ def _reset_idx(self, env_ids) -> None:
 | UW_NBV_diag | 진단 run (버그 있음) | never=0.791 → coverage_q와 불일치, 무효 |
 | UW_NBV_diag2 | 진단 run (버그 수정) | never=0.515, full=0.479 → coverage_q=0.483 일치 ✓ |
 | **UW_NBV_2** | **해석 B + coverage_terminal=0.82 + ent_coef=0.10** | **step ~993K 완료. EVAL cov_q=0.82-0.83, success=0.76-0.93 (sum 메트릭 기준)** |
+| UW_NBV_3 | algo_GenNBV + coverage_terminal=0.65 | step 51K에서 붕괴 (target_kl 없음, ent_coef=0.10) |
+| UW_NBV_4 | algo_GenNBV + coverage_terminal=0.65 (재시작) | UW_NBV_5로 교체 전 중단 |
+| **UW_NBV_5** | **algo_UW_NBV (target_kl=0.02, ent_coef=0.03) + coverage_terminal=0.60** | **step 296K 완료. EVAL peak: success=0.99, cov_q=0.618 (step 235K). 최종: success~0.81, cov_q~0.599** |
 
 ---
 
@@ -308,19 +311,35 @@ def _reset_idx(self, env_ids) -> None:
 2. ~~UW_NBV_2 학습~~ **완료** (step ~993K, 최종 ckpt: `genNBV_quality_step_0000993280.pt`)
 3. ~~evaluate_recon.py 공통 평가 인프라~~ **완료**
 4. ~~coverage_q metric sum→max 재설계~~ **완료** (2026-05-26)
-5. **phi sweep 실험** (로컬 컴퓨터): `run_phi_sweep.sh` — phi 20/35/50/65/80° × UW_NBV_2 vs Manual Orbit
-6. **비교 실험 결과 분석**: `analyze_phi_sweep.py` → `analysis/phi_sweep/phi_sweep.png`
-7. coverage_q 커브 비교 그래프 작성 (coverage_q_hist.npy 활용)
+5. ~~algo_UW_NBV.py 작성 (target_kl, abs KL, ent_coef=0.03)~~ **완료**
+6. ~~UW_NBV_5 학습~~ **완료** (2026-05-27, step 296K, 최종 ckpt: `genNBV_quality_step_0000296960.pt`)
+7. **비교 실험 실행** (로컬 컴퓨터): `run_eval_all.sh` — UW_NBV_5 vs GenNBV binary vs ScanRL vs Manual Orbit
+8. **비교 실험 결과 분석**: `analyze_results.py` → `analysis/comparison_table.csv`, `coverage_q_curve.png`
 
 ---
 
 ## 15. 학습 현황
 
-**UW_NBV_2 완료** (2026-05-23, step ~993K)
-- 최종 체크포인트: `/workspace/pyoten/checkpoints/UW_NBV_2/genNBV_quality_step_0000993280.pt`
-- 학습 프로세스 종료됨
+**UW_NBV_5 완료** (2026-05-27, step 296K)
+- 최종 체크포인트: `/workspace/pyoten/checkpoints/UW_NBV_5/genNBV_quality_step_0000296960.pt`
+- 알고리즘: `algo_UW_NBV` (target_kl=0.02, ent_coef=0.03)
+- 학습 명령:
+  ```bash
+  docker exec -d env_pyoten bash -c "cd /workspace/Programing/OceanRL_test/step_1_NBV && \
+  DISPLAY=:99 /workspace/isaac-sim/python.sh train_GenNBV_quality.py \
+      --num_envs 4 --total_steps 300000 --save_interval 10 \
+      --ent_coef 0.03 --target_kl 0.02 --wandb_name UW_NBV_5 \
+  > /workspace/logs/train_UW_NBV_5.log 2>&1"
+  ```
+- EVAL 성능 (max metric 기준):
+  - 피크: success=0.99, cov_q=0.618 (step 235K)
+  - 최종: success=0.81, cov_q=0.599 (step 296K)
+- 특이사항: step 122K–133K 일시 붕괴 후 target_kl 조기 종료로 자가 회복
 
-현재 단계: **평가 실험 진행 중** (로컬 컴퓨터, `run_phi_sweep.sh`)
+**UW_NBV_2 완료** (2026-05-23, step ~993K) — sum metric 기준 비교 baseline
+- 최종 체크포인트: `/workspace/pyoten/checkpoints/UW_NBV_2/genNBV_quality_step_0000993280.pt`
+
+현재 단계: **비교 실험 준비** (로컬 컴퓨터, `run_eval_all.sh`)
 
 ---
 

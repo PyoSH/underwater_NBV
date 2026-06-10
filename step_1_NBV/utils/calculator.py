@@ -269,9 +269,10 @@ class UnderwaterImageSimulator:
 
 # ---------------------------------------------------------------------------
 if __name__ == '__main__':
-    JERLOV_FILE  = 'jerlov_IOPs.xlsx'
-    FLIR_FILE    = 'Flir_Spectral_curve.xlsx'
-    D65_FILE     = 'CIE_std_illum_D65.csv'
+    _DIR         = os.path.dirname(os.path.abspath(__file__))
+    JERLOV_FILE  = os.path.join(_DIR, 'jerlov_IOPs.xlsx')
+    FLIR_FILE    = os.path.join(_DIR, 'Flir_Spectral_curve.xlsx')
+    D65_FILE     = os.path.join(_DIR, 'CIE_std_illum_D65.csv')
     WATER_TYPE   = '5C'   # choose: IB | II | III | 1C | 3C | 5C
     DEPTH_D      = 1.0    # vertical water depth [m]
     Z_MAX        = 30.0   # max camera-to-subject distance to cover [m]

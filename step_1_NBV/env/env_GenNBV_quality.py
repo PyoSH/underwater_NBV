@@ -28,8 +28,8 @@ quality 정의 (Beer-Lambert, OceanSim UWrenderer 단방향 감쇠):
 from __future__ import annotations
 import math
 import torch
-from env_GenNBV import OceanEnvGenNBV
-from envCfg import OceanEnvCfg
+from .env_GenNBV import OceanEnvGenNBV
+from .envCfg import OceanEnvCfg
 
 
 class OceanEnvGenNBVQuality(OceanEnvGenNBV):

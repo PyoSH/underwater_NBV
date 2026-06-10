@@ -42,12 +42,12 @@ import numpy as np
 import torch                                                                        
 import wandb    
                                                                                     
-sys.path.insert(0, os.path.dirname(__file__))
-from envCfg   import OceanEnvCfg                                                    
-from env      import OceanEnv                                                       
-# from algorithm2 import (Actor, Critic, RolloutBuffer, PPOConfig,
-#                         make_env_action, explained_variance, ppo_update)            
-from algorithm3 import (Actor, Critic, RolloutBuffer, PPOConfig, make_env_action, explained_variance, ppo_update)                  
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from env.envCfg    import OceanEnvCfg
+from env.env       import OceanEnv
+# from algorithm.algorithm2 import (Actor, Critic, RolloutBuffer, PPOConfig,
+#                                   make_env_action, explained_variance, ppo_update)
+from algorithm.algorithm3 import (Actor, Critic, RolloutBuffer, PPOConfig, make_env_action, explained_variance, ppo_update)                  
 
 def run_eval(env, actor, device, n_episodes: int) -> dict:
     actor.eval()

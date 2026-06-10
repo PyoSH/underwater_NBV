@@ -52,13 +52,13 @@ import numpy as np
 import torch
 import isaaclab.sim as sim_utils
 
-sys.path.insert(0, os.path.dirname(__file__))
-from envCfg             import OceanEnvCfg
-from env_GenNBV_quality import OceanEnvGenNBVQuality
-from algorithm3         import Actor, make_env_action
-from algo_scanRL        import QNetwork
-from algo_GenNBV        import Actor as GenNBVActor
-from evaluate_utils     import save_episode_results, save_episode_video, fuse_highres_tsdf, fuse_highres_quality
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from env.envCfg              import OceanEnvCfg
+from env.env_GenNBV_quality  import OceanEnvGenNBVQuality
+from algorithm.algorithm3    import Actor, make_env_action
+from algorithm.algo_scanRL   import QNetwork
+from algorithm.algo_GenNBV   import Actor as GenNBVActor
+from evaluate.evaluate_utils import save_episode_results, save_episode_video, fuse_highres_tsdf, fuse_highres_quality
 
 ACTION_NAMES = ["+θ", "-θ", "-φ", "+φ", "-ψ", "+ψ"]
 

@@ -27,8 +27,8 @@ train_GenNBV.py 는 아래 키만 사용한다:
 from __future__ import annotations
 
 import torch
-from env import OceanEnv
-from envCfg import OceanEnvCfg
+from .env import OceanEnv
+from .envCfg import OceanEnvCfg
 
 
 class OceanEnvGenNBV(OceanEnv):

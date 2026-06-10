@@ -4,7 +4,7 @@ import math
 from typing import Sequence
 
 import numpy as np
-from jerlov_presets import JERLOV_PRESETS
+from utils.jerlov_presets import JERLOV_PRESETS
 import torch
 import os
 
@@ -15,9 +15,9 @@ import torch.nn.functional as F
 import isaaclab.sim as sim_utils
 from isaaclab.envs import DirectRLEnv
 from isaaclab.utils.math import quat_apply
-from env_utils import EnvUtilsMixin
-from env_reward import EnvRewardMixin
-from envCfg import OceanEnvCfg
+from .env_utils import EnvUtilsMixin
+from .env_reward import EnvRewardMixin
+from .envCfg import OceanEnvCfg
 from pathlib import Path
 
 class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):

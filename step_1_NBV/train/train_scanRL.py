@@ -40,11 +40,11 @@ import numpy as np
 import torch
 import wandb
 
-sys.path.insert(0, os.path.dirname(__file__))
-from envCfg      import OceanEnvCfg
-from env         import OceanEnv
-from algo_scanRL import (QNetwork, ReplayBuffer, DQNConfig,
-                         make_env_action, dqn_update)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from env.envCfg            import OceanEnvCfg
+from env.env               import OceanEnv
+from algorithm.algo_scanRL import (QNetwork, ReplayBuffer, DQNConfig,
+                                   make_env_action, dqn_update)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

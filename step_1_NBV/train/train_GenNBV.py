@@ -5,7 +5,7 @@ from pathlib import Path
 from isaaclab.app import AppLauncher
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
-parser = argparse.ArgumentParser(description="GenNBV Quality-Aware PPO — Beer-Lambert voxel quality")
+parser = argparse.ArgumentParser(description="GenNBV PPO — 3D Geometric + 2D Semantic")
 parser.add_argument("--num_envs",       type=int,   default=1)
 parser.add_argument("--total_steps",    type=int,   default=500_000)
 parser.add_argument("--rollout_steps",  type=int,   default=256)
@@ -18,13 +18,12 @@ parser.add_argument("--clip_eps",       type=float, default=0.2)
 parser.add_argument("--ent_coef",       type=float, default=0.05)
 parser.add_argument("--vf_coef",        type=float, default=0.5)
 parser.add_argument("--max_grad_norm",  type=float, default=0.5)
-parser.add_argument("--target_kl",      type=float, default=0.02)
 parser.add_argument("--lr_decay",       action="store_true")
 parser.add_argument("--ckpt_dir",       type=str,   default="/workspace/checkpoints")
 parser.add_argument("--save_interval",  type=int,   default=10)
 parser.add_argument("--resume",         type=str,   default=None)
 parser.add_argument("--wandb_project",  type=str,   default="RL_NBV")
-parser.add_argument("--wandb_name",     type=str,   default="genNBV_quality")
+parser.add_argument("--wandb_name",     type=str,   default="genNBV")
 parser.add_argument("--eval_interval",  type=int,   default=10,
                     help="N 롤아웃마다 eval (0=비활성)")
 parser.add_argument("--eval_episodes",  type=int,   default=20)
@@ -43,18 +42,18 @@ import numpy as np
 import torch
 import wandb
 
-sys.path.insert(0, os.path.dirname(__file__))
-from envCfg              import OceanEnvCfg
-from env_GenNBV_quality  import OceanEnvGenNBVQuality
-from algo_UW_NBV         import (Actor, Critic, RolloutBuffer, PPOConfig,
-                                 make_env_action, explained_variance, ppo_update)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from env.envCfg          import OceanEnvCfg
+from env.env_GenNBV      import OceanEnvGenNBV
+from algorithm.algo_GenNBV import (Actor, Critic, RolloutBuffer, PPOConfig,
+                                   make_env_action, explained_variance, ppo_update)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Eval
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_eval(env: OceanEnvGenNBVQuality, actor: Actor,
+def run_eval(env: OceanEnvGenNBV, actor: Actor,
              device, n_episodes: int) -> dict:
     actor.eval()
     results = dict(returns=[], lengths=[], coverages=[], successes=[])
@@ -85,7 +84,7 @@ def run_eval(env: OceanEnvGenNBVQuality, actor: Actor,
                 if completed[eid] < n_episodes:
                     results["returns"]  .append(ep_return[eid].item())
                     results["lengths"]  .append(ep_len[eid].item())
-                    results["coverages"].append(env._terminal_coverage_q[eid].item())
+                    results["coverages"].append(env._terminal_coverage[eid].item())
                     results["successes"].append(float(terminated[eid].item()))
                     completed[eid] += 1
                 ep_return[eid] = 0.0
@@ -113,28 +112,30 @@ def main():
     env_cfg = OceanEnvCfg()
     env_cfg.scene.num_envs = args.num_envs
 
+    # GenNBV: 2D 시멘틱 인코더는 마지막 2 프레임만 사용 → 버퍼 절약
     env_cfg.visual.num_seq_actor  = 2
     env_cfg.visual.num_seq_critic = 2
     env_cfg.visual.h = 64
     env_cfg.visual.w = 64
 
+    # visit_map 불필요 (3D voxel이 미관측 영역 정보를 담당)
     env_cfg.use_visit_map = False
     env_cfg.k_explore     = 0.0
 
-    env_cfg.k_c               = 0.0    # binary coverage 보상 비활성
-    env_cfg.k_c_q             = 5.0    # quality-weighted coverage 보상
-    env_cfg.k_x               = 0.0
-    env_cfg.c_step            = 0.02   # 0.1 → 0.02: quality reward와 scale 맞춤
+    # 보상 파라미터 (envCfg 기본값과 동일, 명시)
+    env_cfg.k_c               = 5.0
+    env_cfg.k_x               = 0.0    # 이동 패널티 금지
+    env_cfg.c_step            = 0.1
     env_cfg.k_still           = 0.05
-    env_cfg.coverage_terminal = 0.60
+    env_cfg.coverage_terminal = 0.82
     env_cfg.coverage_bonus    = 30.0
 
-    env    = OceanEnvGenNBVQuality(cfg=env_cfg, render_mode="rgb_array")
+    env    = OceanEnvGenNBV(cfg=env_cfg, render_mode="rgb_array")
     device = env.device
     E      = env.num_envs
     H, W   = env_cfg.visual.h, env_cfg.visual.w
-    M      = 2
-    Nx, Ny, Nz = env_cfg.tsdf.vol_dim
+    M      = 2                              # SemanticEncoder 입력 프레임 수
+    Nx, Ny, Nz = env_cfg.tsdf.vol_dim       # (40, 40, 40)
     T      = args.rollout_steps
 
     # ── 네트워크 ──────────────────────────────────────────────────────────────
@@ -153,7 +154,6 @@ def main():
         max_grad_norm  = args.max_grad_norm,
         gamma          = args.gamma,
         lam            = args.gae_lambda,
-        target_kl      = args.target_kl,
     )
 
     # ── Rollout Buffer ────────────────────────────────────────────────────────
@@ -186,7 +186,7 @@ def main():
     if use_wandb:
         wandb.init(
             project=args.wandb_project,
-            name=args.wandb_name or "genNBV_quality",
+            name=args.wandb_name or "genNBV",
             config=vars(args),
             resume="allow",
         )
@@ -201,15 +201,14 @@ def main():
 
     # ── 초기 관측 ─────────────────────────────────────────────────────────────
     obs, _   = env.reset()
-    vox      = obs["vox_actor"]
-    img      = obs["img_semantic"]
-    scalar   = obs["extra_info"]
-    scalar_c = obs["critic_scalar"]
+    vox      = obs["vox_actor"]      # (E, 3, Nx, Ny, Nz)
+    img      = obs["img_semantic"]   # (E, 2, H, W)
+    scalar   = obs["extra_info"]     # (E, 3)  — (θ,φ,ψ)
+    scalar_c = obs["critic_scalar"]  # (E, 4)  — (θ,φ,ψ,coverage)
 
     ep_return = torch.zeros(E, device=device)
     ep_len    = torch.zeros(E, device=device, dtype=torch.long)
-    finished  = dict(returns=[], lengths=[], coverages=[], coverages_binary=[], terminated=[],
-                     diag_never=[], diag_partial=[], diag_full=[])
+    finished  = dict(returns=[], lengths=[], coverages=[], terminated=[])
 
     # ══════════════════════════════════════════════════════════════════════════
     # 학습 루프
@@ -250,12 +249,8 @@ def main():
             for eid in done_any.nonzero(as_tuple=True)[0].tolist():
                 finished["returns"]   .append(ep_return[eid].item())
                 finished["lengths"]   .append(ep_len[eid].item())
-                finished["coverages"]       .append(env._terminal_coverage_q[eid].item())
-                finished["coverages_binary"].append(env._terminal_coverage[eid].item())
-                finished["terminated"]      .append(float(terminated[eid].item()))
-                finished["diag_never"]  .append(env._diag_gt_never[eid].item())
-                finished["diag_partial"].append(env._diag_gt_partial[eid].item())
-                finished["diag_full"]   .append(env._diag_gt_full[eid].item())
+                finished["coverages"] .append(env._terminal_coverage[eid].item())
+                finished["terminated"].append(float(terminated[eid].item()))
                 ep_return[eid] = 0.0
                 ep_len[eid]    = 0
 
@@ -284,40 +279,30 @@ def main():
             "train/value_loss":         stats["value_loss"],
             "train/entropy":            stats["entropy"],
             "train/approx_kl":          stats["approx_kl"],
-            "train/early_stop":         float(stats.get("early_stop", False)),
             "train/explained_variance": ev,
             "train/lr_actor":           optimizer_actor .param_groups[0]["lr"],
             "train/lr_critic":          optimizer_critic.param_groups[0]["lr"],
             "train/fps":                fps,
             "train/global_step":        global_step,
-            "reward/coverage_q":        np.mean(rew_cov_list),
+            "reward/coverage":          np.mean(rew_cov_list),
             "reward/penalty":           np.mean(rew_pen_list),
             "reward/success":           np.mean(rew_succ_list),
             "reward/stall":             np.mean(rew_stall_list),
             "env0/theta_deg":           math.degrees(env._sph_theta[0].item()),
             "env0/phi_deg":             math.degrees(env._sph_phi[0].item()),
             "env0/psi":                 env._sph_psi[0].item(),
-            "env0/coverage_binary":     env.curr_coverage[0].item(),
-            "env0/coverage_q":          env.curr_coverage_q[0].item(),
+            "env0/coverage":            env.curr_coverage[0].item(),
             "env0/vox_unknown_ratio":   (vox[0, 0] > 0.5).float().mean().item(),
-            "env0/vox_quality_mean":    vox[0, 2][vox[0, 2] > 0].mean().item()
-                                        if (vox[0, 2] > 0).any() else 0.0,
-            "env0/quality_mu":          env._quality_mu,
+            "env0/vox_occupied_ratio":  (vox[0, 2] > 0.5).float().mean().item(),
         }
 
         if finished["returns"]:
-            log["episode/mean_return"]          = np.mean(finished["returns"])
-            log["episode/mean_length"]          = np.mean(finished["lengths"])
-            log["episode/mean_coverage_q"]      = np.mean(finished["coverages"])
-            log["episode/mean_coverage_binary"] = np.mean(finished["coverages_binary"])
-            log["episode/success_rate"]         = np.mean(finished["terminated"])
-            log["episode/timeout_rate"]         = 1.0 - np.mean(finished["terminated"])
-            # 진단: GT surface voxel quality 분포
-            log["diag/gt_never"]   = np.mean(finished["diag_never"])    # quality=0 비율
-            log["diag/gt_partial"] = np.mean(finished["diag_partial"])  # 0<q<1 비율
-            log["diag/gt_full"]    = np.mean(finished["diag_full"])     # q≥1 비율
-            finished = dict(returns=[], lengths=[], coverages=[], coverages_binary=[], terminated=[],
-                            diag_never=[], diag_partial=[], diag_full=[])
+            log["episode/mean_return"]   = np.mean(finished["returns"])
+            log["episode/mean_length"]   = np.mean(finished["lengths"])
+            log["episode/mean_coverage"] = np.mean(finished["coverages"])
+            log["episode/success_rate"]  = np.mean(finished["terminated"])
+            log["episode/timeout_rate"]  = 1.0 - np.mean(finished["terminated"])
+            finished = dict(returns=[], lengths=[], coverages=[], terminated=[])
 
         if use_wandb:
             wandb.log(log, step=global_step)
@@ -325,16 +310,12 @@ def main():
         LOG_EVERY = 10_000
         if global_step - last_log_step >= LOG_EVERY:
             last_log_step = global_step
-            cov_q_str = (
-                f"  cov_q={log['episode/mean_coverage_q']:.3f}"
-                f"  cov_bin={log['episode/mean_coverage_binary']:.3f}"
-                if "episode/mean_coverage_q" in log else ""
-            )
+            cov_str = (f"  cov={log['episode/mean_coverage']:.3f}"
+                       if "episode/mean_coverage" in log else "")
 
-            weight_filled   = (env._weight_vol > 0).float().mean().item()
-            curr_cov_now    = env.curr_coverage.mean().item()
-            curr_cov_q_now  = env.curr_coverage_q.mean().item()
-            surf_total      = env._total_surf_voxels.mean().item()
+            weight_filled = (env._weight_vol > 0).float().mean().item()
+            curr_cov_now  = env.curr_coverage.mean().item()
+            surf_total    = env._total_surf_voxels.mean().item()
 
             print(
                 f"[{global_step:9d}]"
@@ -343,12 +324,12 @@ def main():
                 f"  vl={stats['value_loss']:.4f}"
                 f"  ent={stats['entropy']:.3f}"
                 f"  ev={ev:.3f}"
-                f"{cov_q_str}  fps={fps}",
+                f"{cov_str}  fps={fps}",
                 flush=True,
             )
             print(
                 f"  [reward]"
-                f"  cov_q={np.mean(rew_cov_list):+.4f}"
+                f"  cov={np.mean(rew_cov_list):+.4f}"
                 f"  penalty={np.mean(rew_pen_list):.4f}"
                 f"  success={np.mean(rew_succ_list):+.4f}"
                 f"  stall={np.mean(rew_stall_list):.4f}"
@@ -356,27 +337,12 @@ def main():
                 flush=True,
             )
             print(
-                f"  [coverage]"
-                f"  binary={curr_cov_now:.4f}"
-                f"  quality={curr_cov_q_now:.4f}"
+                f"  [tsdf]"
+                f"  curr_cov={curr_cov_now:.4f}"
                 f"  weight_filled={weight_filled:.6f}"
                 f"  surf_voxels={surf_total:.0f}",
                 flush=True,
             )
-            print(
-                f"  [quality]"
-                f"  vox_quality_mean={log['env0/vox_quality_mean']:.4f}"
-                f"  mu={env._quality_mu:.4f}",
-                flush=True,
-            )
-            if "diag/gt_never" in log:
-                print(
-                    f"  [diag/GT]"
-                    f"  never={log['diag/gt_never']:.3f}"
-                    f"  partial={log['diag/gt_partial']:.3f}"
-                    f"  full={log['diag/gt_full']:.3f}",
-                    flush=True,
-                )
 
         # ── Eval ──────────────────────────────────────────────────────────────
         if args.eval_interval > 0 and rollout_idx % args.eval_interval == 0:
@@ -386,7 +352,7 @@ def main():
             print(
                 f"  [EVAL]"
                 f"  return={eval_metrics['eval/mean_return']:.2f}"
-                f"  cov_q={eval_metrics['eval/mean_coverage']:.3f}"
+                f"  cov={eval_metrics['eval/mean_coverage']:.3f}"
                 f"  success={eval_metrics['eval/success_rate']:.2f}"
                 f"  len={eval_metrics['eval/mean_length']:.1f}",
                 flush=True,
@@ -401,7 +367,7 @@ def main():
 
         # ── 체크포인트 ────────────────────────────────────────────────────────
         if rollout_idx % args.save_interval == 0:
-            ckpt_path = ckpt_dir / f"genNBV_quality_step_{global_step:010d}.pt"
+            ckpt_path = ckpt_dir / f"genNBV_step_{global_step:010d}.pt"
             torch.save({
                 "global_step":     global_step,
                 "rollout_idx":     rollout_idx,
@@ -410,7 +376,6 @@ def main():
                 "optimizer_actor": optimizer_actor .state_dict(),
                 "optimizer_critic":optimizer_critic.state_dict(),
                 "args":            vars(args),
-                "env_type":        "gennbv_quality",
             }, ckpt_path)
             print(f"[ckpt] → {ckpt_path}", flush=True)
 
