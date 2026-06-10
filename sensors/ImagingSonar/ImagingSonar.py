@@ -315,7 +315,7 @@ class ImagingSonar(Camera):
         semantics: np.ndarray (N, H*W)     uint32
         view_mats: np.ndarray (N, 4, 4)    float32  — extrinsic matrices
         """
-        from isaaclab.utils.math import quat_to_matrix
+        from isaaclab.utils.math import matrix_from_quat
 
         # Normalise shapes
         if depth_t.ndim == 4:
@@ -359,7 +359,7 @@ class ImagingSonar(Camera):
         for n in range(N):
             pos  = self._data.pos_w[n].cpu().numpy()
             quat = self._data.quat_w_world[n].cpu().numpy()  # (w,x,y,z)
-            R_mat = quat_to_matrix(
+            R_mat = matrix_from_quat(
                 torch.tensor(quat, dtype=torch.float32)
             ).numpy()
             T = np.eye(4, dtype=np.float32)
