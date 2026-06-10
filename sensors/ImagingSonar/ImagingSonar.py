@@ -92,9 +92,9 @@ class ImagingSonar(Camera):
 
         self._frame_id: int = 0
 
-        # Pre-register output keys
-        self.data.output["sonar_map"]   = None
-        self.data.output["sonar_image"] = None
+        # Pre-register output keys — _data 직접 접근 (data 프로퍼티는 render 트리거)
+        self._data.output["sonar_map"]   = None
+        self._data.output["sonar_image"] = None
 
         # Viewport
         self._sonar_provider = None
@@ -280,8 +280,8 @@ class ImagingSonar(Camera):
         )
 
         # ── 12. Store outputs ──────────────────────────────────────────
-        self.data.output["sonar_map"]   = self._sonar_map
-        self.data.output["sonar_image"] = wp.to_torch(self._sonar_img)
+        self._data.output["sonar_map"]   = self._sonar_map
+        self._data.output["sonar_image"] = wp.to_torch(self._sonar_img)
 
         # ── 13. Viewport (env 0 only) ──────────────────────────────────
         if self._sonar_provider is not None:

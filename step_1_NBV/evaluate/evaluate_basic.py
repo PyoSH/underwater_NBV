@@ -135,6 +135,9 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
             if env.cfg.jerlov_dr_enabled:
                 img_dir.mkdir(parents=True, exist_ok=True)
 
+            sonar_dir = out_dir / f"ep_{ep_idx:03d}_sonar_images"
+            sonar_dir.mkdir(parents=True, exist_ok=True)
+
             phi_rings_done = False
             phi_ring_cnt   = 0
 
