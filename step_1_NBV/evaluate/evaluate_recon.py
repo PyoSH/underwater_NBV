@@ -109,7 +109,7 @@ def load_model(checkpoint_path: str, device: torch.device):
         quality_vox = False
 
     elif _is_gennbv(ckpt):
-        from algo_GenNBV import SemanticEncoder
+        from algorithm.algo_GenNBV import SemanticEncoder
         M      = ckpt["actor"]["embed.sem.conv.0.weight"].shape[1]
         n_flat = ckpt["actor"]["embed.sem.proj.weight"].shape[1]
         H = W  = next(
