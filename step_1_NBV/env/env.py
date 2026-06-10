@@ -4,7 +4,7 @@ import math
 from typing import Sequence
 
 import numpy as np
-from utils.jerlov_presets import JERLOV_PRESETS
+from utils_NBV.jerlov_presets import JERLOV_PRESETS
 import torch
 import os
 

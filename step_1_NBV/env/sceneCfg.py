@@ -10,7 +10,7 @@ OCEANSIM_DIR = "/isaac-sim/extsUser/OceanSim"
 ASSET_DIR    = os.path.join(OCEANSIM_DIR, "oceansim_asset")
 ROCK_USD     = os.path.join(ASSET_DIR, "collected_rock/rock.usd")
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from sensors.UWCamera.UW_Camera_cfg import UWCameraCfg
 from sensors.ImagingSonar.ImagingSonarCfg import ImagingSonarCfg
 
