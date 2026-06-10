@@ -50,6 +50,7 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
 
         self._image_buffer = torch.zeros((self.num_envs, self.cfg.visual.num_seq_actor, self.cfg.visual.h, self.cfg.visual.w), device=self.device)
         self._depth_buffer = torch.zeros((self.num_envs, self.cfg.visual.num_seq_critic, self.cfg.visual.h, self.cfg.visual.w), device=self.device)
+        self._sonar_buffer = torch.zeros((self.num_envs, self.cfg.visual.num_seq_actor, self.cfg.visual.h, self.cfg.visual.w), device=self.device)
 
 
         self._sph_theta   = torch.zeros(self.num_envs, device=self.device)
@@ -74,6 +75,7 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         # RigidObject 핸들 (InteractiveScene 이 자동 생성)
         self._sensor_rig    = self.scene["sensor_rig"]
         self._camera        = self.scene["camera"]
+        self._sonar         = self.scene["sonar"]
 
         rock_local      = torch.tensor([0.0, 0.0, -3.0], device=self.device)
         self.rock_pos   = self.scene.env_origins + rock_local  # (num_envs, 3)
@@ -315,6 +317,21 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
 
         self._depth_buffer = torch.roll(self._depth_buffer, shifts=-1, dims=1)
         self._depth_buffer[:, -1, :, :] = curr_state # depth map은 (num_envs, h, w)아닌지?
+
+        # sonar buffer update
+        sonar_img = self._sonar.data.output["sonar_image"]   # (N, R, A+1, 4) uint8
+        if sonar_img is not None:
+            curr_sonar = sonar_img[..., :-1, 0].float() / 255.0   # (N, R, A) intensity
+            curr_sonar = F.interpolate(
+                curr_sonar.unsqueeze(1),
+                size=(self.cfg.visual.h, self.cfg.visual.w),
+                mode="bilinear", align_corners=False,
+            ).squeeze(1)
+        else:
+            curr_sonar = torch.zeros(self.num_envs, self.cfg.visual.h, self.cfg.visual.w, device=self.device)
+
+        self._sonar_buffer = torch.roll(self._sonar_buffer, shifts=-1, dims=1)
+        self._sonar_buffer[:, -1, :, :] = curr_sonar
 
         curr_contrast = self._compute_patch_contrast(curr_obs)
         # print(f"[CONTRAST] shape={curr_obs.shape}, contrast={curr_contrast}")

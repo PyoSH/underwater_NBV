@@ -193,6 +193,8 @@ def main():
         )
         wandb.watch(actor,  log="gradients", log_freq=200)
         wandb.watch(critic, log="gradients", log_freq=200)
+        wandb.define_metric("train/global_step")
+        wandb.define_metric("*", step_metric="train/global_step")
 
     ckpt_dir = Path(args.ckpt_dir)
     if use_wandb:
