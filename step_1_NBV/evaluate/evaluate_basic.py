@@ -184,6 +184,19 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
                         except Exception as e:
                             print(f"  [DR img] ERROR env{eid} step{ep_step}: {e}")
 
+                # 소나 이미지 저장 (env별, step별)
+                sonar_out = env._sonar._data.output.get("sonar_image")
+                if sonar_out is not None:
+                    for eid in range(E):
+                        try:
+                            # sonar_out: (N, R, A+1, 4) uint8 — R channel as grayscale
+                            simg = sonar_out[eid, :, :-1, 0].cpu().numpy().copy()  # (R, A)
+                            save_path = str(sonar_dir / f"step{ep_step:03d}_env{eid}.png")
+                            mpimg.imsave(save_path, simg, cmap="gray", vmin=0, vmax=255)
+                            print(f"  [sonar] saved → {save_path}  shape={simg.shape}")
+                        except Exception as e:
+                            print(f"  [sonar] ERROR env{eid} step{ep_step}: {e}")
+
                 is_env_done = terminated[0].item() or truncated[0].item()
                 if is_env_done:
                     done_reason = "SUCCESS" if terminated[0] else "timeout_env"
