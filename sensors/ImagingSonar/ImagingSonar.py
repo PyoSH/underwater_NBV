@@ -122,9 +122,11 @@ class ImagingSonar(Camera):
     def _apply_sonar_pipeline(self) -> None:
 
         # ── 1. Fetch Isaac Lab Camera outputs ──────────────────────────
-        depth_t    = self.data.output.get("distance_to_camera")  # (N,H,W,1)|(N,H,W)
-        normals_t  = self.data.output.get("normals")             # (N,H,W,4)
-        sem_t      = self.data.output.get("semantic_segmentation")  # (N,H,W,1)|(N,H,W)
+        # _data 직접 접근: data 프로퍼티는 _update_outdated_buffers()를 재트리거해
+        # 첫 렌더 시 미등록 키에 대한 per-env 인덱스 할당으로 KeyError 발생
+        depth_t    = self._data.output.get("distance_to_camera")  # (N,H,W,1)|(N,H,W)
+        normals_t  = self._data.output.get("normals")             # (N,H,W,4)
+        sem_t      = self._data.output.get("semantic_segmentation")  # (N,H,W,1)|(N,H,W)
 
         if depth_t is None or normals_t is None or sem_t is None:
             return
@@ -323,10 +325,10 @@ class ImagingSonar(Camera):
 
         # Camera intrinsics (same for all envs in Isaac Lab)
         try:
-            fx = float(self.data.intrinsic_matrices[0, 0, 0])
-            fy = float(self.data.intrinsic_matrices[0, 1, 1])
-            cx = float(self.data.intrinsic_matrices[0, 0, 2])
-            cy = float(self.data.intrinsic_matrices[0, 1, 2])
+            fx = float(self._data.intrinsic_matrices[0, 0, 0])
+            fy = float(self._data.intrinsic_matrices[0, 1, 1])
+            cx = float(self._data.intrinsic_matrices[0, 0, 2])
+            cy = float(self._data.intrinsic_matrices[0, 1, 2])
         except Exception:
             fx = fy = float(W) / (2.0 * np.tan(np.deg2rad(self.cfg.hori_fov) / 2.0))
             cx, cy = W / 2.0, H / 2.0
