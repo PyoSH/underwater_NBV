@@ -81,6 +81,10 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         
         self._prev_cam_pos = torch.zeros(self.num_envs, 3, device=self.device) # this var doesn't use right now, but it will be in reward function.
 
+        # per-env Jerlov 타입 추적
+        first_type = self.cfg.jerlov_types[0] if self.cfg.jerlov_dr_enabled else "none"
+        self._current_jerlov_type: list[str] = [first_type] * self.num_envs
+
     # ── 방향 시각화 마커 ──────────────────────────────────────────────────────
 
     def _setup_vis_markers(self) -> None:
@@ -483,12 +487,15 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
             self._visit_map[env_ids] = 0.0
 
         if cfg.jerlov_dr_enabled:
-            self._randomize_water_params()
+            self._randomize_water_params(env_ids)
 
         self._voxelize_gt_mesh(env_ids)
         # self._save_surf_pc(env_id=0)
 
-    def _randomize_water_params(self) -> None:
-        chosen = str(np.random.choice(self.cfg.jerlov_types))
-        self._current_jerlov_type = chosen
-        self._camera.set_water_params(**JERLOV_PRESETS[chosen])
+    def _randomize_water_params(self, env_ids) -> None:
+        """env_ids 각각에 독립적인 Jerlov 수종 적용."""
+        for eid in env_ids:
+            eid_int = int(eid)
+            chosen = str(np.random.choice(self.cfg.jerlov_types))
+            self._current_jerlov_type[eid_int] = chosen
+            self._camera.set_water_params([eid_int], **JERLOV_PRESETS[chosen])

@@ -129,8 +129,8 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
             env.reset()
 
             if env.cfg.jerlov_dr_enabled:
-                jerlov = env._current_jerlov_type
-                print(f"  [DR] ep={ep_idx}  type={jerlov}  mu={env._quality_mu:.4f}  Q_sat={env._quality_Q_sat:.4f}")
+                jerlov = env._current_jerlov_type[0]
+                print(f"  [DR] ep={ep_idx}  type={jerlov}  mu={env._quality_mu[0].item():.4f}  Q_sat={env._quality_Q_sat[0].item():.4f}")
             img_dir = out_dir / f"ep_{ep_idx:03d}_dr_images"
             if env.cfg.jerlov_dr_enabled:
                 img_dir.mkdir(parents=True, exist_ok=True)

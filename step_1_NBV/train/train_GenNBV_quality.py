@@ -303,7 +303,7 @@ def main():
             "env0/vox_unknown_ratio":   (vox[0, 0] > 0.5).float().mean().item(),
             "env0/vox_quality_mean":    vox[0, 2][vox[0, 2] > 0].mean().item()
                                         if (vox[0, 2] > 0).any() else 0.0,
-            "env0/quality_mu":          env._quality_mu,
+            "env0/quality_mu":          env._quality_mu[0].item(),
         }
 
         if finished["returns"]:
@@ -367,7 +367,7 @@ def main():
             print(
                 f"  [quality]"
                 f"  vox_quality_mean={log['env0/vox_quality_mean']:.4f}"
-                f"  mu={env._quality_mu:.4f}",
+                f"  mu={env._quality_mu[0].item():.4f}",
                 flush=True,
             )
             if "diag/gt_never" in log:

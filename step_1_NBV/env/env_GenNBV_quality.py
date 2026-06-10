@@ -26,7 +26,7 @@ quality 정의 (Beer-Lambert, OceanSim UWrenderer 단방향 감쇠):
 종료: coverage_q >= coverage_terminal
 """
 from __future__ import annotations
-import math
+import numpy as np
 import torch
 from .env_GenNBV import OceanEnvGenNBV
 from .envCfg import OceanEnvCfg
@@ -46,10 +46,9 @@ class OceanEnvGenNBVQuality(OceanEnvGenNBV):
         self._quality_vol = torch.zeros(
             self.num_envs, Nx, Ny, Nz, device=self.device
         )
-        self._quality_Q_sat = cfg.q_sat  # exp(-μ×psi_min) ≈ 0.805: psi_min 단일 방문 포화 기준
-
-        # μ 초기값: atten_coeff_max 채널 평균 (리셋 시 실제 값으로 동기화)
-        self._quality_mu = float(0.1)
+        # per-env μ, Q_sat (리셋 시 Jerlov 수종에 따라 동기화)
+        self._quality_mu    = torch.full((self.num_envs,), 0.1,      device=self.device)
+        self._quality_Q_sat = torch.full((self.num_envs,), cfg.q_sat, device=self.device)
 
         # quality-weighted coverage 추적
         self.curr_coverage_q = torch.zeros(self.num_envs, device=self.device)
@@ -89,7 +88,8 @@ class OceanEnvGenNBVQuality(OceanEnvGenNBV):
         dist = torch.norm(centers - cam, dim=-1)
 
         # 단방향 Beer-Lambert (OceanSim UWrenderer: exp(-μd) post-process 단회 적용)
-        quality_new = torch.exp(-self._quality_mu * dist)
+        mu = self._quality_mu.view(-1, 1, 1, 1)          # (N,1,1,1) for broadcast
+        quality_new = torch.exp(-mu * dist)
 
         # 관측된 voxel이면 갱신 (TSDF 분류 무관 — 해석 B: 관측 품질 기준)
         surface_mask = self._weight_vol > 0
@@ -179,10 +179,11 @@ class OceanEnvGenNBVQuality(OceanEnvGenNBV):
              ch1=1이면서 ch2>0인 voxel 존재 가능 (free space이지만 가까이서 관측됨)
         """
         observed = self._weight_vol > 0
+        q_sat = self._quality_Q_sat.view(-1, 1, 1, 1)
         return torch.stack([
             (~observed).float(),
             (observed & (self._tsdf_vol > 0)).float(),
-            (self._quality_vol / self._quality_Q_sat).clamp(0.0, 1.0),
+            (self._quality_vol / q_sat).clamp(0.0, 1.0),
         ], dim=1)
 
     # ── 관측 override ────────────────────────────────────────────────────────
@@ -202,7 +203,7 @@ class OceanEnvGenNBVQuality(OceanEnvGenNBV):
         for eid in env_ids:
             gt_mask = self._surf_vol[eid]                              # [Nx,Ny,Nz] bool
             if gt_mask.any():
-                q_soft = (self._quality_vol[eid] / self._quality_Q_sat).clamp(0.0, 1.0)
+                q_soft = (self._quality_vol[eid] / self._quality_Q_sat[eid]).clamp(0.0, 1.0)
                 gt_q   = q_soft[gt_mask]                               # GT voxels만
                 self._diag_gt_never[eid]   = (gt_q == 0.0).float().mean()
                 self._diag_gt_partial[eid] = ((gt_q > 0.0) & (gt_q < 1.0)).float().mean()
@@ -216,8 +217,12 @@ class OceanEnvGenNBVQuality(OceanEnvGenNBV):
         self.curr_coverage_q[env_ids]      = 0.0
         self._prev_coverage_q[env_ids]     = 0.0
 
-        # μ 동기화: _randomize_water_params() 이후 실제 값 반영
+        # μ 동기화: _randomize_water_params() 이후 실제 값 반영 (per-env)
+        # _atten_coeff_t는 첫 render 이전엔 None → numpy 배열 사용 (항상 초기화됨)
         if self.cfg.jerlov_dr_enabled:
-            c = self._camera._atten_coeff   # wp.vec3f
-            self._quality_mu = (c.x + c.y + c.z) / 3.0
-            self._quality_Q_sat = math.exp(-self._quality_mu * self.cfg.psi_min)
+            ids = [int(e) for e in env_ids]
+            mu_np = self._camera._atten_coeff_np[ids].mean(axis=1)    # (len,) numpy
+            self._quality_mu[env_ids] = torch.from_numpy(mu_np).to(self.device)
+            self._quality_Q_sat[env_ids] = torch.exp(
+                -self._quality_mu[env_ids] * self.cfg.psi_min
+            )
