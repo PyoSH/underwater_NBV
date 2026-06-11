@@ -17,9 +17,10 @@ import warp as wp
 def cartesian_to_spherical(cart: wp.vec3) -> wp.vec3:
     """Cartesian (x,y,z) → spherical (r, azimuth, polar)."""
     r = wp.sqrt(cart[0]*cart[0] + cart[1]*cart[1] + cart[2]*cart[2])
-    return wp.vec3(r,
-                   wp.atan2(cart[1], cart[0]),
-                   wp.acos(cart[2] / r))
+    if r < wp.float32(1e-6):
+        return wp.vec3(wp.float32(0.0), wp.float32(0.0), wp.float32(0.0))
+    cos_polar = wp.clamp(cart[2] / r, wp.float32(-1.0), wp.float32(1.0))
+    return wp.vec3(r, wp.atan2(cart[1], cart[0]), wp.acos(cos_polar))
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +109,13 @@ def bin_intensity(
 
     x_bin_idx = wp.int32((x - x_offset) / x_res)
     y_bin_idx = wp.int32((y - y_offset) / y_res)
+
+    R_bins = bin_sum.shape[1]
+    A_bins = bin_sum.shape[2]
+    if x_bin_idx < 0 or x_bin_idx >= R_bins:
+        return
+    if y_bin_idx < 0 or y_bin_idx >= A_bins:
+        return
 
     wp.atomic_add(bin_sum,   n, x_bin_idx, y_bin_idx, intensity[n, tid])
     wp.atomic_add(bin_count, n, x_bin_idx, y_bin_idx, 1)

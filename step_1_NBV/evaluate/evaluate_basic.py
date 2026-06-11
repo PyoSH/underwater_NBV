@@ -185,7 +185,7 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
                             print(f"  [DR img] ERROR env{eid} step{ep_step}: {e}")
 
                 # 소나 이미지 저장 (env별, step별)
-                sonar_out = env._sonar._data.output.get("sonar_image")
+                sonar_out = env._sonar.data.output.get("sonar_image")
                 if sonar_out is not None:
                     for eid in range(E):
                         try:

@@ -126,9 +126,9 @@ class ImagingSonar(Camera):
         # self.data 프로퍼티 사용: _update_outdated_buffers() → _update_buffers_impl() 지연 호출.
         # scene.update()는 force_recompute=False이므로 _update_buffers_impl을 직접 호출하지 않음.
         # 최초 호출 시 len(_data.output)==0 → _create_annotator_data()로 정상 초기화됨.
-        depth_t    = self.data.output.get("distance_to_camera")  # (N,H,W,1)|(N,H,W)
-        normals_t  = self.data.output.get("normals")             # (N,H,W,4)
-        sem_t      = self.data.output.get("semantic_segmentation")  # (N,H,W,1)|(N,H,W)
+        depth_t    = self.data.output.get("distance_to_image_plane")  # (N,H,W,1) z-depth
+        normals_t  = self.data.output.get("normals")                 # (N,H,W,4) world frame
+        sem_t      = self.data.output.get("semantic_segmentation")   # (N,H,W,1)|(N,H,W)
 
         if depth_t is None or normals_t is None or sem_t is None:
             return
@@ -341,32 +341,42 @@ class ImagingSonar(Camera):
         vs = vs.reshape(-1).astype(np.float32)
 
         depth_np = depth_t.cpu().numpy()                    # (N, H, W)
-        nrm_np   = normals_t[:, :, :, :3].cpu().numpy()    # (N, H, W, 3)
+        nrm_np   = normals_t[:, :, :, :3].cpu().numpy()    # (N, H, W, 3) world frame
         sem_np   = sem_t.cpu().numpy().astype(np.uint32)    # (N, H, W)
 
-        pcl_out = np.empty((N, H*W, 3), dtype=np.float32)
-        nrm_out = nrm_np.reshape(N, H*W, 3).astype(np.float32)
-        sem_out = sem_np.reshape(N, H*W)
-
-        for n in range(N):
-            d = depth_np[n].reshape(-1).copy()              # (H*W,)
-            d[~np.isfinite(d)] = 0.0                        # inf/NaN → 0 (소나 min_range 미만, 빈 처리)
-            pcl_out[n, :, 0] = (us - cx) / fx * d
-            pcl_out[n, :, 1] = (vs - cy) / fy * d
-            pcl_out[n, :, 2] = d
-
-        # Per-env view transforms
+        pcl_out  = np.empty((N, H*W, 3), dtype=np.float32)
+        nrm_out  = nrm_np.reshape(N, H*W, 3).astype(np.float32)
+        sem_out  = sem_np.reshape(N, H*W)
         view_mats = np.empty((N, 4, 4), dtype=np.float32)
+
         for n in range(N):
             pos  = self._data.pos_w[n].cpu().numpy()
             quat = self._data.quat_w_world[n].cpu().numpy()  # (w,x,y,z)
             R_mat = matrix_from_quat(
                 torch.tensor(quat, dtype=torch.float32)
             ).numpy()
+
+            # world→camera extrinsic: [R | -R@pos]
             T = np.eye(4, dtype=np.float32)
             T[:3, :3] = R_mat
             T[:3,  3] = -(R_mat @ pos)
             view_mats[n] = T
+
+            # z-depth (distance_to_image_plane): standard pinhole unprojection
+            # 유효 범위 밖(inf/NaN/≤0) 픽셀은 max_range+1로 설정 →
+            # world2local 후 r > max_range → bin_intensity 범위 검사로 제외
+            z = depth_np[n].reshape(-1).copy()
+            z[~np.isfinite(z) | (z <= 0.0)] = self.cfg.max_range + 1.0
+
+            # camera-local XYZ
+            P_cam = np.stack([
+                (us - cx) / fx * z,
+                (vs - cy) / fy * z,
+                z,
+            ], axis=-1)  # (H*W, 3)
+
+            # camera-local → world: P_world = R^T @ P_cam + pos
+            pcl_out[n] = (R_mat.T @ P_cam.T).T + pos
 
         return pcl_out, nrm_out, sem_out, view_mats
 

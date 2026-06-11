@@ -319,7 +319,7 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
         self._depth_buffer[:, -1, :, :] = curr_state # depth map은 (num_envs, h, w)아닌지?
 
         # sonar buffer update
-        sonar_img = self._sonar._data.output.get("sonar_image")   # (N, R, A+1, 4) uint8
+        sonar_img = self._sonar.data.output.get("sonar_image")    # (N, R, A+1, 4) uint8
         if sonar_img is not None:
             curr_sonar = sonar_img[..., :-1, 0].float() / 255.0   # (N, R, A) intensity
             curr_sonar = F.interpolate(

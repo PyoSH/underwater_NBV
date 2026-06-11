@@ -8,7 +8,7 @@ from .ImagingSonar import ImagingSonar
 class ImagingSonarCfg(CameraCfg):
     class_type:     type=ImagingSonar
     data_types:     list[str]=field(default_factory=lambda:[
-        "distance_to_camera",
+        "distance_to_image_plane",
         "normals",
         "semantic_segmentation",
     ])
