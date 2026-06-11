@@ -159,6 +159,7 @@ class OceanSceneCfg(InteractiveSceneCfg):
         attenuation=0.1,
         binning_method="sum",
         normalizing_method="range",
+        enable_viewport=True,
     )
  
     '''
