@@ -172,12 +172,22 @@ class OceanEnv(EnvUtilsMixin,EnvRewardMixin,DirectRLEnv):
     # ── 씬 구성 ──────────────────────────────────────────────────────────────
 
     def _setup_scene(self) -> None:
+        from pxr import Usd, UsdGeom
+        from isaacsim.core.utils.semantics import add_update_semantics
+
         stage = omni.usd.get_context().get_stage()
 
         for env_idx in range(self.num_envs):
             env_ns = f"/World/envs/env_{env_idx}"
             for idx in range(2):
                 self._add_light_children(stage, f"{env_ns}/SensorRig/SphereLight_{idx}")
+
+            # rock mesh 전체 탐색 후 음향 반사율 시맨틱 부여 (논문 Eq.2의 A_r)
+            obj_prim = stage.GetPrimAtPath(f"{env_ns}/Object")
+            if obj_prim.IsValid():
+                for prim in Usd.PrimRange(obj_prim):
+                    if UsdGeom.Mesh(prim):
+                        add_update_semantics(prim, type_label="reflectivity", semantic_label="1.0")
 
     def _add_light_children(self, stage, light_prim_path: str) -> None:
         # ── SphereLight + ShapingAPI ──────────────────────────────────────

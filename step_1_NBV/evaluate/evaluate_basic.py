@@ -43,6 +43,10 @@ parser.add_argument("--eval_psi",     type=float, default=None,
                     help="초기 거리 (m). 미지정시 envCfg 기본값(4.5m) 사용")
 parser.add_argument("--psi_max",      type=float, default=None,
                     help="psi 최대 허용 거리 (m). eval_psi보다 크거나 같아야 함")
+parser.add_argument("--static_sonar", action="store_true",
+                    help="소나 검증 모드: 대상 물체와 동일 고도(phi=90°)에서 정지, 이동 없음")
+parser.add_argument("--azimuth_only", action="store_true",
+                    help="소나 검증 모드: phi/psi 고정, +Δθ(azimuth) 만 증가")
 
 AppLauncher.add_app_launcher_args(parser)
 if "--enable_cameras" not in sys.argv:
@@ -95,6 +99,18 @@ def orbital_action(ep_step: int, E: int, device: torch.device,
     return make_env_action(idx, E, device)
 
 
+def static_action(E: int, device: torch.device) -> torch.Tensor:
+    """정지 모드: delta_theta/phi/psi=0 이므로 어떤 액션도 이동 없음. action 0 반환."""
+    idx = torch.zeros(E, dtype=torch.long, device=device)
+    return make_env_action(idx, E, device)
+
+
+def azimuth_action(E: int, device: torch.device) -> torch.Tensor:
+    """azimuth 전용 모드: 항상 action 0 (+Δθ). phi/psi는 delta=0으로 고정."""
+    idx = torch.zeros(E, dtype=torch.long, device=device)
+    return make_env_action(idx, E, device)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 평가 루프
 # ─────────────────────────────────────────────────────────────────────────────
@@ -103,12 +119,13 @@ TIMEOUT_STEPS = 50
 ACTION_NAMES = ["+θ", "-θ", "+φ", "-φ", "-ψ", "+ψ"]
 
 def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
-                n_episodes: int, max_steps: int, out_dir: Path):
+                n_episodes: int, max_steps: int, out_dir: Path,
+                static_mode: bool = False, azimuth_mode: bool = False):
     E = env.num_envs
     timeout = max_steps if max_steps > 0 else TIMEOUT_STEPS
 
     cfg = env.cfg
-    max_rings = int((cfg.phi_max - cfg.phi_min) / cfg.delta_phi)
+    max_rings = int((cfg.phi_max - cfg.phi_min) / cfg.delta_phi) if cfg.delta_phi > 0 else 0
 
     _K = env._camera.data.intrinsic_matrices[0].cpu().numpy()
     K_cache = (float(_K[0,0]), float(_K[1,1]), float(_K[0,2]), float(_K[1,2]))
@@ -117,9 +134,18 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
 
     ext_cam = env.scene["ext_camera"]
 
-    print(f"\n[base] start  num_envs={E}  num_episodes={n_episodes}  timeout={timeout}")
-    print(f"[base] policy : orbital  (STEPS_PER_RING={STEPS_PER_RING}  max_rings={max_rings})")
-    print(f"[base] output → {out_dir.resolve()}\n")
+    if static_mode:
+        print(f"\n[base] start  num_envs={E}  num_episodes={n_episodes}  timeout={timeout}")
+        print(f"[base] policy : STATIC (phi=90°, 이동 없음 — 소나 검증 모드)")
+        print(f"[base] output → {out_dir.resolve()}\n")
+    elif azimuth_mode:
+        print(f"\n[base] start  num_envs={E}  num_episodes={n_episodes}  timeout={timeout}")
+        print(f"[base] policy : AZIMUTH ONLY (+Δθ per step, phi/psi 고정 — 소나 검증 모드)")
+        print(f"[base] output → {out_dir.resolve()}\n")
+    else:
+        print(f"\n[base] start  num_envs={E}  num_episodes={n_episodes}  timeout={timeout}")
+        print(f"[base] policy : orbital  (STEPS_PER_RING={STEPS_PER_RING}  max_rings={max_rings})")
+        print(f"[base] output → {out_dir.resolve()}\n")
 
     TYPES = ["IB", "II", "III", "1C", "3C", "5C"]
 
@@ -160,16 +186,22 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
             done_reason = "timeout"
 
             for ep_step in range(1, timeout + 1):
-                # EL_DOWN 카운터 갱신
-                pos  = (ep_step - 1) % STEPS_PER_RING
-                ring = (ep_step - 1) // STEPS_PER_RING
-                if pos == 0 and ring > 0 and not phi_rings_done:
-                    phi_ring_cnt += 1
-                    if phi_ring_cnt >= max_rings:
-                        phi_rings_done = True
-
-                action = orbital_action(ep_step - 1, E, device, [phi_rings_done])
-                act_idx = int(action[0].argmax().item()) if action.dim() > 1 else int(action[0].item())
+                if static_mode:
+                    action  = static_action(E, device)
+                    act_idx = 0
+                elif azimuth_mode:
+                    action  = azimuth_action(E, device)
+                    act_idx = 0
+                else:
+                    # EL_DOWN 카운터 갱신
+                    pos  = (ep_step - 1) % STEPS_PER_RING
+                    ring = (ep_step - 1) // STEPS_PER_RING
+                    if pos == 0 and ring > 0 and not phi_rings_done:
+                        phi_ring_cnt += 1
+                        if phi_ring_cnt >= max_rings:
+                            phi_rings_done = True
+                    action  = orbital_action(ep_step - 1, E, device, [phi_rings_done])
+                    act_idx = int(action[0].argmax().item()) if action.dim() > 1 else int(action[0].item())
 
                 _, reward, terminated, truncated, _ = env.step(action)
 
@@ -338,12 +370,39 @@ def main():
     env_cfg.jerlov_dr_enabled = True
 
     import math as _math
-    if args.eval_phi is not None:
-        env_cfg.eval_phi = _math.radians(args.eval_phi)
-    if args.eval_psi is not None:
-        env_cfg.eval_psi = args.eval_psi
-    if args.psi_max is not None:
-        env_cfg.psi_max = args.psi_max
+
+    if args.static_sonar:
+        # 소나 검증 모드: 암석과 동일 고도(phi=90°)에서 정지
+        # delta를 0으로 설정하면 어떤 액션도 실제 이동을 일으키지 않음
+        env_cfg.delta_theta = 0.0
+        env_cfg.delta_phi   = 0.0
+        env_cfg.delta_psi   = 0.0
+        env_cfg.phi_max     = _math.radians(90.0)   # phi=90° 허용
+        env_cfg.eval_phi    = _math.radians(90.0)   # 수평 → 암석과 동일 고도
+        env_cfg.eval_psi    = args.eval_psi if args.eval_psi is not None else 2.0
+        env_cfg.eval_mode   = True
+    elif args.azimuth_only:
+        # azimuth 전용 모드: phi/psi 고정, +Δθ만 적용
+        env_cfg.delta_phi   = 0.0
+        env_cfg.delta_psi   = 0.0
+        # delta_theta는 기본값(15°) 유지
+        env_cfg.phi_max     = _math.radians(90.0)
+        env_cfg.eval_phi    = args.eval_phi if args.eval_phi is not None else 90.0
+        if isinstance(env_cfg.eval_phi, float) and env_cfg.eval_phi > _math.pi:
+            env_cfg.eval_phi = _math.radians(env_cfg.eval_phi)
+        else:
+            env_cfg.eval_phi = _math.radians(
+                args.eval_phi if args.eval_phi is not None else 90.0
+            )
+        env_cfg.eval_psi    = args.eval_psi if args.eval_psi is not None else 2.0
+        env_cfg.eval_mode   = True
+    else:
+        if args.eval_phi is not None:
+            env_cfg.eval_phi = _math.radians(args.eval_phi)
+        if args.eval_psi is not None:
+            env_cfg.eval_psi = args.eval_psi
+        if args.psi_max is not None:
+            env_cfg.psi_max = args.psi_max
 
     from isaaclab.sensors import CameraCfg
     import isaaclab.sim as sim_utils
@@ -370,7 +429,9 @@ def main():
     evaluate_base(env, device,
                 n_episodes=args.num_episodes,
                 max_steps=args.max_steps,
-                out_dir=out_dir)
+                out_dir=out_dir,
+                static_mode=args.static_sonar,
+                azimuth_mode=args.azimuth_only)
 
     try:
         env.close()

@@ -1,24 +1,23 @@
 """
-ImagingSonar — Isaac Lab sensor implementation (multi-env batched).
+ImagingSonar — Isaac Lab sensor (single-env, pointcloud annotator).
 
 Pipeline per update()
 ─────────────────────
-  Isaac Lab Camera renders → distance_to_camera (N,H,W,1), normals (N,H,W,4),
-                             semantic_segmentation (N,H,W,1)
+  Replicator pointcloud annotator  → pcl (M,3) world, normals (M,4), semantics (M,)
+  Replicator CameraParams annotator → viewTransform (4,4)
        │
        ▼  _apply_sonar_pipeline()
-  1. _unproject_to_pcl()     : (N,H,W,…) → pcl (N,H*W,3), normals (N,H*W,3), semantics (N,H*W)
-  2. compute_intensity        : dim=(N, H*W)
-  3. world2local              : dim=(N, H*W)
-  4. bin_intensity            : dim=(N, H*W)  → bin_sum/count (N, R, A)
-  5. average (optional)       : dim=(N, R, A)
-  6. noise kernels            : dim=(N, R, A)
-  7. make_sonar_map_*         : dim=(N, R, A)
-  8. make_sonar_image         : dim=(N, R, A)
+  1. compute_intensity   : dim=(M,)
+  2. world2local         : dim=(M,)
+  3. bin_intensity       : dim=(M,)   → bin_sum/count (R, A)
+  4. average (optional)  : dim=(R, A)
+  5. noise kernels       : dim=(R, A)
+  6. make_sonar_map_*    : dim=(R, A)
+  7. make_sonar_image    : dim=(R, A)
 
-Output:
-    sensor.data.output["sonar_map"]    wp.array  (N, R, A)  vec3 (x, y, intensity)
-    sensor.data.output["sonar_image"]  torch.Tensor (N, R, A+1, 4)  uint8 RGBA
+Output (N=1 차원 유지 — env.py 변경 불필요):
+    sensor.data.output["sonar_map"]    wp.array  (R, A)     vec3 (x, y, intensity)
+    sensor.data.output["sonar_image"]  torch.Tensor (1, R, A+1, 4)  uint8 RGBA
 """
 from __future__ import annotations
 from typing import TYPE_CHECKING
@@ -26,6 +25,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 import warp as wp
+import omni.replicator.core as rep
 import omni.ui as ui
 
 from isaaclab.sensors import Camera
@@ -51,20 +51,19 @@ if TYPE_CHECKING:
 class ImagingSonar(Camera):
     cfg: ImagingSonarCfg
 
+    def __init__(self, cfg: ImagingSonarCfg) -> None:
+        super().__init__(cfg)
+
     # ------------------------------------------------------------------
     # Init
     # ------------------------------------------------------------------
-
-    def __init__(self, cfg: ImagingSonarCfg) -> None:
-        super().__init__(cfg)
 
     def _initialize_impl(self) -> None:
         super()._initialize_impl()
 
         self._device = wp.get_preferred_device()
-        N = self._num_envs  # number of parallel environments
 
-        # ── Polar meshgrid: shared across all envs ─────────────────────
+        # ── Polar meshgrid ────────────────────────────────────────────
         self.min_azi = float(np.deg2rad(90.0 - self.cfg.hori_fov / 2.0))
         r_np = np.arange(self.cfg.min_range, self.cfg.max_range,
                          self.cfg.range_res, dtype=np.float32)
@@ -79,25 +78,39 @@ class ImagingSonar(Camera):
         self._azi = wp.array(azi_grid, dtype=wp.float32, device=self._device)
 
         R_bins, A_bins = self._r.shape
-        HW = self.cfg.hori_res * int(self.cfg.hori_res / (self.cfg.hori_fov / self.cfg.vert_fov))
 
-        # ── Persistent GPU buffers ─────────────────────────────────────
-        self._bin_sum    = wp.zeros((N, R_bins, A_bins), dtype=wp.float32, device=self._device)
-        self._bin_count  = wp.zeros((N, R_bins, A_bins), dtype=wp.int32,   device=self._device)
-        self._binned_int = wp.zeros((N, R_bins, A_bins), dtype=wp.float32, device=self._device)
-        self._sonar_map  = wp.zeros((N, R_bins, A_bins), dtype=wp.vec3,    device=self._device)
-        self._sonar_img  = wp.zeros((N, R_bins, A_bins + 1, 4), dtype=wp.uint8, device=self._device)
-        self._gau_noise  = wp.zeros((N, R_bins, A_bins), dtype=wp.float32, device=self._device)
-        self._ray_noise  = wp.zeros((N, R_bins, A_bins), dtype=wp.float32, device=self._device)
+        # ── GPU buffers (단일 env, N 차원 없음) ───────────────────────
+        self._bin_sum    = wp.zeros((R_bins, A_bins), dtype=wp.float32, device=self._device)
+        self._bin_count  = wp.zeros((R_bins, A_bins), dtype=wp.int32,   device=self._device)
+        self._binned_int = wp.zeros((R_bins, A_bins), dtype=wp.float32, device=self._device)
+        self._sonar_map  = wp.zeros((R_bins, A_bins), dtype=wp.vec3,    device=self._device)
+        self._sonar_img  = wp.zeros((R_bins, A_bins + 1, 4), dtype=wp.uint8, device=self._device)
+        self._gau_noise  = wp.zeros((R_bins, A_bins), dtype=wp.float32, device=self._device)
+        self._ray_noise  = wp.zeros((R_bins, A_bins), dtype=wp.float32, device=self._device)
 
         self._frame_id: int = 0
 
-        # NOTE: sonar_map/sonar_image는 _data.output에 사전 등록하지 않음.
-        # Camera._update_buffers_impl은 len(_data.output)==0 조건으로 최초 초기화를 판단하므로,
-        # 여기서 키를 추가하면 else 분기에서 KeyError가 발생함.
-        # _apply_sonar_pipeline에서 self.data 프로퍼티로 지연 초기화 후 직접 추가함.
+        # ── Replicator annotators ─────────────────────────────────────
+        rp = self.render_product_paths[0]
 
-        # Viewport
+        self._pcl_annot = rep.AnnotatorRegistry.get_annotator(
+            "pointcloud",
+            init_params={"includeUnlabelled": True},
+            device=str(self._device),
+        )
+        self._pcl_annot.attach(rp)
+
+        self._cam_params_annot = rep.AnnotatorRegistry.get_annotator("CameraParams")
+        self._cam_params_annot.attach(rp)
+
+        # oceansim semanticSeg_annot와 동일: idToLabels 취득용 (data_types=[]이므로 수동 attach)
+        self._sem_annot = rep.AnnotatorRegistry.get_annotator(
+            "semantic_segmentation",
+            init_params={"colorize": False},
+        )
+        self._sem_annot.attach(rp)
+
+        # ── Viewport ─────────────────────────────────────────────────
         self._sonar_provider = None
         if self.cfg.enable_viewport:
             self._make_viewport()
@@ -110,81 +123,105 @@ class ImagingSonar(Camera):
         super().update(dt, force_recompute=force_recompute)
         self._apply_sonar_pipeline()
 
-    def set_sonar_params(self, **kwargs) -> None:
-        """Runtime override of any ImagingSonarCfg processing parameter."""
-        for k, v in kwargs.items():
-            if hasattr(self.cfg, k):
-                setattr(self.cfg, k, v)
-
     # ------------------------------------------------------------------
     # Core pipeline
     # ------------------------------------------------------------------
 
     def _apply_sonar_pipeline(self) -> None:
+        _dbg = (self._frame_id < 5)
 
-        # ── 1. Fetch Isaac Lab Camera outputs ──────────────────────────
-        # self.data 프로퍼티 사용: _update_outdated_buffers() → _update_buffers_impl() 지연 호출.
-        # scene.update()는 force_recompute=False이므로 _update_buffers_impl을 직접 호출하지 않음.
-        # 최초 호출 시 len(_data.output)==0 → _create_annotator_data()로 정상 초기화됨.
-        depth_t    = self.data.output.get("distance_to_image_plane")  # (N,H,W,1) z-depth
-        normals_t  = self.data.output.get("normals")                 # (N,H,W,4) world frame
-        sem_t      = self.data.output.get("semantic_segmentation")   # (N,H,W,1)|(N,H,W)
-
-        if depth_t is None or normals_t is None or sem_t is None:
+        # ── 1. Pointcloud annotator 데이터 수집 ───────────────────────
+        # Replicator pipeline이 첫 render step 이전엔 AnnotatorCache에 없음 → KeyError
+        try:
+            pcl_data = self._pcl_annot.get_data()
+        except KeyError:
+            if _dbg:
+                print(f"[Sonar dbg frame={self._frame_id}] annotator cache not ready → skip")
+            return
+        if pcl_data is None or len(pcl_data.get("data", [])) == 0:
+            if _dbg:
+                print(f"[Sonar dbg frame={self._frame_id}] pcl empty → skip")
             return
 
-        # ── 2. Unproject to batched flat pointcloud ────────────────────
-        pcl_np, nrm_np, sem_np, view_np = self._unproject_to_pcl(
-            depth_t, normals_t, sem_t
-        )
-        # pcl_np  : (N, H*W, 3)  float32
-        # nrm_np  : (N, H*W, 3)  float32
-        # sem_np  : (N, H*W)     uint32
-        # view_np : (N, 4, 4)    float32
+        pcl_wp  = pcl_data["data"]                          # warp array (M, 3) world frame
+        nrm_raw = pcl_data["info"]["pointNormals"]          # warp array (M, 4)
+        sem_raw = pcl_data["info"]["pointSemantic"]         # warp array (M,)  uint32 RGBA
 
-        N, HW, _ = pcl_np.shape
+        nrm_np = nrm_raw.numpy()[:, :3].astype(np.float32)
+        nrm_wp = wp.array(nrm_np, ndim=2, dtype=wp.float32, device=self._device)
+        sem_np = sem_raw.numpy().astype(np.uint32)
 
-        # ── 3. Build per-env reflectivity LUT ─────────────────────────
-        indexToRefl_np = self._build_refl_lut(sem_np)  # (N, max_id+1)
+        M = pcl_wp.shape[0]
+        if _dbg:
+            print(f"[Sonar dbg frame={self._frame_id}] M={M}  sem unique={np.unique(sem_np)[:4]}")
 
-        # ── 4. Upload to Warp ──────────────────────────────────────────
-        pcl_wp      = wp.array(pcl_np,         ndim=3, dtype=wp.float32, device=self._device)
-        nrm_wp      = wp.array(nrm_np,         ndim=3, dtype=wp.float32, device=self._device)
-        sem_wp      = wp.array(sem_np,         ndim=2, dtype=wp.uint32,  device=self._device)
-        lut_wp      = wp.array(indexToRefl_np, ndim=2, dtype=wp.float32, device=self._device)
-        view_wp     = wp.array(view_np,        ndim=3, dtype=wp.float32, device=self._device)
+        # ── 2. View transform (CameraParams annotator) ────────────────
+        try:
+            cam_data = self._cam_params_annot.get_data()
+        except KeyError:
+            if _dbg:
+                print(f"[Sonar dbg frame={self._frame_id}] cam_params cache not ready → skip")
+            return
+        if cam_data is None:
+            if _dbg:
+                print(f"[Sonar dbg frame={self._frame_id}] cam_data None → skip")
+            return
+        view_np  = cam_data["cameraViewTransform"].reshape(4, 4).T
+        view_mat = wp.mat44(view_np.flatten().tolist())
 
-        # ── 5. Per-point intensity   dim = (N, H*W) ───────────────────
-        intensity_pt = wp.empty((N, HW), dtype=wp.float32, device=self._device)
+        # ── 3. Per-point reflectivity (oceansim make_indexToProp의 5.x 이식) ──
+        # oceansim: indexToProp = np.ones(...) → 기본값 1.0, add_update_semantics로 오버라이드
+        # 5.x 변경: idToLabels 키가 정수문자열 → RGBA 튜플문자열, semantic ID가 RGBA uint32
+        # oceansim semanticSeg_annot 패턴: data_types=[]이므로 _sem_annot에서 직접 취득
+        try:
+            sem_out = self._sem_annot.get_data()
+        except KeyError:
+            if _dbg:
+                print(f"[Sonar dbg frame={self._frame_id}] sem cache not ready → skip")
+            return
+        id_to_labels = sem_out.get("info", {}).get("idToLabels", {}) if sem_out else {}
+        if _dbg:
+            print(f"[Sonar dbg frame={self._frame_id}] id_to_labels={id_to_labels}")
+        # oceansim guard: idToLabels가 비어 있으면 annotator 미준비
+        if not id_to_labels:
+            if _dbg:
+                print(f"[Sonar dbg frame={self._frame_id}] id_to_labels empty → skip")
+            return
+        refl_np = np.ones(M, dtype=np.float32)   # oceansim np.ones 기본값과 동일
+        refl_map = self._build_refl_map(id_to_labels)
+        if _dbg:
+            print(f"[Sonar dbg frame={self._frame_id}] refl_map={refl_map}")
+        for uid, refl in refl_map.items():
+            refl_np[sem_np == uid] = refl
+        refl_wp = wp.array(refl_np, ndim=1, dtype=wp.float32, device=self._device)
+
+        # ── 4. Per-point intensity   dim = (M,) ───────────────────────
+        intensity_wp = wp.empty((M,), dtype=wp.float32, device=self._device)
         wp.launch(
-            kernel=compute_intensity,
-            dim=(N, HW),
-            inputs=[pcl_wp, nrm_wp, view_wp, sem_wp, lut_wp, self.cfg.attenuation],
-            outputs=[intensity_pt],
+            kernel=compute_intensity, dim=M,
+            inputs=[pcl_wp, nrm_wp, view_mat, refl_wp, self.cfg.attenuation],
+            outputs=[intensity_wp],
             device=self._device,
         )
 
-        # ── 6. World → local → spherical   dim = (N, H*W) ────────────
-        pcl_local_wp = wp.empty((N, HW), dtype=wp.vec3, device=self._device)
-        pcl_spher_wp = wp.empty((N, HW), dtype=wp.vec3, device=self._device)
+        # ── 5. World → local → spherical   dim = (M,) ─────────────────
+        pcl_local_wp = wp.empty((M,), dtype=wp.vec3, device=self._device)
+        pcl_spher_wp = wp.empty((M,), dtype=wp.vec3, device=self._device)
         wp.launch(
-            kernel=world2local,
-            dim=(N, HW),
-            inputs=[view_wp, pcl_wp],
+            kernel=world2local, dim=M,
+            inputs=[view_mat, pcl_wp],
             outputs=[pcl_local_wp, pcl_spher_wp],
             device=self._device,
         )
 
-        # ── 7. Bin   dim = (N, H*W) ────────────────────────────────────
+        # ── 6. Bin   dim = (M,) ───────────────────────────────────────
         self._bin_sum.zero_()
         self._bin_count.zero_()
         self._binned_int.zero_()
-
         wp.launch(
-            kernel=bin_intensity,
-            dim=(N, HW),
+            kernel=bin_intensity, dim=M,
             inputs=[
-                pcl_spher_wp, intensity_pt,
+                pcl_spher_wp, intensity_wp,
                 wp.float32(self.cfg.min_range),
                 wp.float32(self.min_azi),
                 wp.float32(self.cfg.range_res),
@@ -194,12 +231,11 @@ class ImagingSonar(Camera):
             device=self._device,
         )
 
-        # ── 8. Binning method   dim = (N, R, A) ───────────────────────
-        bin_shape = self._bin_sum.shape  # (N, R, A)
+        # ── 7. Binning method   dim = (R, A) ──────────────────────────
+        bin_shape = self._bin_sum.shape
         if self.cfg.binning_method == "mean":
             wp.launch(
-                kernel=average,
-                dim=bin_shape,
+                kernel=average, dim=bin_shape,
                 inputs=[self._bin_sum, self._bin_count],
                 outputs=[self._binned_int],
                 device=self._device,
@@ -207,92 +243,78 @@ class ImagingSonar(Camera):
         else:  # "sum"
             self._binned_int = self._bin_sum
 
-        # ── 9. Noise   dim = (N, R, A) ────────────────────────────────
+        # ── 8. Noise   dim = (R, A) ───────────────────────────────────
         self._gau_noise.zero_()
         self._ray_noise.zero_()
         self._sonar_map.zero_()
 
         wp.launch(
-            kernel=normal_2d,
-            dim=bin_shape,
+            kernel=normal_2d, dim=bin_shape,
             inputs=[self._frame_id, 0.0, self.cfg.gau_noise_param],
             outputs=[self._gau_noise],
             device=self._device,
         )
         wp.launch(
-            kernel=range_dependent_rayleigh_2d,
-            dim=bin_shape,
+            kernel=range_dependent_rayleigh_2d, dim=bin_shape,
             inputs=[
-                self._frame_id,
-                self._r, self._azi,
-                self.cfg.max_range,
-                self.cfg.ray_noise_param,
-                self.cfg.central_peak,
-                self.cfg.central_std,
+                self._frame_id, self._r, self._azi,
+                self.cfg.max_range, self.cfg.ray_noise_param,
+                self.cfg.central_peak, self.cfg.central_std,
             ],
             outputs=[self._ray_noise],
             device=self._device,
         )
 
-        # ── 10. Normalise + composit   dim = (N, R, A) ────────────────
+        # ── 9. Normalise + composite   dim = (R, A) ───────────────────
         offset_f = wp.float32(self.cfg.intensity_offset)
         gain_f   = wp.float32(self.cfg.intensity_gain)
 
         if self.cfg.normalizing_method == "all":
-            maximum = wp.zeros((N,), dtype=wp.float32, device=self._device)
+            maximum = wp.zeros((1,), dtype=wp.float32, device=self._device)
             wp.launch(
-                kernel=all_max,
-                dim=bin_shape,
-                inputs=[self._binned_int],
-                outputs=[maximum],
+                kernel=all_max, dim=bin_shape,
+                inputs=[self._binned_int], outputs=[maximum],
                 device=self._device,
             )
             wp.launch(
-                kernel=make_sonar_map_all,
-                dim=bin_shape,
+                kernel=make_sonar_map_all, dim=bin_shape,
                 inputs=[self._r, self._azi, self._binned_int, maximum,
                         self._gau_noise, self._ray_noise, offset_f, gain_f],
                 outputs=[self._sonar_map],
                 device=self._device,
             )
         else:  # "range"
-            maximum = wp.zeros((N, self._r.shape[0]), dtype=wp.float32, device=self._device)
+            maximum = wp.zeros((self._r.shape[0],), dtype=wp.float32, device=self._device)
             wp.launch(
-                kernel=range_max,
-                dim=bin_shape,
-                inputs=[self._binned_int],
-                outputs=[maximum],
+                kernel=range_max, dim=bin_shape,
+                inputs=[self._binned_int], outputs=[maximum],
                 device=self._device,
             )
             wp.launch(
-                kernel=make_sonar_map_range,
-                dim=bin_shape,
+                kernel=make_sonar_map_range, dim=bin_shape,
                 inputs=[self._r, self._azi, self._binned_int, maximum,
                         self._gau_noise, self._ray_noise, offset_f, gain_f],
                 outputs=[self._sonar_map],
                 device=self._device,
             )
 
-        # ── 11. Sonar image   dim = (N, R, A) ─────────────────────────
+        # ── 10. Sonar image   dim = (R, A) ────────────────────────────
         self._sonar_img.zero_()
         wp.launch(
-            kernel=_make_sonar_image_kernel,
-            dim=bin_shape,
-            inputs=[self._sonar_map],
-            outputs=[self._sonar_img],
+            kernel=_make_sonar_image_kernel, dim=bin_shape,
+            inputs=[self._sonar_map], outputs=[self._sonar_img],
             device=self._device,
         )
 
-        # ── 12. Store outputs ──────────────────────────────────────────
+        # ── 11. 출력 저장 (N=1 차원 유지 → env.py 변경 불필요) ──────────
         self._data.output["sonar_map"]   = self._sonar_map
-        self._data.output["sonar_image"] = wp.to_torch(self._sonar_img)
+        self._data.output["sonar_image"] = wp.to_torch(self._sonar_img).unsqueeze(0)  # (1, R, A+1, 4)
 
-        # ── 13. Viewport (env 0 only) ──────────────────────────────────
+        # ── 12. Viewport (env 0 only) ──────────────────────────────────
         if self._sonar_provider is not None:
-            R_bins, A_bins = self._sonar_map.shape[1], self._sonar_map.shape[2]
-            # sonar_img[0] = env 0 slice: (R, A+1, 4)
-            env0_ptr = self._sonar_img[0].ptr
-            self._sonar_provider.set_bytes_data_from_gpu(env0_ptr, [A_bins, R_bins])
+            R_bins, A_bins = self._sonar_map.shape
+            self._sonar_provider.set_bytes_data_from_gpu(
+                self._sonar_img.ptr, [A_bins, R_bins])
 
         self._frame_id += 1
 
@@ -300,102 +322,28 @@ class ImagingSonar(Camera):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _unproject_to_pcl(
-        self,
-        depth_t:   torch.Tensor,
-        normals_t: torch.Tensor,
-        sem_t:     torch.Tensor,
-    ):
-        """Convert Isaac Lab Camera tensors to batched flat arrays.
+    @staticmethod
+    def _build_refl_map(id_to_labels: dict) -> dict:
+        """oceansim make_indexToProp_array의 Isaac Sim 5.x 이식.
 
-        Returns
-        -------
-        pcl      : np.ndarray (N, H*W, 3)  float32  — world positions
-        normals  : np.ndarray (N, H*W, 3)  float32
-        semantics: np.ndarray (N, H*W)     uint32
-        view_mats: np.ndarray (N, 4, 4)    float32  — extrinsic matrices
+        4.x: 키 = 정수 문자열 '2', semantic ID = 소정수
+        5.x: 키 = RGBA 튜플 문자열 '(r, g, b, a)', semantic ID = RGBA uint32
+
+        Returns:
+            {uint32_id: float_reflectivity}  — 'reflectivity' 속성이 있는 항목만
         """
-        from isaaclab.utils.math import matrix_from_quat
-
-        # Normalise shapes
-        if depth_t.ndim == 4:
-            depth_t = depth_t[..., 0]        # (N, H, W)
-        if sem_t.ndim == 4:
-            sem_t = sem_t[..., 0]            # (N, H, W)
-
-        N, H, W = depth_t.shape
-
-        # Camera intrinsics (same for all envs in Isaac Lab)
-        try:
-            fx = float(self._data.intrinsic_matrices[0, 0, 0])
-            fy = float(self._data.intrinsic_matrices[0, 1, 1])
-            cx = float(self._data.intrinsic_matrices[0, 0, 2])
-            cy = float(self._data.intrinsic_matrices[0, 1, 2])
-        except Exception:
-            fx = fy = float(W) / (2.0 * np.tan(np.deg2rad(self.cfg.hori_fov) / 2.0))
-            cx, cy = W / 2.0, H / 2.0
-
-        # Pixel grid (shared)
-        us, vs = np.meshgrid(np.arange(W), np.arange(H))  # (H, W)
-        us = us.reshape(-1).astype(np.float32)             # (H*W,)
-        vs = vs.reshape(-1).astype(np.float32)
-
-        depth_np = depth_t.cpu().numpy()                    # (N, H, W)
-        nrm_np   = normals_t[:, :, :, :3].cpu().numpy()    # (N, H, W, 3) world frame
-        sem_np   = sem_t.cpu().numpy().astype(np.uint32)    # (N, H, W)
-
-        pcl_out  = np.empty((N, H*W, 3), dtype=np.float32)
-        nrm_out  = nrm_np.reshape(N, H*W, 3).astype(np.float32)
-        sem_out  = sem_np.reshape(N, H*W)
-        view_mats = np.empty((N, 4, 4), dtype=np.float32)
-
-        for n in range(N):
-            pos  = self._data.pos_w[n].cpu().numpy()
-            quat = self._data.quat_w_world[n].cpu().numpy()  # (w,x,y,z)
-            R_mat = matrix_from_quat(
-                torch.tensor(quat, dtype=torch.float32)
-            ).numpy()
-
-            # world→camera extrinsic: [R | -R@pos]
-            T = np.eye(4, dtype=np.float32)
-            T[:3, :3] = R_mat
-            T[:3,  3] = -(R_mat @ pos)
-            view_mats[n] = T
-
-            # z-depth (distance_to_image_plane): standard pinhole unprojection
-            # 유효 범위 밖(inf/NaN/≤0) 픽셀은 max_range+1로 설정 →
-            # world2local 후 r > max_range → bin_intensity 범위 검사로 제외
-            z = depth_np[n].reshape(-1).copy()
-            z[~np.isfinite(z) | (z <= 0.0)] = self.cfg.max_range + 1.0
-
-            # camera-local XYZ
-            P_cam = np.stack([
-                (us - cx) / fx * z,
-                (vs - cy) / fy * z,
-                z,
-            ], axis=-1)  # (H*W, 3)
-
-            # camera-local → world: P_world = R^T @ P_cam + pos
-            pcl_out[n] = (R_mat.T @ P_cam.T).T + pos
-
-        return pcl_out, nrm_out, sem_out, view_mats
-
-    def _build_refl_lut(self, sem_np: np.ndarray) -> np.ndarray:
-        """Build per-env, per-semantic-index reflectivity LUT.
-
-        Returns
-        -------
-        np.ndarray (N, max_id+1)  float32   defaults to 1.0
-        """
-        N = sem_np.shape[0]
-        max_id = int(sem_np.max()) if sem_np.size > 0 else 0
-        lut = np.ones((N, max_id + 1), dtype=np.float32)
-
-        refl_map: dict[int, float] = getattr(self.cfg, "semantic_to_reflectivity", {})
-        for idx, val in refl_map.items():
-            if idx <= max_id:
-                lut[:, idx] = float(val)  # same mapping for all envs
-        return lut
+        result = {}
+        for key, info in id_to_labels.items():
+            if not isinstance(info, dict) or "reflectivity" not in info:
+                continue
+            key_str = str(key).strip()
+            if key_str.startswith("("):                         # 5.x RGBA 포맷
+                r, g, b, a = [int(x.strip()) for x in key_str.strip("()").split(",")]
+                uid = np.uint32((int(a) << 24) | (int(b) << 16) | (int(g) << 8) | int(r))
+            else:                                               # 4.x 정수 포맷 (하위호환)
+                uid = np.uint32(int(key_str))
+            result[uid] = float(info["reflectivity"])
+        return result
 
     # ------------------------------------------------------------------
     # Viewport
@@ -404,7 +352,6 @@ class ImagingSonar(Camera):
     def _make_viewport(self) -> None:
         self._viewport_window = ui.Window("ImagingSonar Viewport", width=800, height=840)
         self._sonar_provider  = ui.ByteImageProvider()
-
         with self._viewport_window.frame:
             with ui.ZStack(height=720, width=720):
                 ui.Rectangle(style={"background_color": 0xFF000000})
@@ -428,5 +375,15 @@ class ImagingSonar(Camera):
     # ------------------------------------------------------------------
 
     def __del__(self) -> None:
+        try:
+            rp = self.render_product_paths[0]
+            if hasattr(self, "_pcl_annot"):
+                self._pcl_annot.detach(rp)
+            if hasattr(self, "_cam_params_annot"):
+                self._cam_params_annot.detach(rp)
+            if hasattr(self, "_sem_annot"):
+                self._sem_annot.detach(rp)
+        except Exception:
+            pass
         if hasattr(self, "_viewport_window") and self._viewport_window is not None:
             self._viewport_window.destroy()

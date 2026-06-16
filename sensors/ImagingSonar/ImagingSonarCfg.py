@@ -7,11 +7,7 @@ from .ImagingSonar import ImagingSonar
 @configclass
 class ImagingSonarCfg(CameraCfg):
     class_type:     type=ImagingSonar
-    data_types:     list[str]=field(default_factory=lambda:[
-        "distance_to_image_plane",
-        "normals",
-        "semantic_segmentation",
-    ])
+    data_types:     list[str]=field(default_factory=list)
     min_range:      float=0.2
     max_range:      float=3.0
     range_res:      float=0.008
