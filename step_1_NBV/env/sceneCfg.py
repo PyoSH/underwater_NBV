@@ -131,14 +131,15 @@ class OceanSceneCfg(InteractiveSceneCfg):
     )
 
     # ── 이미징 소나 ─────────────────────────────────────────────────────────────
-    # hori_res=300, hori_fov=130, vert_fov=40 → height=92, width=300 (HW 정합)
-    # HW = 300 * int(300/(130/40)) = 300*92 = 27,600 = height*width
-    # range: 0.2~3.0m, range_res=0.02 → R=140bins, angular_res=1.0 → A=130bins
+    # hori_res=4000, hori_fov=130, vert_fov=40 → height=1230, width=4000 (HW 정합)
+    # HW = 4000 * int(4000*(40/130)) = 4000*1230 = 4,920,000 = height*width
+    # range: 0.2~3.0m, range_res=0.005 → R=560bins, angular_res=0.25 → A=520bins
+    # polar canvas: H=560, W=int(2*560*sin(65°))=1015
     sonar: ImagingSonarCfg = ImagingSonarCfg(
         prim_path="{ENV_REGEX_NS}/SensorRig/Sonar",
         update_period=0,
-        height=92,
-        width=300,
+        height=1230,
+        width=4000,
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0,
             horizontal_aperture=103.0,   # 2*24*tan(65°) ≈ 103mm → hori_fov≈130°
@@ -149,13 +150,13 @@ class OceanSceneCfg(InteractiveSceneCfg):
             rot=(1.0, 0.0, 0.0, 0.0),
             convention="world",
         ),
-        hori_res=300.0,
+        hori_res=4000.0,
         hori_fov=130.0,
         vert_fov=40.0,
         min_range=0.2,
         max_range=3.0,
-        range_res=0.02,
-        angular_res=1.0,
+        range_res=0.005,
+        angular_res=0.25,
         attenuation=0.1,
         binning_method="sum",
         normalizing_method="range",

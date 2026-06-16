@@ -10,9 +10,9 @@ class ImagingSonarCfg(CameraCfg):
     data_types:     list[str]=field(default_factory=list)
     min_range:      float=0.2
     max_range:      float=3.0
-    range_res:      float=0.008
-    angular_res:    float=0.5
-    hori_res:       float=3000.0
+    range_res:      float=0.005
+    angular_res:    float=0.25
+    hori_res:       float=4000.0
     hori_fov:       float=130.0
     vert_fov:       float=20.0
 

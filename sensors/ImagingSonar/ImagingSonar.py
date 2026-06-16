@@ -17,7 +17,9 @@ Pipeline per update()
 
 Output (N=1 차원 유지 — env.py 변경 불필요):
     sensor.data.output["sonar_map"]    wp.array  (R, A)     vec3 (x, y, intensity)
-    sensor.data.output["sonar_image"]  torch.Tensor (1, R, A+1, 4)  uint8 RGBA
+    sensor.data.output["sonar_image"]  torch.Tensor (1, H, W, 4)  uint8 RGBA
+        H = R_bins, W = int(2 * R_bins * sin(hori_fov/2))  — polar canvas
+        row=0(top)=far range, row=H-1(bottom)=near range
 """
 from __future__ import annotations
 from typing import TYPE_CHECKING
@@ -79,12 +81,19 @@ class ImagingSonar(Camera):
 
         R_bins, A_bins = self._r.shape
 
+        # ── Polar canvas 크기 ─────────────────────────────────────────
+        # H = R_bins (range 방향 1:1), W = 2 * R_bins * sin(hori_fov/2)
+        hori_fov_rad = float(np.deg2rad(self.cfg.hori_fov))
+        self._x_max    = float(self.cfg.max_range * np.sin(hori_fov_rad / 2.0))
+        self._H_canvas = R_bins
+        self._W_canvas = int(2.0 * R_bins * np.sin(hori_fov_rad / 2.0))
+
         # ── GPU buffers (단일 env, N 차원 없음) ───────────────────────
         self._bin_sum    = wp.zeros((R_bins, A_bins), dtype=wp.float32, device=self._device)
         self._bin_count  = wp.zeros((R_bins, A_bins), dtype=wp.int32,   device=self._device)
         self._binned_int = wp.zeros((R_bins, A_bins), dtype=wp.float32, device=self._device)
         self._sonar_map  = wp.zeros((R_bins, A_bins), dtype=wp.vec3,    device=self._device)
-        self._sonar_img  = wp.zeros((R_bins, A_bins + 1, 4), dtype=wp.uint8, device=self._device)
+        self._sonar_img  = wp.zeros((self._H_canvas, self._W_canvas, 4), dtype=wp.uint8, device=self._device)
         self._gau_noise  = wp.zeros((R_bins, A_bins), dtype=wp.float32, device=self._device)
         self._ray_noise  = wp.zeros((R_bins, A_bins), dtype=wp.float32, device=self._device)
 
@@ -298,23 +307,32 @@ class ImagingSonar(Camera):
                 device=self._device,
             )
 
-        # ── 10. Sonar image   dim = (R, A) ────────────────────────────
+        # ── 10. Sonar image   dim = (H_canvas, W_canvas) — polar projection ──
         self._sonar_img.zero_()
         wp.launch(
-            kernel=_make_sonar_image_kernel, dim=bin_shape,
-            inputs=[self._sonar_map], outputs=[self._sonar_img],
+            kernel=_make_sonar_image_kernel,
+            dim=(self._H_canvas, self._W_canvas),
+            inputs=[
+                self._sonar_map,
+                wp.float32(self.cfg.min_range),
+                wp.float32(self.cfg.range_res),
+                wp.float32(self.min_azi),
+                wp.float32(float(np.deg2rad(self.cfg.angular_res))),
+                wp.float32(self.cfg.max_range),
+                wp.float32(self._x_max),
+            ],
+            outputs=[self._sonar_img],
             device=self._device,
         )
 
-        # ── 11. 출력 저장 (N=1 차원 유지 → env.py 변경 불필요) ──────────
+        # ── 11. 출력 저장 (N=1 차원 유지) ────────────────────────────────
         self._data.output["sonar_map"]   = self._sonar_map
-        self._data.output["sonar_image"] = wp.to_torch(self._sonar_img).unsqueeze(0)  # (1, R, A+1, 4)
+        self._data.output["sonar_image"] = wp.to_torch(self._sonar_img).unsqueeze(0)  # (1, H, W, 4)
 
         # ── 12. Viewport (env 0 only) ──────────────────────────────────
         if self._sonar_provider is not None:
-            R_bins, A_bins = self._sonar_map.shape
             self._sonar_provider.set_bytes_data_from_gpu(
-                self._sonar_img.ptr, [A_bins, R_bins])
+                self._sonar_img.ptr, [self._W_canvas, self._H_canvas])
 
         self._frame_id += 1
 

@@ -216,12 +216,52 @@ def make_sonar_map_range(
 @wp.kernel
 def make_sonar_image(
         sonar_data:  wp.array(ndim=2, dtype=wp.vec3),   # (R, A)
-        sonar_image: wp.array(ndim=3, dtype=wp.uint8)   # (R, A+1, 4) [out]
+        min_range:   wp.float32,
+        range_res:   wp.float32,
+        min_azi:     wp.float32,   # radians
+        azi_res:     wp.float32,   # radians per bin
+        max_range:   wp.float32,
+        x_max:       wp.float32,   # max_range * sin(hori_fov/2)
+        sonar_image: wp.array(ndim=3, dtype=wp.uint8),  # (H, W, 4) [out]  polar canvas
 ):
-    i, j = wp.tid()
-    width     = sonar_data.shape[1]
-    sonar_rgb = wp.uint8(sonar_data[i, j][2] * wp.float32(255))
-    sonar_image[i, width - j, 0] = sonar_rgb
-    sonar_image[i, width - j, 1] = sonar_rgb
-    sonar_image[i, width - j, 2] = sonar_rgb
-    sonar_image[i, width - j, 3] = wp.uint8(255)
+    """Inverse polar projection: canvas pixel → Cartesian → polar → sonar bin lookup.
+
+    Canvas layout:
+        row=0   (top)    = far range (max_range, center azimuth)
+        row=H-1 (bottom) = near range (sensor)
+        col=0   (left)   = -x_max
+        col=W-1 (right)  = +x_max
+    """
+    row, col = wp.tid()
+    H = sonar_image.shape[0]
+    W = sonar_image.shape[1]
+    R = sonar_data.shape[0]
+    A = sonar_data.shape[1]
+
+    # Pixel → Cartesian  (y = forward, x = lateral)
+    y = max_range * (wp.float32(1.0) - wp.float32(row) / wp.float32(H))
+    x = x_max    * (wp.float32(2.0) * wp.float32(col) / wp.float32(W) - wp.float32(1.0))
+
+    # Cartesian → polar
+    r   = wp.sqrt(x * x + y * y)
+    azi = wp.atan2(y, x)   # same convention as make_sonar_map: x=r*cos(azi), y=r*sin(azi)
+
+    # Out-of-range → black
+    max_azi = min_azi + wp.float32(A) * azi_res
+    if (r < min_range or r >= max_range or
+            y < wp.float32(0.0) or
+            azi < min_azi or azi >= max_azi):
+        sonar_image[row, col, 0] = wp.uint8(0)
+        sonar_image[row, col, 1] = wp.uint8(0)
+        sonar_image[row, col, 2] = wp.uint8(0)
+        sonar_image[row, col, 3] = wp.uint8(255)
+        return
+
+    r_bin   = wp.clamp(wp.int32((r   - min_range) / range_res), 0, R - 1)
+    azi_bin = wp.clamp(wp.int32((azi - min_azi)   / azi_res),   0, A - 1)
+
+    rgb = wp.uint8(sonar_data[r_bin, azi_bin][2] * wp.float32(255))
+    sonar_image[row, col, 0] = rgb
+    sonar_image[row, col, 1] = rgb
+    sonar_image[row, col, 2] = rgb
+    sonar_image[row, col, 3] = wp.uint8(255)
