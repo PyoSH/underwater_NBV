@@ -38,6 +38,8 @@ parser.add_argument("--eval_psi",     type=float, default=None,
                     help="초기 거리 (m). 미지정시 envCfg 기본값(4.5m) 사용")
 parser.add_argument("--q_sat",        type=float, default=None,
                     help="coverage_q 포화 임계값. 미지정시 envCfg 기본값(0.80) 사용")
+parser.add_argument("--jerlov_eval",  action="store_true",
+                    help="6개 Jerlov 수종을 에피소드 순서대로 고정 적용 (--num_episodes 6 권장)")
 
 AppLauncher.add_app_launcher_args(parser)
 if "--enable_cameras" not in sys.argv:
@@ -147,7 +149,8 @@ def load_model(checkpoint_path: str, device: torch.device):
 # ─────────────────────────────────────────────────────────────────────────────
 def evaluate_recon(env: OceanEnvGenNBVQuality, greedy_fn, device: torch.device,
                    n_episodes: int, max_steps: int, out_dir: Path,
-                   is_gennbv: bool = False, quality_vox: bool = True):
+                   is_gennbv: bool = False, quality_vox: bool = True,
+                   jerlov_eval: bool = False):
     E = env.num_envs
     timeout = max_steps if max_steps > 0 else TIMEOUT_STEPS
 
@@ -162,9 +165,16 @@ def evaluate_recon(env: OceanEnvGenNBVQuality, greedy_fn, device: torch.device,
           f"stall_steps={STALL_STEPS}  timeout={timeout}")
     print(f"[recon] output → {out_dir}\n")
 
+    TYPES = ["IB", "II", "III", "1C", "3C", "5C"]
     with torch.no_grad():
         for ep_idx in range(n_episodes):
+            if jerlov_eval:
+                env.cfg.jerlov_types = (TYPES[ep_idx % len(TYPES)],)
             obs, _     = env.reset()
+            if env.cfg.jerlov_dr_enabled:
+                jerlov = env._current_jerlov_type[0]
+                print(f"  [DR] ep={ep_idx}  type={jerlov}  "
+                      f"mu={env._quality_mu[0].item():.4f}  Q_sat={env._quality_Q_sat[0].item():.4f}")
             obs_img    = obs["policy"]
             obs_scalar = obs["extra_info"]
 
@@ -309,9 +319,10 @@ def evaluate_recon(env: OceanEnvGenNBVQuality, greedy_fn, device: torch.device,
                     vol_dim=(80, 80, 80), voxel_size=0.025, trunc_margin=0.025,
                 )
             if weight_hi is not None and cam_traj:
+                ep_mu = float(env._quality_mu[0].item())
                 quality_hi = fuse_highres_quality(
                     cam_traj, origin_snap, weight_hi,
-                    mu=0.217, voxel_size=0.025,
+                    mu=ep_mu, voxel_size=0.025,
                 )
 
             if tsdf_hi is not None:
@@ -409,7 +420,8 @@ def main():
     env_cfg.k_x               = 0.0
     env_cfg.c_step            = 0.02
     env_cfg.k_still           = 0.05
-    env_cfg.water_dr_enabled  = False
+    if args.jerlov_eval:
+        env_cfg.jerlov_dr_enabled = True
 
     from isaaclab.sensors import CameraCfg
     env_cfg.scene.ext_camera = CameraCfg(
@@ -445,7 +457,8 @@ def main():
                    max_steps=args.max_steps,
                    out_dir=out_dir,
                    is_gennbv=is_gennbv,
-                   quality_vox=quality_vox)
+                   quality_vox=quality_vox,
+                   jerlov_eval=args.jerlov_eval)
 
     try:
         env.close()

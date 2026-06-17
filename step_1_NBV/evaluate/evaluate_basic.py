@@ -205,7 +205,7 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
 
                 _, reward, terminated, truncated, _ = env.step(action)
 
-                if env.cfg.water_dr_enabled:
+                if env.cfg.jerlov_dr_enabled:
                     for eid in range(E):
                         try:
                             raw = env._camera.data.output["uw_rgb"]
@@ -366,7 +366,6 @@ def main():
     env_cfg.k_x               = 0.0
     env_cfg.c_step            = 0.02
     env_cfg.k_still           = 0.05
-    env_cfg.water_dr_enabled  = True
     env_cfg.jerlov_dr_enabled = True
 
     import math as _math
