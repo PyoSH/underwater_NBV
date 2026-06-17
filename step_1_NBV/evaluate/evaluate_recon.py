@@ -22,6 +22,7 @@ from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.image as mpimg
 
 from isaaclab.app import AppLauncher
 
@@ -40,6 +41,8 @@ parser.add_argument("--q_sat",        type=float, default=None,
                     help="coverage_q 포화 임계값. 미지정시 envCfg 기본값(0.80) 사용")
 parser.add_argument("--jerlov_eval",  action="store_true",
                     help="6개 Jerlov 수종을 에피소드 순서대로 고정 적용 (--num_episodes 6 권장)")
+parser.add_argument("--seq_save",     action="store_true",
+                    help="스텝별 소나·컬러 이미지 저장 (rgb_images/, sonar_images/)")
 
 AppLauncher.add_app_launcher_args(parser)
 if "--enable_cameras" not in sys.argv:
@@ -150,7 +153,7 @@ def load_model(checkpoint_path: str, device: torch.device):
 def evaluate_recon(env: OceanEnvGenNBVQuality, greedy_fn, device: torch.device,
                    n_episodes: int, max_steps: int, out_dir: Path,
                    is_gennbv: bool = False, quality_vox: bool = True,
-                   jerlov_eval: bool = False):
+                   jerlov_eval: bool = False, seq_save: bool = False):
     E = env.num_envs
     timeout = max_steps if max_steps > 0 else TIMEOUT_STEPS
 
@@ -199,6 +202,12 @@ def evaluate_recon(env: OceanEnvGenNBVQuality, greedy_fn, device: torch.device,
             rock_pos_snap = env.rock_pos[0].cpu().numpy().copy()
 
             done_reason = "timeout"
+
+            if seq_save:
+                img_dir   = out_dir / f"ep_{ep_idx:03d}_env0" / "rgb_images"
+                sonar_dir = out_dir / f"ep_{ep_idx:03d}_env0" / "sonar_images"
+                img_dir.mkdir(parents=True, exist_ok=True)
+                sonar_dir.mkdir(parents=True, exist_ok=True)
 
             for ep_step in range(1, timeout + 1):
                 # ── 행동 선택 ─────────────────────────────────────────────────
@@ -266,6 +275,22 @@ def evaluate_recon(env: OceanEnvGenNBVQuality, greedy_fn, device: torch.device,
                     ext_cam.data.output["rgb"][0, :, :, :3]
                     .cpu().numpy().copy().astype(np.uint8)
                 )
+
+                if seq_save:
+                    try:
+                        raw = env._camera.data.output["uw_rgb"]
+                        img = raw[0, :, :, :3].cpu().numpy().copy().astype(np.uint8)
+                        mpimg.imsave(str(img_dir / f"step{ep_step:03d}.png"), img)
+                    except Exception:
+                        pass
+                    sonar_out = env._sonar.data.output.get("sonar_image")
+                    if sonar_out is not None:
+                        try:
+                            simg = sonar_out[0, :, :-1, 0].cpu().numpy().copy()
+                            mpimg.imsave(str(sonar_dir / f"step{ep_step:03d}.png"),
+                                         simg, cmap="gray", vmin=0, vmax=255)
+                        except Exception:
+                            pass
 
                 tsdf_snap     = env._tsdf_vol   [0].cpu().numpy().copy()
                 weight_snap   = env._weight_vol [0].cpu().numpy().copy()
@@ -458,7 +483,8 @@ def main():
                    out_dir=out_dir,
                    is_gennbv=is_gennbv,
                    quality_vox=quality_vox,
-                   jerlov_eval=args.jerlov_eval)
+                   jerlov_eval=args.jerlov_eval,
+                   seq_save=args.seq_save)
 
     try:
         env.close()

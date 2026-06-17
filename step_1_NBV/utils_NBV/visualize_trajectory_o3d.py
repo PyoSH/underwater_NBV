@@ -170,9 +170,6 @@ def render_scene(mesh_path: str, traj_xyz: np.ndarray, rock_pos: np.ndarray,
     mat_sphere = rendering.MaterialRecord()
     mat_sphere.shader = "defaultLit"
 
-    mat_rock = rendering.MaterialRecord()
-    mat_rock.shader = "defaultLit"
-    mat_rock.base_color = [1.0, 0.8, 0.0, 1.0]
 
     # ── 메시 로드 ──────────────────────────────────────────────────────────────
     mesh = o3d.io.read_triangle_mesh(mesh_path)
@@ -214,9 +211,6 @@ def render_scene(mesh_path: str, traj_xyz: np.ndarray, rock_pos: np.ndarray,
                 m.base_color = [r, g, b, 1.0]
                 scene.add_geometry(f"cam_{i}", s, m)
 
-        # ── rock 마커 ─────────────────────────────────────────────────────────
-        rock_m = make_rock_marker(rock_pos)
-        scene.add_geometry("rock", rock_m, mat_rock)
 
     # ── 카메라 뷰 설정 ────────────────────────────────────────────────────────
     eye, center, up = compute_view_params(rock_pos, traj_xyz,
