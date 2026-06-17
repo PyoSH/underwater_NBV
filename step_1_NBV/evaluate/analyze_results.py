@@ -27,7 +27,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-def load_episodes(result_dir: Path) -> list[dict]:
+JERLOV_TYPES = ["IB", "II", "III", "1C", "3C", "5C"]
+
+
+def load_episodes(result_dir: Path, jerlov_eval: bool = False) -> list[dict]:
     """ep_XXX_env* 디렉토리마다 step_log.csv + npy 파일을 읽어 반환."""
     episodes = []
     for ep_dir in sorted(result_dir.glob("ep_*_env*")):
@@ -58,12 +61,16 @@ def load_episodes(result_dir: Path) -> list[dict]:
                     if (ep_dir / "coverage_q_hist.npy").exists()
                     else np.array([cov_q]))
 
+        ep_idx = int(ep_dir.name.split("_")[1])
+        jerlov_type = JERLOV_TYPES[ep_idx % len(JERLOV_TYPES)] if jerlov_eval else None
+
         episodes.append({
             "coverage_bin": cov_bin,
             "coverage_q":   cov_q,
             "ep_len":        ep_len,
             "bin_hist":      bin_hist,
             "q_hist":        q_hist,
+            "jerlov_type":   jerlov_type,
         })
     return episodes
 
@@ -237,11 +244,99 @@ def plot_bar_chart(stats: dict[str, dict | None], out_path: Path):
     print(f"[save] {out_path}")
 
 
+def plot_jerlov_bar(algo_episodes: dict[str, list[dict]], out_path: Path):
+    """수종별 grouped bar chart (cov_q / cov_bin 두 subplot)."""
+    algos = [n for n, eps in algo_episodes.items() if eps]
+    n_algos = len(algos)
+    x = np.arange(len(JERLOV_TYPES))
+    bar_w = 0.8 / n_algos
+    offsets = np.linspace(-(n_algos - 1) / 2 * bar_w, (n_algos - 1) / 2 * bar_w, n_algos)
+
+    # type → {algo → value} 빌드
+    type_vals: dict[str, dict[str, dict]] = {t: {} for t in JERLOV_TYPES}
+    for name, eps in algo_episodes.items():
+        for e in eps:
+            t = e.get("jerlov_type")
+            if t in type_vals:
+                type_vals[t][name] = {"cov_q": e["coverage_q"], "cov_bin": e["coverage_bin"]}
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    for ax, metric, ylabel in zip(
+        axes,
+        ["cov_q", "cov_bin"],
+        ["coverage_q", "coverage_bin"],
+    ):
+        for i, name in enumerate(algos):
+            vals = [type_vals[t].get(name, {}).get(metric, 0.0) for t in JERLOV_TYPES]
+            bars = ax.bar(x + offsets[i], vals, width=bar_w,
+                          label=name, color=PALETTE[i % len(PALETTE)],
+                          edgecolor="white", linewidth=0.8, zorder=3)
+            for bar, v in zip(bars, vals):
+                ax.text(bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 0.012,
+                        f"{v:.3f}", ha="center", va="bottom", fontsize=8)
+        ax.set_xticks(x)
+        ax.set_xticklabels(JERLOV_TYPES, fontsize=11)
+        ax.set_xlabel("Jerlov Water Type", fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
+        ax.set_ylim(0, 1.0)
+        ax.legend(fontsize=10, framealpha=0.9)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.grid(axis="y", alpha=0.25, linestyle="--", zorder=0)
+
+    fig.suptitle("Per-Jerlov-Type Coverage Comparison", fontsize=14, fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(str(out_path), dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"[save] {out_path}")
+
+
+def plot_jerlov_curves(algo_episodes: dict[str, list[dict]], hist_key: str,
+                       ylabel: str, title: str, out_path: Path):
+    """수종별 6-subplot coverage curve (각 subplot에 알고리즘별 step-by-step 커브)."""
+    type_hists: dict[str, dict[str, np.ndarray]] = {t: {} for t in JERLOV_TYPES}
+    for name, eps in algo_episodes.items():
+        for e in eps:
+            t = e.get("jerlov_type")
+            if t in type_hists:
+                type_hists[t][name] = e[hist_key]
+
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8), sharey=True)
+    for ax, t in zip(axes.flatten(), JERLOV_TYPES):
+        for i, (name, eps) in enumerate(algo_episodes.items()):
+            if not eps:
+                continue
+            hist = type_hists[t].get(name)
+            if hist is None:
+                continue
+            steps = np.arange(1, len(hist) + 1)
+            ax.plot(steps, hist, label=name,
+                    color=PALETTE[i % len(PALETTE)],
+                    linestyle=LINESTYLES[i % len(LINESTYLES)],
+                    linewidth=2.0)
+        ax.set_title(f"Jerlov  {t}", fontsize=12, fontweight="bold")
+        ax.set_xlabel("Step", fontsize=10)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.set_xlim(1, MAX_STEPS)
+        ax.set_ylim(0, 1.0)
+        ax.legend(fontsize=9, framealpha=0.9)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.grid(True, alpha=0.25, linestyle="--")
+
+    fig.suptitle(title, fontsize=14, fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(str(out_path), dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"[save] {out_path}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--results", nargs="+", required=True,
                         help="name:path 형식. 예) UW_NBV_2:./recon_output/UW_NBV_2_327k")
     parser.add_argument("--out_dir", type=str, default="./analysis")
+    parser.add_argument("--jerlov_eval", action="store_true",
+                        help="에피소드 순서를 Jerlov 수종(IB→5C)으로 해석해 수종별 플롯 추가 생성")
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -266,7 +361,7 @@ def main():
             algo_episodes[name] = []
             stats[name] = None
             continue
-        eps = load_episodes(d)
+        eps = load_episodes(d, jerlov_eval=args.jerlov_eval)
         print(f"[load] {name}: {len(eps)} episodes  ← {d}")
         algo_episodes[name] = eps
         stats[name] = compute_stats(eps)
@@ -275,14 +370,26 @@ def main():
     print_table(stats)
     save_table_csv(stats, out_dir / "comparison_table.csv")
 
-    # 커브 플롯
+    # 커브 플롯 (전체 에피소드 평균)
     plot_curves(algo_episodes, "q_hist",   "coverage_q",   "Quality Coverage over Steps (mean±std)",
                 out_dir / "coverage_q_curve.png")
     plot_curves(algo_episodes, "bin_hist", "coverage_bin", "Binary Coverage over Steps (mean±std)",
                 out_dir / "coverage_bin_curve.png")
 
-    # bar chart
+    # bar chart (전체 평균)
     plot_bar_chart(stats, out_dir / "bar_chart.png")
+
+    # Jerlov 수종별 플롯
+    if args.jerlov_eval:
+        plot_jerlov_bar(algo_episodes, out_dir / "jerlov_bar.png")
+        plot_jerlov_curves(algo_episodes, "q_hist",
+                           "coverage_q",
+                           "coverage_q per Jerlov Type",
+                           out_dir / "jerlov_cov_q_curves.png")
+        plot_jerlov_curves(algo_episodes, "bin_hist",
+                           "coverage_bin",
+                           "coverage_bin per Jerlov Type",
+                           out_dir / "jerlov_cov_bin_curves.png")
 
 
 if __name__ == "__main__":
