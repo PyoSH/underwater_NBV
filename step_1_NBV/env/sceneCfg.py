@@ -130,37 +130,37 @@ class OceanSceneCfg(InteractiveSceneCfg):
         backscatter_coeff  =(0.05, 0.05, 0.05),
     )
 
-    # ── 이미징 소나 ─────────────────────────────────────────────────────────────
-    # hori_res=4000, hori_fov=130, vert_fov=40 → height=1230, width=4000 (HW 정합)
-    # HW = 4000 * int(4000*(40/130)) = 4000*1230 = 4,920,000 = height*width
-    # range: 0.2~3.0m, range_res=0.005 → R=560bins, angular_res=0.25 → A=520bins
-    # polar canvas: H=560, W=int(2*560*sin(65°))=1015
+    # ── 이미징 소나 (Oculus M750d 기준, 1.2MHz 모드) ────────────────────────────
+    # hori_fov=130°, vert_fov=20°, angular_res=0.6°, range_res=2.5mm, max_range=40m(씬:5m)
+    # hori_res=4000, vert_fov=20 → height=int(4000*(20/130))=615, width=4000
+    # range: 0.1~5.0m, range_res=0.0025 → R=1960bins, angular_res=0.6 → A=216bins
+    # polar canvas: H=1960, W=int(2*1960*sin(65°))=3552
     sonar: ImagingSonarCfg = ImagingSonarCfg(
         prim_path="{ENV_REGEX_NS}/SensorRig/Sonar",
         update_period=0,
-        height=1230,
+        height=615,
         width=4000,
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0,
             horizontal_aperture=103.0,   # 2*24*tan(65°) ≈ 103mm → hori_fov≈130°
-            clipping_range=(0.1, 5.0),
+            clipping_range=(0.05, 6.0),
         ),
         offset=ImagingSonarCfg.OffsetCfg(
-            pos=(0.0, 0.0, 0.0),
+            pos=(0.1, 0.0, 0.2),
             rot=(1.0, 0.0, 0.0, 0.0),
             convention="world",
         ),
         hori_res=4000.0,
         hori_fov=130.0,
-        vert_fov=40.0,
-        min_range=0.2,
-        max_range=3.0,
-        range_res=0.005,
-        angular_res=0.25,
+        vert_fov=20.0,
+        min_range=0.1,
+        max_range=5.0,
+        range_res=0.0025,
+        angular_res=0.6,
         attenuation=0.1,
         binning_method="sum",
         normalizing_method="range",
-        enable_viewport=True,
+        enable_viewport=False,
     )
  
     '''

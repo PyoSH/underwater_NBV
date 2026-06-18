@@ -8,10 +8,10 @@ from .ImagingSonar import ImagingSonar
 class ImagingSonarCfg(CameraCfg):
     class_type:     type=ImagingSonar
     data_types:     list[str]=field(default_factory=list)
-    min_range:      float=0.2
-    max_range:      float=3.0
-    range_res:      float=0.005
-    angular_res:    float=0.25
+    min_range:      float=0.1
+    max_range:      float=5.0
+    range_res:      float=0.0025
+    angular_res:    float=0.6
     hori_res:       float=4000.0
     hori_fov:       float=130.0
     vert_fov:       float=20.0

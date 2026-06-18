@@ -157,11 +157,11 @@ def evaluate_base(env: OceanEnvGenNBVQuality, device: torch.device,
             if env.cfg.jerlov_dr_enabled:
                 jerlov = env._current_jerlov_type[0]
                 print(f"  [DR] ep={ep_idx}  type={jerlov}  mu={env._quality_mu[0].item():.4f}  Q_sat={env._quality_Q_sat[0].item():.4f}")
-            img_dir = out_dir / f"ep_{ep_idx:03d}_dr_images"
+            img_dir = out_dir / f"ep_{ep_idx:03d}_env0" / "dr_images"
             if env.cfg.jerlov_dr_enabled:
                 img_dir.mkdir(parents=True, exist_ok=True)
 
-            sonar_dir = out_dir / f"ep_{ep_idx:03d}_sonar_images"
+            sonar_dir = out_dir / f"ep_{ep_idx:03d}_env0" / "sonar_images"
             sonar_dir.mkdir(parents=True, exist_ok=True)
 
             phi_rings_done = False

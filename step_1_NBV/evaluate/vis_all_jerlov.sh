@@ -24,6 +24,7 @@ OUT_DIR="${PROJ}/analysis/vis_jerlov"
 RUN_DIRS=(
     "${PROJ}/recon_output/UW_NBV_5_jerlov_DR"
     "${PROJ}/recon_output/UW_NBV_DR_1"
+    "${PROJ}/recon_output/UW_NBV_DR_2"
 )
 
 # ── Jerlov 수종 순서 (evaluate_recon.py TYPES 배열과 동일) ───────────────────
