@@ -19,6 +19,7 @@ python analyze_results.py \
 from __future__ import annotations
 import argparse
 import csv
+import math
 from pathlib import Path
 
 import numpy as np
@@ -153,14 +154,40 @@ def save_table_csv(stats: dict[str, dict | None], out_path: Path):
     print(f"[save] {out_path}")
 
 
-# colorblind-friendly palette (Wong 2011)
+# colorblind-friendly palette (Okabe-Ito) — 미지정 알고리즘 fallback용
 PALETTE = ["#E69F00", "#56B4E9", "#009E73", "#D55E00", "#CC79A7", "#0072B2"]
-LINESTYLES = ["-", "--", "-.", ":", "-", "--"]
+LINEWIDTH = 2.4  # 전부 동일 두께 — 색으로만 구분 (두께 차등은 인위적 위계로 보일 수 있어 배제)
+
+# 알고리즘별 고정 색상 (Okabe-Ito 색맹 안전 팔레트에서 5개를 최대한 떨어뜨려 선택).
+# 두께는 전부 LINEWIDTH로 동일.
+RENAME = {"UW_NBV_5": "Proposed", "UW_NBV_DR_2": "Proposed+DR"}
+ALGO_STYLE = {
+    "Manual":      dict(color="#999999", linewidth=LINEWIDTH),  # 회색
+    "ScanRL":      dict(color="#D55E00", linewidth=LINEWIDTH),  # 버밀리언
+    "GenNBV":      dict(color="#0072B2", linewidth=LINEWIDTH),  # 파랑
+    "Proposed":    dict(color="#009E73", linewidth=LINEWIDTH),  # 청록
+    "Proposed+DR": dict(color="#CC79A7", linewidth=LINEWIDTH),  # 자홍
+}
+
+
+def get_style(name: str, idx: int) -> dict:
+    """이름을 RENAME으로 정규화 후 ALGO_STYLE 조회, 없으면 PALETTE로 fallback (두께는 동일)."""
+    canon = RENAME.get(name, name)
+    if canon in ALGO_STYLE:
+        return ALGO_STYLE[canon]
+    return dict(color=PALETTE[idx % len(PALETTE)], linewidth=LINEWIDTH)
+
+
+def thin_on_top_zorder(linewidth: float) -> float:
+    """굵은 선이 얇은 선을 덮어버리지 않도록 — 얇을수록 zorder를 높여 위로 그림."""
+    return 30.0 - linewidth
 
 
 def plot_curves(algo_episodes: dict[str, list[dict]], hist_key: str,
-                ylabel: str, title: str, out_path: Path):
-    fig, ax = plt.subplots(figsize=(9, 5))
+                ylabel: str, title: str, out_path: Path, show_variance: bool = True):
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    label_targets = []  # (y_end, name, color) — 끝점 직접 라벨링용
 
     for i, (name, episodes) in enumerate(algo_episodes.items()):
         if not episodes:
@@ -172,20 +199,34 @@ def plot_curves(algo_episodes: dict[str, list[dict]], hist_key: str,
         ])
         steps = np.arange(1, max_len + 1)
         mu    = padded.mean(axis=0)
-        sigma = padded.std(axis=0)
-        c  = PALETTE[i % len(PALETTE)]
-        ls = LINESTYLES[i % len(LINESTYLES)]
-        ax.plot(steps, mu, label=name, color=c, linewidth=2.5,
-                linestyle=ls, zorder=len(algo_episodes) - i)
-        ax.fill_between(steps, mu - sigma, mu + sigma, alpha=0.15, color=c,
-                        zorder=len(algo_episodes) - i)
+        style = get_style(name, i)
+        c, lw = style["color"], style["linewidth"]
+        zo = thin_on_top_zorder(lw)
+        ax.plot(steps, mu, label=name, color=c, linewidth=lw, zorder=zo)
+        if show_variance:
+            sigma = padded.std(axis=0)
+            ax.fill_between(steps, mu - sigma, mu + sigma, alpha=0.15, color=c,
+                            zorder=zo - 0.5)
+        label_targets.append([mu[-1], name, c])
+
+    # ── 끝점 직접 라벨링: 값이 가까우면 겹치지 않게 수직으로 살짝 벌림 ──────────
+    label_targets.sort(key=lambda t: t[0])
+    min_gap = 0.035
+    for k in range(1, len(label_targets)):
+        if label_targets[k][0] - label_targets[k - 1][0] < min_gap:
+            label_targets[k][0] = label_targets[k - 1][0] + min_gap
+    x_end = MAX_STEPS
+    for y, name, c in label_targets:
+        ax.annotate(name, xy=(x_end, y), xytext=(8, 0),
+                    textcoords="offset points", va="center", ha="left",
+                    fontsize=10, fontweight="bold", color=c)
 
     ax.set_xlabel("Step", fontsize=13)
     ax.set_ylabel(ylabel, fontsize=13)
-    ax.set_xlim(1, MAX_STEPS)
+    ax.set_xlim(1, MAX_STEPS * 1.22)
+    ax.set_xticks([t for t in ax.get_xticks() if t <= MAX_STEPS])
     ax.set_ylim(0, 1.0)
     ax.set_title(title, fontsize=14, fontweight="bold")
-    ax.legend(fontsize=11, framealpha=0.9)
     ax.tick_params(labelsize=11)
     ax.spines[["top", "right"]].set_visible(False)
     ax.grid(True, alpha=0.25, linestyle="--")
@@ -196,13 +237,6 @@ def plot_curves(algo_episodes: dict[str, list[dict]], hist_key: str,
 
 
 def plot_bar_chart(stats: dict[str, dict | None], out_path: Path):
-    RENAME = {"UW_NBV_5": "Proposed"}
-    COLOR_MAP = {
-        "Manual":   "#888888",   # 회색
-        "ScanRL":   "#D62728",   # 빨강
-        "GenNBV":   "#AEC6E8",   # 옅은 파랑
-        "Proposed": "#2CA02C",   # 밝은 초록
-    }
     names  = [RENAME.get(n, n) for n, s in stats.items() if s is not None]
     s_list = [stats[n] for n in (k for k, s in stats.items() if s is not None)]
 
@@ -221,7 +255,7 @@ def plot_bar_chart(stats: dict[str, dict | None], out_path: Path):
     for ax, (mean_key, std_key, label) in zip(axes, metrics):
         means = [s[mean_key] for s in s_list]
         stds  = [s[std_key]  for s in s_list]
-        colors = [COLOR_MAP.get(n, PALETTE[i % len(PALETTE)]) for i, n in enumerate(names)]
+        colors = [get_style(n, i)["color"] for i, n in enumerate(names)]
         bars = ax.bar(x, means, width=bar_w, color=colors,
                       edgecolor="white", linewidth=0.8, zorder=3)
         ax.errorbar(x, means, yerr=stds, fmt="none", color="black",
@@ -244,16 +278,18 @@ def plot_bar_chart(stats: dict[str, dict | None], out_path: Path):
     print(f"[save] {out_path}")
 
 
-def plot_jerlov_bar(algo_episodes: dict[str, list[dict]], out_path: Path):
+def plot_jerlov_bar(algo_episodes: dict[str, list[dict]], out_path: Path,
+                    types: list[str] | None = None):
     """수종별 grouped bar chart (cov_q / cov_bin 두 subplot)."""
+    types = types or JERLOV_TYPES
     algos = [n for n, eps in algo_episodes.items() if eps]
     n_algos = len(algos)
-    x = np.arange(len(JERLOV_TYPES))
+    x = np.arange(len(types))
     bar_w = 0.8 / n_algos
     offsets = np.linspace(-(n_algos - 1) / 2 * bar_w, (n_algos - 1) / 2 * bar_w, n_algos)
 
     # type → {algo → value} 빌드
-    type_vals: dict[str, dict[str, dict]] = {t: {} for t in JERLOV_TYPES}
+    type_vals: dict[str, dict[str, dict]] = {t: {} for t in types}
     for name, eps in algo_episodes.items():
         for e in eps:
             t = e.get("jerlov_type")
@@ -267,16 +303,16 @@ def plot_jerlov_bar(algo_episodes: dict[str, list[dict]], out_path: Path):
         ["coverage_q", "coverage_bin"],
     ):
         for i, name in enumerate(algos):
-            vals = [type_vals[t].get(name, {}).get(metric, 0.0) for t in JERLOV_TYPES]
+            vals = [type_vals[t].get(name, {}).get(metric, 0.0) for t in types]
             bars = ax.bar(x + offsets[i], vals, width=bar_w,
-                          label=name, color=PALETTE[i % len(PALETTE)],
+                          label=RENAME.get(name, name), color=get_style(name, i)["color"],
                           edgecolor="white", linewidth=0.8, zorder=3)
             for bar, v in zip(bars, vals):
                 ax.text(bar.get_x() + bar.get_width() / 2,
                         bar.get_height() + 0.012,
                         f"{v:.3f}", ha="center", va="bottom", fontsize=8)
         ax.set_xticks(x)
-        ax.set_xticklabels(JERLOV_TYPES, fontsize=11)
+        ax.set_xticklabels(types, fontsize=11)
         ax.set_xlabel("Jerlov Water Type", fontsize=12)
         ax.set_ylabel(ylabel, fontsize=12)
         ax.set_ylim(0, 1.0)
@@ -292,17 +328,26 @@ def plot_jerlov_bar(algo_episodes: dict[str, list[dict]], out_path: Path):
 
 
 def plot_jerlov_curves(algo_episodes: dict[str, list[dict]], hist_key: str,
-                       ylabel: str, title: str, out_path: Path):
-    """수종별 6-subplot coverage curve (각 subplot에 알고리즘별 step-by-step 커브)."""
-    type_hists: dict[str, dict[str, np.ndarray]] = {t: {} for t in JERLOV_TYPES}
+                       ylabel: str, title: str, out_path: Path,
+                       types: list[str] | None = None):
+    """수종별 subplot coverage curve (각 subplot에 알고리즘별 step-by-step 커브).
+
+    types: 표시할 수종 부분집합 (예: ["IB","II","III"]). None이면 6종 전체.
+    """
+    types = types or JERLOV_TYPES
+    type_hists: dict[str, dict[str, np.ndarray]] = {t: {} for t in types}
     for name, eps in algo_episodes.items():
         for e in eps:
             t = e.get("jerlov_type")
             if t in type_hists:
                 type_hists[t][name] = e[hist_key]
 
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8), sharey=True)
-    for ax, t in zip(axes.flatten(), JERLOV_TYPES):
+    n = len(types)
+    rows = 2 if n > 3 else 1
+    cols = math.ceil(n / rows)
+    fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4 * rows), sharey=True, squeeze=False)
+    for ax, t in zip(axes.flatten(), types):
+        local_max_len = 1
         for i, (name, eps) in enumerate(algo_episodes.items()):
             if not eps:
                 continue
@@ -310,14 +355,15 @@ def plot_jerlov_curves(algo_episodes: dict[str, list[dict]], hist_key: str,
             if hist is None:
                 continue
             steps = np.arange(1, len(hist) + 1)
-            ax.plot(steps, hist, label=name,
-                    color=PALETTE[i % len(PALETTE)],
-                    linestyle=LINESTYLES[i % len(LINESTYLES)],
-                    linewidth=2.0)
+            local_max_len = max(local_max_len, len(hist))
+            style = get_style(name, i)
+            ax.plot(steps, hist, label=RENAME.get(name, name),
+                    color=style["color"], linewidth=style["linewidth"],
+                    zorder=thin_on_top_zorder(style["linewidth"]))
         ax.set_title(f"Jerlov  {t}", fontsize=12, fontweight="bold")
         ax.set_xlabel("Step", fontsize=10)
         ax.set_ylabel(ylabel, fontsize=10)
-        ax.set_xlim(1, MAX_STEPS)
+        ax.set_xlim(1, local_max_len * 1.05)   # 실제 도달한 step까지만 — 패널을 꽉 채움
         ax.set_ylim(0, 1.0)
         ax.legend(fontsize=9, framealpha=0.9)
         ax.spines[["top", "right"]].set_visible(False)
@@ -337,6 +383,11 @@ def main():
     parser.add_argument("--out_dir", type=str, default="./analysis")
     parser.add_argument("--jerlov_eval", action="store_true",
                         help="에피소드 순서를 Jerlov 수종(IB→5C)으로 해석해 수종별 플롯 추가 생성")
+    parser.add_argument("--no_variance", action="store_true",
+                        help="coverage curve에서 std 음영(fill_between)을 빼고 평균선만 그림")
+    parser.add_argument("--jerlov_subset", nargs="+", default=None, choices=JERLOV_TYPES,
+                        help="jerlov_bar/jerlov_curves에 표시할 수종 부분집합 (예: IB II III). "
+                             "미지정시 6종 전체")
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -371,25 +422,27 @@ def main():
     save_table_csv(stats, out_dir / "comparison_table.csv")
 
     # 커브 플롯 (전체 에피소드 평균)
-    plot_curves(algo_episodes, "q_hist",   "coverage_q",   "Quality Coverage over Steps (mean±std)",
-                out_dir / "coverage_q_curve.png")
-    plot_curves(algo_episodes, "bin_hist", "coverage_bin", "Binary Coverage over Steps (mean±std)",
-                out_dir / "coverage_bin_curve.png")
+    show_var = not args.no_variance
+    title_suffix = "(mean±std)" if show_var else "(mean)"
+    plot_curves(algo_episodes, "q_hist",   "coverage_q",   f"Quality Coverage over Steps {title_suffix}",
+                out_dir / "coverage_q_curve.png", show_variance=show_var)
+    plot_curves(algo_episodes, "bin_hist", "coverage_bin", f"Binary Coverage over Steps {title_suffix}",
+                out_dir / "coverage_bin_curve.png", show_variance=show_var)
 
     # bar chart (전체 평균)
     plot_bar_chart(stats, out_dir / "bar_chart.png")
 
     # Jerlov 수종별 플롯
     if args.jerlov_eval:
-        plot_jerlov_bar(algo_episodes, out_dir / "jerlov_bar.png")
+        plot_jerlov_bar(algo_episodes, out_dir / "jerlov_bar.png", types=args.jerlov_subset)
         plot_jerlov_curves(algo_episodes, "q_hist",
                            "coverage_q",
                            "coverage_q per Jerlov Type",
-                           out_dir / "jerlov_cov_q_curves.png")
+                           out_dir / "jerlov_cov_q_curves.png", types=args.jerlov_subset)
         plot_jerlov_curves(algo_episodes, "bin_hist",
                            "coverage_bin",
                            "coverage_bin per Jerlov Type",
-                           out_dir / "jerlov_cov_bin_curves.png")
+                           out_dir / "jerlov_cov_bin_curves.png", types=args.jerlov_subset)
 
 
 if __name__ == "__main__":
