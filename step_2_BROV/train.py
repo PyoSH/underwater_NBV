@@ -1,47 +1,11 @@
-import argparse
-import sys
-import os
-from isaaclab.app import AppLauncher
+"""
+BROV2 RL 학습 런처 (예정)
+==========================
+물리 검증 테스트는 validate_physics.py로 분리됨 (--test 플래그, six_dof/영상 기록 포함).
+이 파일은 RSL-RL 등 실제 RL 학습 연동용으로 예약되어 있으며 아직 미구현이다
+(CLAUDE.md "다음 개발 순서" 5번 참조).
+"""
 
-# 인수 파싱
-parser = argparse.ArgumentParser(description="BROV2 Bottom-Up 검증")
-parser.add_argument("--test", choices=["neutral_buoyancy", "straight_line", "thruster_model"], default="neutral_buoyancy")
-parser.add_argument("--thrust", type=float, default=0.5)
-parser.add_argument("--duration", type=float, default=5.0)
-AppLauncher.add_app_launcher_args(parser)
-
-args = parser.parse_args()
-app_launcher = AppLauncher(args)
-simulation_app = app_launcher.app
-
-# 환경 및 검증 모듈 import
-sys.path.insert(0, os.path.dirname(__file__))
-from envCfg import BROVTrajEnvCfg
-from env import BROVTrajEnv
-import bottom_up  # 분리한 파일 import
-
-if __name__ == "__main__":
-    cfg = BROVTrajEnvCfg()
-    cfg.scene.num_envs = 4
-    cfg.max_bound_x = cfg.max_bound_y = cfg.max_bound_z = 50.0
-    env = BROVTrajEnv(cfg)
-
-
-    try:
-        if args.test == "neutral_buoyancy":
-            bottom_up.test_neutral_buoyancy(env, duration_s=args.duration)
-        elif args.test == "straight_line":
-            bottom_up.test_straight_line(env, thrust=args.thrust, duration_s=args.duration)
-        elif args.test == "thruster_model":
-            bottom_up.test_thruster_model(env, duration_s=args.duration)
-        
-        print("\n[INFO] 모든 테스트가 완료되었습니다.")
-        print("[INFO] WebRTC 접속 유지를 위해 시뮬레이션을 계속 구동합니다. (종료: Ctrl+C)")
-        
-        while simulation_app.is_running():
-            import torch
-            empty_action = torch.zeros(env.action_space.shape, device=env.device)
-            env.step(empty_action)
-    finally:
-        env.close()
-        simulation_app.close()
+raise NotImplementedError(
+    "RL 학습 런처는 아직 구현되지 않았습니다. 물리 검증은 validate_physics.py를 사용하세요."
+)

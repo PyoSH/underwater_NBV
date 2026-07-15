@@ -19,12 +19,13 @@ RL 학습 연결 이전에 물리 시뮬레이션의 정확도를 먼저 확보�
 ```
 step_2_BROV/
 ├── CLAUDE.md           ← 이 파일
-├── train.py            # 물리 검증 테스트 런처 (RL 학습 아님)
+├── train.py            # RL 학습 런처 (예정, 미구현 — RSL-RL 연동 대기)
+├── validate_physics.py # 물리 검증 테스트 런처 (--test 플래그, six_dof/영상 기록 포함)
 ├── envCfg.py           # BROVTrajEnvCfg — 전체 파라미터 관리
 ├── sceneCfg.py         # BROVSceneCfg — IsaacLab 씬 정의
 ├── env.py              # BROVTrajEnv — 메인 RL 환경 (DirectRLEnv 서브클래스)
 ├── hydrodynamics.py    # BROV2ThrusterModel + BROV2Hydrodynamics
-├── bottom_up.py        # 물리 검증 테스트 함수 3종
+├── bottom_up.py        # 물리 검증 테스트 함수 5종 (six_dof 포함)
 └── brov_env.py         # [레거시] MIT CSAIL origin, 실행 불가 — 참조 전용
 
 공유 에셋 (상위 디렉토리):
@@ -41,13 +42,14 @@ step_2_BROV/
 ### 의존 관계
 
 ```
-train.py
+validate_physics.py (물리 검증)  /  train.py (RL 학습, 미구현)
   ├── envCfg.py  →  BROVTrajEnvCfg
   │     └── sceneCfg.py  →  BROVSceneCfg
-  │           └── robots/assets/brov_joint.py  →  BROV_CFG (ArticulationCfg)
+  │           └── robots/assets/brov_rigid.py  →  BROV_RIGID_CFG (ArticulationCfg)
   ├── env.py  →  BROVTrajEnv
   │     └── hydrodynamics.py  →  BROV2ThrusterModel, BROV2Hydrodynamics
-  └── bottom_up.py  →  test_neutral_buoyancy / test_straight_line / test_thruster_model
+  └── bottom_up.py  →  test_neutral_buoyancy / test_straight_line / test_rotation
+                        / test_six_dof / test_thruster_model
 ```
 
 ### 물리 루프 (매 policy step)
@@ -158,12 +160,13 @@ R = rew_progress + rew_waypoint + rew_action + rew_upright
 | `sim.dt` | 1/100 s | 100 Hz 물리 |
 | `decimation` | 4 | 정책 25 Hz |
 | `episode_length_s` | 60.0 s | |
-| `volume` | 0.022747843 m³ | 부력 계산 — 중성부력 조정 시 변경 |
-| `cob_offset` | 0.01 m | COB가 COM보다 +Z 방향으로 위에 있는 거리 |
-| `water_density` | 997.0 kg/m³ | |
 | `trajectory_type` | "circle" | "helix" 옵션 |
 | `num_waypoints` | 12 | |
 | `trajectory_radius` | 3.0 m | |
+
+`volume`/`water_density`/`coBM`/`hydro_coef`는 `envCfg.py`가 아니라
+`../robots/data/BROV2/brov2_heavy.yaml`이 정본이다 (env.py가 런타임에 읽음).
+중성부력 조정 시 이 YAML의 `volume`을 변경할 것 — 튜닝 근거는 `brov2_spec.md` §3 참조.
 
 ---
 
@@ -172,19 +175,29 @@ R = rew_progress + rew_waypoint + rew_action + rew_upright
 ### 실행 방법
 ```bash
 # 중성 부력 확인 (추력=0, Z 드리프트 측정)
-python train.py --test neutral_buoyancy --duration 10.0 [--headless]
+python validate_physics.py --test neutral_buoyancy --duration 10.0 [--headless]
 
-# 방향 이동 확인 (전진/우측/상승)
-python train.py --test straight_line --thrust 0.5 --duration 3.0
+# 방향 이동 확인 (기본: forward만. 6방향 전부는 six_dof 참조)
+python validate_physics.py --test straight_line --thrust 0.5 --duration 3.0
+
+# 회전 확인 (yaw/roll/pitch)
+python validate_physics.py --test rotation --thrust 0.3 --duration 3.0
+
+# 6자유도 종합 (직선 6방향 + 회전 3축)
+python validate_physics.py --test six_dof --thrust 0.5 --rotation_thrust 0.3 --duration 3.0 --headless
 
 # 추진기 PWM→추력 변환표 출력
-python train.py --test thruster_model
+python validate_physics.py --test thruster_model
+
+# 위 테스트에 --record_video 추가 시 로봇을 따라가는 카메라로 mp4 기록
+# (videos/<test>/ 에 저장, 헤드리스에서도 --enable_cameras 자동 활성화)
+python validate_physics.py --test six_dof --record_video --headless
 ```
 
 ### 검증 기준
 - **중성부력**: |ΔZ| < 0.1 m / 10 s
-  - 하강 시: `envCfg.volume` 증가
-  - 상승 시: `envCfg.volume` 감소
+  - 하강 시: `brov2_heavy.yaml`의 `volume` 증가
+  - 상승 시: `brov2_heavy.yaml`의 `volume` 감소
 - **직선이동**: 주축 변위 > 0.05 m, 횡방향 표류 < 주축 변위 × 0.5
 - **추진기**: PWM=1.0에서 약 30~40 N 예상
 
@@ -207,7 +220,7 @@ python train.py --test thruster_model
 ## 다음 개발 순서
 
 1. **USD 에셋 확인** — `BlueROV2_buoyancy.usd`에서 실제 thruster joint 위치·방향 추출 후 `_POS`, `_DIR` 수정
-2. **중성부력 튜닝** — `test_neutral_buoyancy`로 `envCfg.volume` 조정
+2. **중성부력 튜닝** — `test_neutral_buoyancy`로 `brov2_heavy.yaml`의 `volume` 조정
 3. **직선이동 방향 검증** — `test_straight_line`으로 T1~T8 방향 부호 확인
 4. **유체역학 계수 튜닝** — 실제 BROV2 데이터 또는 MarineGym 원본값과 비교
 5. **RL 런처 연동** — RSL-RL `runner.py` 추가 및 학습 설정 YAML 작성

@@ -39,7 +39,7 @@ class BROVTrajEnvCfg(DirectRLEnvCfg):
     # 물리 스텝 : 100 Hz  /  정책 스텝 : 25 Hz (decimation=4)
 
     # ── 씬 ─────────────────────────────────────────────────────────────────────
-    scene: BROVSceneCfg = BROVSceneCfg(num_envs=4, env_spacing=20.0)
+    scene: BROVSceneCfg = BROVSceneCfg(num_envs=1, env_spacing=20.0)
 
     # ── 에피소드 ────────────────────────────────────────────────────────────────
     episode_length_s: float = 60.0
@@ -69,9 +69,9 @@ class BROVTrajEnvCfg(DirectRLEnvCfg):
     max_bound_z: float = 10.0
 
     # ── 수중 동역학 파라미터 (MARINEGYM 방식) ──────────────────────────────────
-    water_density: float = 997.0          # [kg/m³]
-    volume       : float = 0.022747843    # [m³]  BROV2 Heavy 체적 (중성 부력 기준)
-    cob_offset   : float = 0.01          # [m]   COM → 부력 중심 (+Z body)
+    # water_density/volume/coBM/hydro_coef는 여기서 관리하지 않음 — 전부
+    # ../robots/data/BROV2/brov2_heavy.yaml을 env.py가 런타임에 읽어온다.
+    # CAD/유체계수가 바뀌면 그 YAML만 갱신할 것 (튜닝 근거는 brov2_spec.md §3 참조).
 
     # ── 보상 가중치 ─────────────────────────────────────────────────────────────
     rew_scale_progress   : float =  1.0    # 이전보다 waypoint 에 가까워질 때

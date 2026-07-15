@@ -3,7 +3,8 @@ __pycache__/
 *$py.class
 
 /ref_paper
-/robots
+/robots/data
+/Project_BROV
 /step_1_NBV/wandb
 /step_1_NBV/checkpoints*
 /step_1_NBV/recon_output
@@ -12,4 +13,6 @@ __pycache__/
 /step_1_NBV/analysis*
 /step_1_NBV/logs
 /step_1_NBV/voxel_vis
+/step_2_BROV/plots
+/step_2_BROV/videos
 .idea
