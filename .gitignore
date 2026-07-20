@@ -15,4 +15,5 @@ __pycache__/
 /step_1_NBV/voxel_vis
 /step_2_BROV/plots
 /step_2_BROV/videos
+/step_2_BROV/logs/*
 .idea

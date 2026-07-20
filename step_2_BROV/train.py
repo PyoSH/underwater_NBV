@@ -1,11 +1,123 @@
 """
-BROV2 RL 학습 런처 (예정)
-==========================
-물리 검증 테스트는 validate_physics.py로 분리됨 (--test 플래그, six_dof/영상 기록 포함).
-이 파일은 RSL-RL 등 실제 RL 학습 연동용으로 예약되어 있으며 아직 미구현이다
-(CLAUDE.md "다음 개발 순서" 5번 참조).
+BROV2 속도 컨트롤러 RSL-RL 학습 런처
+======================================
+`BROVVelEnv`(Sim2Swim 저수준 6DOF 속도/자세 컨트롤러, arXiv:2512.08656)를
+RSL-RL PPO로 학습한다. `validate_physics.py`와 동일한 AppLauncher 패턴을
+따르고, RSL-RL API(OnPolicyRunner/RslRlVecEnvWrapper)는 `Project_BROV/
+custom_workflows/play.py`(레거시, 실제 동작 확인된 코드)의 사용례를 참고했다
+— 단 이 프로젝트는 gym 레지스트리(`gym.make`)를 쓰지 않고 `env.py`/
+`validate_physics.py`처럼 환경 클래스를 직접 인스턴스화한다.
+
+isaac-lab-base 컨테이너 실측 결과, 설치된 rsl-rl-lib(5.0.1)이 legacy 코드
+작성 시점보다 최신이라 `RslRlPpoActorCriticCfg`(구 스키마) 대신 `actor`/
+`critic`을 `RslRlMLPModelCfg`로 직접 구성 + `handle_deprecated_rsl_rl_cfg()`
+마이그레이션 호출이 필요했고(`agents/rsl_rl_ppo_cfg.py` 참조), `isaaclab_rl`의
+`export_policy_as_jit/onnx`는 새 rsl-rl-lib 정책 객체 구조와 아직 안 맞아서
+(업스트림 버전 불일치) `state_dict` 직접 저장으로 대체했다.
+
+경로 추종(los_guidance.py)은 이 학습 루프에 관여하지 않는다 — 여기서는 속도/
+자세 추종만 학습하고, 경로 추종은 정책 고정 후 별도 평가/배포 스크립트에서
+LOSGuidance로 v_d^b/q_d를 생성해 이 정책에 먹인다.
+
+사용법
+------
+python train.py --num_envs 512 --max_iterations 300 [--headless]
+python train.py --resume [--headless]   # 가장 최근 체크포인트에서 재개
 """
 
-raise NotImplementedError(
-    "RL 학습 런처는 아직 구현되지 않았습니다. 물리 검증은 validate_physics.py를 사용하세요."
-)
+import argparse
+import os
+import sys
+
+from isaaclab.app import AppLauncher
+
+parser = argparse.ArgumentParser(description="BROV2 속도 컨트롤러 RSL-RL 학습")
+parser.add_argument("--num_envs", type=int, default=None,
+                     help="기본값: velEnvCfg.py의 scene.num_envs(512)")
+parser.add_argument("--max_iterations", type=int, default=None,
+                     help="기본값: BROVVelPPORunnerCfg.max_iterations")
+parser.add_argument("--seed", type=int, default=None)
+parser.add_argument("--experiment_name", type=str, default=None)
+parser.add_argument("--resume", action="store_true", help="가장 최근 체크포인트에서 재개")
+parser.add_argument("--log_root", type=str,
+                     default=os.path.join(os.path.dirname(__file__), "logs"))
+AppLauncher.add_app_launcher_args(parser)
+
+args = parser.parse_args()
+app_launcher = AppLauncher(args)
+simulation_app = app_launcher.app
+
+# ── AppLauncher 기동 이후에만 import 가능 (isaaclab/rsl_rl이 Kit 앱 기동을 전제로 함) ──
+sys.path.insert(0, os.path.dirname(__file__))
+from importlib.metadata import version as _pkg_version
+
+import torch
+from rsl_rl.runners import OnPolicyRunner
+from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
+
+from velEnvCfg import BROVVelEnvCfg
+from velEnv import BROVVelEnv
+from agents.rsl_rl_ppo_cfg import BROVVelPPORunnerCfg
+
+
+def main() -> None:
+    env_cfg = BROVVelEnvCfg()
+    if args.num_envs is not None:
+        env_cfg.scene.num_envs = args.num_envs
+
+    agent_cfg = BROVVelPPORunnerCfg()
+    if args.max_iterations is not None:
+        agent_cfg.max_iterations = args.max_iterations
+    if args.experiment_name is not None:
+        agent_cfg.experiment_name = args.experiment_name
+    if args.seed is not None:
+        agent_cfg.seed = args.seed
+
+    # rsl-rl-lib>=5.0.0: RslRlMLPModelCfg의 폐기 필드(stochastic 등)가 기본값(MISSING)이어도
+    # to_dict()에 그대로 직렬화돼 MLPModel.__init__()이 거부한다 — 실제 설치 버전을 넘겨
+    # 마이그레이션 함수로 정리해야 함 (isaac-lab-base 컨테이너에서 KeyError/TypeError로 확인).
+    agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, _pkg_version("rsl-rl-lib"))
+
+    log_dir = os.path.join(args.log_root, agent_cfg.experiment_name)
+    os.makedirs(log_dir, exist_ok=True)
+
+    env = BROVVelEnv(cfg=env_cfg, render_mode=None)
+    env = RslRlVecEnvWrapper(env)
+
+    runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+
+    if args.resume:
+        ckpts = sorted(
+            f for f in os.listdir(log_dir) if f.startswith("model_") and f.endswith(".pt")
+        )
+        if ckpts:
+            resume_path = os.path.join(log_dir, ckpts[-1])
+            print(f"[INFO] 체크포인트에서 재개: {resume_path}")
+            runner.load(resume_path)
+        else:
+            print(f"[INFO] --resume 지정했지만 {log_dir}에 체크포인트 없음 — 처음부터 시작")
+
+    runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+
+    # ── 배포용 정책 내보내기 (Sim2Swim의 zero-shot sim2real 목표에 맞춰 jit+onnx 둘 다) ──
+    # rsl-rl-lib 5.0.1: get_inference_policy()가 이제 순수 MLPModel을 직접 반환하는데,
+    # isaaclab_rl.exporter의 export_policy_as_jit/onnx는 아직 구버전 ActorCritic 래퍼
+    # (.actor/.student 속성 보유)를 전제로 해서 "Policy does not have an actor/student
+    # module" 에러가 남 — isaaclab_rl이 rsl-rl-lib 5.x를 완전히 못 따라간 업스트림
+    # 버전 불일치로 보임(isaac-lab-base 컨테이너에서 실제 확인). state_dict 직접
+    # 저장으로 우회하고, 실패해도 학습 결과 자체는 잃지 않도록 예외를 흡수한다.
+    policy = runner.get_inference_policy(device=agent_cfg.device)
+    export_dir = os.path.join(log_dir, "exported")
+    os.makedirs(export_dir, exist_ok=True)
+    try:
+        torch.save(policy.state_dict(), os.path.join(export_dir, "policy_state_dict.pt"))
+        print(f"[INFO] 정책 state_dict 저장 완료: {export_dir}")
+    except Exception as e:
+        print(f"[WARN] 정책 내보내기 실패(학습 결과는 정상 저장됨, log_dir 체크포인트 참고): {e}")
+
+    env.close()
+    simulation_app.close()
+
+
+if __name__ == "__main__":
+    main()

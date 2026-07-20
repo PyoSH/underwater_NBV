@@ -24,6 +24,29 @@ _T3 = torch.tensor([1., -1., -1.])
 _T6 = torch.tensor([1., -1., -1., 1., -1., -1.])
 
 
+def build_allocation_matrix(pos: torch.Tensor, dir_: torch.Tensor) -> torch.Tensor:
+    """스러스터 위치/방향(SNAME body frame)으로부터 할당행렬 B(6,8)을 계산한다.
+
+    B의 행 순서는 [Fx,Fy,Fz,Tx,Ty,Tz] (surge,sway,heave,roll,pitch,yaw),
+    열 순서는 T1~T8 — Sim2Swim(arXiv:2512.08656) 논문의 6-dim wrench 액션을
+    8-thruster로 할당할 때 B의 pseudo-inverse(B^+ = torch.linalg.pinv(B))를 쓴다.
+
+    위치/방향이 바뀌면(YAML 갱신 등) 이 함수를 다시 호출하면 되고, 값 자체를
+    하드코딩하지 않는다 — hydro_coef/coBM과 동일한 "단일 정본" 원칙.
+
+    Parameters
+    ----------
+    pos  : (8,3) SNAME body frame
+    dir_ : (8,3) SNAME body frame, 단위벡터
+
+    Returns
+    -------
+    B : (6,8)
+    """
+    torque = torch.cross(pos, dir_, dim=-1)             # (8,3)
+    return torch.cat([dir_.T, torque.T], dim=0)          # (6,8)
+
+
 # ==============================================================================
 # BROV2ThrusterModel
 # ==============================================================================
@@ -155,6 +178,54 @@ class BROV2ThrusterModel:
         # SNAME → Z-up 변환 후 반환
         return forces_ned * self._t3, torques_ned * self._t3
 
+    def inverse_thrust(self, force: torch.Tensor) -> torch.Tensor:
+        """희망 추력(N, 부호 있음) → pwm([-1,1]) 역산.
+
+        compute()의 순방향 다항식(PWM→RPM 선형, RPM→추력 2차)을 역순으로 푼다:
+        추력 2차식을 근의공식으로 역산(양/음 분기 각각, 물리적으로 유효한 증가
+        구간의 근 — 두 분기 모두 '+sqrt' 근이 맞는 근이 되도록 부호까지 확인함)
+        한 뒤, RPM→PWM은 선형이라 바로 역산한다.
+
+        Sim2Swim 스타일 6-dim wrench 액션을 B_pinv로 할당한 개별 스러스터
+        희망 추력을 실제 pwm 명령으로 바꿀 때 사용 (velEnv._apply_action에서 호출 예정).
+
+        Parameters
+        ----------
+        force : (num_envs, 8) [N] 부호 있음 (+dir 방향)
+
+        Returns
+        -------
+        pwm : (num_envs, 8) [-1, 1]
+        """
+        k = self._KF / 4.4e-7 * 9.81
+
+        # 안전 clamp — brov2_heavy.yaml의 실측 최대추력(정/역방향 비대칭) 근방으로 제한.
+        # 기본 _KF에서는 k=9.81이라 그대로 64.1/-51.5가 되고, _KF가 바뀌면 함께 스케일된다.
+        force = force.clamp(-51.5 * k / 9.81, 64.1 * k / 9.81)
+
+        # ── 추력 → RPM (2차식 역산) ──
+        # rpm>0: k*(4.7368e-7·rpm² - 1.9275e-4·rpm + 8.4452e-2) = force
+        a_p, b_p, c_p = 4.7368e-7 * k, -1.9275e-4 * k, 8.4452e-2 * k
+        disc_p = (b_p**2 - 4 * a_p * (c_p - force)).clamp_min(0.0)
+        rpm_pos = (-b_p + torch.sqrt(disc_p)) / (2 * a_p)
+
+        # rpm<0: k*(-3.8442e-7·rpm² - 1.6186e-4·rpm - 3.9139e-2) = force
+        a_n, b_n, c_n = -3.8442e-7 * k, -1.6186e-4 * k, -3.9139e-2 * k
+        disc_n = (b_n**2 - 4 * a_n * (c_n - force)).clamp_min(0.0)
+        rpm_neg = (-b_n + torch.sqrt(disc_n)) / (2 * a_n)
+
+        rpm = torch.where(
+            force > 0, rpm_pos,
+            torch.where(force < 0, rpm_neg, torch.zeros_like(force)),
+        ).clamp(-self._MAX_RPM, self._MAX_RPM)
+
+        # ── RPM → PWM (선형 역산) ──
+        pwm = torch.where(
+            rpm > 0, (rpm - 345.21) / 3659.9,
+            torch.where(rpm < 0, (rpm + 433.50) / 3494.4, torch.zeros_like(rpm)),
+        )
+        return pwm.clamp(-1.0, 1.0)
+
     def reset(self, env_ids: torch.Tensor) -> None:
         self._pwm_state[env_ids] = 0.0
         self._last_thrust[env_ids] = 0.0
@@ -203,8 +274,8 @@ class BROV2Hydrodynamics:
         num_envs         : int,
         dt                : float,
         device            : str,
-        volume            : float | None = None,
-        cob_vector        : list | tuple | None = None,
+        volume            : float | torch.Tensor | None = None,
+        cob_vector        : list | tuple | torch.Tensor | None = None,
         water_density     : float | None = None,
         added_mass        : list | tuple | None = None,
         linear_damping    : list | tuple | None = None,
@@ -214,11 +285,9 @@ class BROV2Hydrodynamics:
         self.dt       = dt
         self.device   = device
 
-        rho = water_density or self._WATER_DENSITY
-        V   = volume        or self._VOLUME
-        cob = cob_vector    or self._COB_VECTOR
-
-        self._buoy_mag = rho * self._GRAVITY * V   # [N] 실제 부력 크기
+        self._water_density = water_density or self._WATER_DENSITY
+        V   = volume        if volume     is not None else self._VOLUME
+        cob = cob_vector    if cob_vector is not None else self._COB_VECTOR
 
         # 변환 벡터
         self._t3 = _T3.to(device)
@@ -227,8 +296,26 @@ class BROV2Hydrodynamics:
         # 부력 기준벡터 (Z-up world)
         self._world_up = torch.tensor([0., 0., 1.], device=device)
 
-        # COB 위치벡터 — NED(SNAME) body frame, COM 기준
-        self._r_cob_ned = torch.tensor(cob, dtype=torch.float32, device=device)
+        # ── 부력/COB — env별 배치 텐서 (도메인 랜덤화 대상, randomize() 참조) ──
+        # volume/cob_vector로 스칼라/리스트를 넘기면 전체 env에 broadcast, 이미
+        # (num_envs,)/(num_envs,3) 텐서를 넘기면 그대로 사용 (velEnv 등에서 env별
+        # 다른 값을 초기 지정하고 싶을 때 대비).
+        self._volume = (
+            V.to(device).float() if isinstance(V, torch.Tensor)
+            else torch.full((num_envs,), float(V), device=device)
+        )
+        self._buoy_mag = self._water_density * self._GRAVITY * self._volume   # (num_envs,) [N]
+
+        if isinstance(cob, torch.Tensor):
+            self._r_cob_ned = cob.to(device).float()
+            if self._r_cob_ned.dim() == 1:
+                self._r_cob_ned = self._r_cob_ned.unsqueeze(0).repeat(num_envs, 1)
+        else:
+            self._r_cob_ned = (
+                torch.tensor(cob, dtype=torch.float32, device=device)
+                .unsqueeze(0).repeat(num_envs, 1)
+            )   # (num_envs,3) NED(SNAME) body frame, COM 기준
+        self._nominal_r_cob_ned = self._r_cob_ned.clone()   # randomize()의 오프셋 기준점
 
         # 6-DOF 대각 행렬 (num_envs, 6, 6)
         def _diag(coeffs):
@@ -243,6 +330,35 @@ class BROV2Hydrodynamics:
         # 가속도 추정 버퍼 (NED body frame)
         self._prev_vel_ned = torch.zeros(num_envs, 6, device=device)
         self._prev_acc_ned = torch.zeros(num_envs, 6, device=device)
+
+    def randomize(
+        self,
+        env_ids        : torch.Tensor,
+        volume         : torch.Tensor | None = None,
+        cob_offset     : torch.Tensor | None = None,
+        added_mass_rot : torch.Tensor | None = None,
+    ) -> None:
+        """도메인 랜덤화 — env._reset_idx()에서 env_ids만 호출. None인 인자는 그대로 둔다.
+
+        Sim2Swim 1단계 랜덤화 범위(mass 제외, [[project_step2_brov_sim2swim]] 참조):
+        volume ±10%, cob_offset 반경 15mm 구, added_mass_rot(Kṗ,Mq̇,Nṙ) ±40%.
+        실제 샘플링(sample_uniform, 구면 샘플)은 velEnv 쪽 책임 — 여기는 대입만 한다.
+
+        Parameters
+        ----------
+        volume         : (M,) [m^3] 절대값
+        cob_offset     : (M,3) __init__ 시점 cob_vector(nominal) 기준 오프셋, NED/SNAME frame
+        added_mass_rot : (M,3) Kṗ, Mq̇, Nṙ 절대값 (회전축 added mass)
+        """
+        if volume is not None:
+            self._volume[env_ids]   = volume
+            self._buoy_mag[env_ids] = self._water_density * self._GRAVITY * volume
+        if cob_offset is not None:
+            self._r_cob_ned[env_ids] = self._nominal_r_cob_ned[env_ids] + cob_offset
+        if added_mass_rot is not None:
+            self._Ma[env_ids, 3, 3] = added_mass_rot[:, 0]
+            self._Ma[env_ids, 4, 4] = added_mass_rot[:, 1]
+            self._Ma[env_ids, 5, 5] = added_mass_rot[:, 2]
 
     # ------------------------------------------------------------------
     # Public API
@@ -298,19 +414,15 @@ class BROV2Hydrodynamics:
         F_buoy_W(Z-up) → Z-up body(쿼터니언 회전) → NED body(T₃)
         τ_restore = r_COB_NED × F_buoy_NED
         """
-        # 1. 부력: Z-up world → Z-up body
-        f_world = self._world_up * self._buoy_mag
-        f_zup   = quat_apply(
-            quat_conjugate(root_quat_w),
-            f_world.unsqueeze(0).expand(self.num_envs, -1),
-        )   # (N, 3)
+        # 1. 부력: Z-up world → Z-up body (env별 배치 크기 self._buoy_mag)
+        f_world = self._world_up.unsqueeze(0) * self._buoy_mag.unsqueeze(-1)   # (N, 3)
+        f_zup   = quat_apply(quat_conjugate(root_quat_w), f_world)             # (N, 3)
 
         # 2. Z-up body → NED body
         f_ned = f_zup * self._t3   # (N, 3)
 
-        # 3. 복원 모멘트: r_COB_NED × F_buoy_NED
-        r_cob = self._r_cob_ned.unsqueeze(0).expand(self.num_envs, -1)
-        t_ned = torch.cross(r_cob, f_ned, dim=-1)   # (N, 3)
+        # 3. 복원 모멘트: r_COB_NED × F_buoy_NED (env별 배치)
+        t_ned = torch.cross(self._r_cob_ned, f_ned, dim=-1)   # (N, 3)
 
         return torch.cat([f_ned, t_ned], dim=-1)   # (N, 6)
 
