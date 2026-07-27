@@ -16,4 +16,5 @@ __pycache__/
 /step_2_BROV/plots
 /step_2_BROV/videos
 /step_2_BROV/logs/*
+/step_2_BROV/wandb/*
 .idea
