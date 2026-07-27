@@ -31,7 +31,7 @@ class LOSGuidance:
 
     Parameters
     ----------
-    waypoints       : (num_envs, num_wp, 3) env-local 상대좌표 — env.py의
+    waypoints       : (num_envs, num_wp, 3) env-local 상대좌표 — envs/traj_env.py의
                       `_generate_trajectories`/`_waypoints`와 동일한 규약.
     device          : torch device
     lookahead_dist  : float, [m] — lookahead 거리 Δ. 현재 세그먼트 길이보다 작게

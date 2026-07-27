@@ -23,6 +23,9 @@ LOSGuidance로 v_d^b/q_d를 생성해 이 정책에 먹인다.
 ------
 python train.py --num_envs 512 --max_iterations 300 [--headless]
 python train.py --resume [--headless]   # 가장 최근 체크포인트에서 재개
+python train.py --logger wandb --log_project_name brov_vel [--headless]
+                                         # wandb 로깅 (WANDB_API_KEY/WANDB_USERNAME 환경변수 필요,
+                                         # 계정은 `wandb login`으로 사전 인증)
 """
 
 import argparse
@@ -41,6 +44,10 @@ parser.add_argument("--experiment_name", type=str, default=None)
 parser.add_argument("--resume", action="store_true", help="가장 최근 체크포인트에서 재개")
 parser.add_argument("--log_root", type=str,
                      default=os.path.join(os.path.dirname(__file__), "logs"))
+parser.add_argument("--logger", type=str, default=None, choices=["tensorboard", "neptune", "wandb"],
+                     help="기본값: BROVVelPPORunnerCfg.logger(tensorboard)")
+parser.add_argument("--log_project_name", type=str, default=None,
+                     help="wandb/neptune 프로젝트 이름. wandb 계정(entity)은 WANDB_USERNAME 환경변수로 지정")
 AppLauncher.add_app_launcher_args(parser)
 
 args = parser.parse_args()
@@ -55,8 +62,8 @@ import torch
 from rsl_rl.runners import OnPolicyRunner
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 
-from velEnvCfg import BROVVelEnvCfg
-from velEnv import BROVVelEnv
+from envs.vel_env_cfg import BROVVelEnvCfg
+from envs.vel_env import BROVVelEnv
 from agents.rsl_rl_ppo_cfg import BROVVelPPORunnerCfg
 
 
@@ -72,6 +79,12 @@ def main() -> None:
         agent_cfg.experiment_name = args.experiment_name
     if args.seed is not None:
         agent_cfg.seed = args.seed
+    if args.logger is not None:
+        agent_cfg.logger = args.logger
+    # 프로젝트 이름은 wandb/neptune일 때만 의미 있음 (cli_args.py의 update_rsl_rl_cfg와 동일 조건)
+    if agent_cfg.logger in {"wandb", "neptune"} and args.log_project_name:
+        agent_cfg.wandb_project = args.log_project_name
+        agent_cfg.neptune_project = args.log_project_name
 
     # rsl-rl-lib>=5.0.0: RslRlMLPModelCfg의 폐기 필드(stochastic 등)가 기본값(MISSING)이어도
     # to_dict()에 그대로 직렬화돼 MLPModel.__init__()이 거부한다 — 실제 설치 버전을 넘겨
@@ -87,11 +100,15 @@ def main() -> None:
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
 
     if args.resume:
-        ckpts = sorted(
+        # 문자열 sorted()는 안 됨 — "model_299.pt" < "model_50.pt" (사전식 비교라 '2'<'5')로
+        # 더 이전 체크포인트를 "최신"으로 잘못 고르는 경우가 생긴다. 파일명의 정수만 뽑아 비교.
+        ckpts = [
             f for f in os.listdir(log_dir) if f.startswith("model_") and f.endswith(".pt")
-        )
+        ]
         if ckpts:
-            resume_path = os.path.join(log_dir, ckpts[-1])
+            resume_path = os.path.join(
+                log_dir, max(ckpts, key=lambda f: int(f[len("model_"):-len(".pt")]))
+            )
             print(f"[INFO] 체크포인트에서 재개: {resume_path}")
             runner.load(resume_path)
         else:

@@ -45,9 +45,9 @@ app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
 sys.path.insert(0, os.path.dirname(__file__))
-from envCfg import BROVTrajEnvCfg
-from env import BROVTrajEnv
-import bottom_up
+from envs.traj_env_cfg import BROVTrajEnvCfg
+from envs.traj_env import BROVTrajEnv
+from physics_tests import bottom_up
 
 
 def _enable_video_recording(env) -> list:

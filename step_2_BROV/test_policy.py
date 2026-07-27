@@ -71,6 +71,7 @@ simulation_app = app_launcher.app
 
 # ── AppLauncher 기동 이후에만 import 가능 ──
 sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from importlib.metadata import version as _pkg_version
 
 import torch
@@ -83,11 +84,11 @@ from matplotlib.ticker import MultipleLocator
 from rsl_rl.runners import OnPolicyRunner
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 
-from velEnvCfg import BROVVelEnvCfg
-from velEnv import BROVVelEnv
-from los_guidance import LOSGuidance
+from envs.vel_env_cfg import BROVVelEnvCfg
+from envs.vel_env import BROVVelEnv
+from guidance.los_guidance import LOSGuidance
 from agents.rsl_rl_ppo_cfg import BROVVelPPORunnerCfg
-from env import _load_brov2_yaml   # nominal volume 조회용 — 값 재사용, 하드코딩 안 함
+from robots.dynamics.brov2.params import load_brov2_yaml   # nominal volume 조회용 — 값 재사용, 하드코딩 안 함
 
 _PLOT_DIR = os.path.join(os.path.dirname(__file__), "plots")
 
@@ -179,7 +180,7 @@ def _apply_physics_scenario(env: "BROVVelEnv", test: str) -> None:
     + port 방향 CoB 오프셋(비대칭 밸러스트로 인한 롤 유발 근사).
     """
     env_ids = torch.zeros(1, dtype=torch.long, device=env.device)
-    nominal_volume = _load_brov2_yaml()["volume"]
+    nominal_volume = load_brov2_yaml()["volume"]
 
     if test == "square_ballast":
         deficit_volume = _BALLAST_MASS_KG / env._hydro._water_density

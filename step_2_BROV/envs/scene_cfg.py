@@ -1,7 +1,8 @@
 """
 BROV2 궤적 추종 씬 구성
 ========================
-InteractiveSceneCfg 서브클래스.
+InteractiveSceneCfg 서브클래스. `envs/traj_env_cfg.py`, `envs/vel_env_cfg.py`
+둘 다 공유한다 (BROVTrajEnv/BROVVelEnv가 같은 로봇/씬을 씀).
 IsaacLab DirectRLEnv 가 super().__init__() 시점에 자동으로 스폰한다.
 
 포함 에셋
@@ -19,7 +20,7 @@ from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from robots.assets.brov_rigid import BROV_RIGID_CFG
 
 _SEAFLOOR_Z = -15.0

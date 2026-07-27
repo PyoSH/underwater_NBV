@@ -26,8 +26,8 @@ from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 
-sys.path.insert(0, os.path.dirname(__file__))
-from sceneCfg import BROVSceneCfg
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from envs.scene_cfg import BROVSceneCfg
 
 
 @configclass
@@ -70,7 +70,7 @@ class BROVTrajEnvCfg(DirectRLEnvCfg):
 
     # ── 수중 동역학 파라미터 (MARINEGYM 방식) ──────────────────────────────────
     # water_density/volume/coBM/hydro_coef는 여기서 관리하지 않음 — 전부
-    # ../robots/data/BROV2/brov2_heavy.yaml을 env.py가 런타임에 읽어온다.
+    # ../robots/data/BROV2/brov2_heavy.yaml을 traj_env.py가 런타임에 읽어온다.
     # CAD/유체계수가 바뀌면 그 YAML만 갱신할 것 (튜닝 근거는 brov2_spec.md §3 참조).
 
     # ── 보상 가중치 ─────────────────────────────────────────────────────────────

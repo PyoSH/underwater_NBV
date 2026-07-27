@@ -3,7 +3,7 @@ BROV2 6DOF 속도/자세 컨트롤러 환경 설정
 ==========================================
 DirectRLEnvCfg 서브클래스. Sim2Swim(arXiv:2512.08656) 방식 저수준 RL 환경 —
 경로 추종이 아니라 body-frame 속도(v_d^b) + 자세(q_d) 명령 추종만 학습한다.
-경로 추종은 이 환경 밖(3D LOS guidance, 추후 구현)에서 고전 제어로 처리한다.
+경로 추종은 이 환경 밖(3D LOS guidance, guidance/los_guidance.py)에서 고전 제어로 처리한다.
 
 관측 벡터 (16-dim)
 ------------------
@@ -16,7 +16,7 @@ z_q(3)      : q_e vector part 적분 상태
 행동 벡터 (6-dim)
 -----------------
 surge,sway,heave,roll,pitch,yaw 스케일 [-1, 1] — F_max로 스케일 후
-할당행렬 B의 pseudo-inverse로 8-thruster PWM에 할당한다 (hydrodynamics.py 참조).
+할당행렬 B의 pseudo-inverse로 8-thruster PWM에 할당한다 (robots/dynamics/brov2/thruster.py 참조).
 """
 
 import os
@@ -26,8 +26,8 @@ from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 
-sys.path.insert(0, os.path.dirname(__file__))
-from sceneCfg import BROVSceneCfg
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from envs.scene_cfg import BROVSceneCfg
 
 
 @configclass
@@ -51,7 +51,7 @@ class BROVVelEnvCfg(DirectRLEnvCfg):
     # ── 초기 수심 ───────────────────────────────────────────────────────────────
     starting_depth: float = 10.0   # 경로가 없어 경계에서 충분히 떨어진 곳에서 시작
 
-    # ── 액션 할당 (hydrodynamics.build_allocation_matrix + inverse_thrust) ──────
+    # ── 액션 할당 (robots.dynamics.brov2.thruster.build_allocation_matrix + inverse_thrust) ──
     # F_max — von Benzon et al. 2022 (JMSE 10,1898) Table 4 실측 최대추력값.
     # (surge, sway, heave, roll, pitch, yaw) = [N, N, N, N·m, N·m, N·m]
     f_max: tuple = (85.0, 85.0, 120.0, 26.0, 14.0, 22.0)

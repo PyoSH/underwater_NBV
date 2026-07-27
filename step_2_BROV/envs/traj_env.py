@@ -5,9 +5,9 @@ IsaacLab DirectRLEnv 기반.
 
 동역학
 ------
-MARINEGYM 방식 수중 유체역학 (hydrodynamics.py):
-  - BROV2ThrusterModel  : PWM → body-frame 추력/토크
-  - BROV2Hydrodynamics  : 부력 · 항력 · 추가질량 · Coriolis (Fossen NED 내부 계산)
+MARINEGYM 방식 수중 유체역학 (robots/dynamics/ — step_2/step_3 공유):
+  - robots.dynamics.brov2.thruster.BROV2ThrusterModel : PWM → body-frame 추력/토크
+  - robots.dynamics.fossen.Hydrodynamics               : 부력 · 항력 · 추가질량 · Coriolis (Fossen NED 내부 계산)
 
 궤적 추종
 ---------
@@ -23,7 +23,6 @@ import os
 from typing import Sequence
 
 import torch
-import yaml
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
@@ -31,9 +30,12 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab.utils.math import quat_apply, quat_conjugate
 import isaaclab.utils.math as math_utils
 
-sys.path.insert(0, os.path.dirname(__file__))
-from envCfg import BROVTrajEnvCfg
-from hydrodynamics import BROV2ThrusterModel, BROV2Hydrodynamics
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from envs.traj_env_cfg import BROVTrajEnvCfg
+from robots.dynamics.brov2.thruster import BROV2ThrusterModel
+from robots.dynamics.fossen import Hydrodynamics
+from robots.dynamics.brov2.params import load_brov2_yaml, coBM_vector_ned, thruster_pos_dir_ned
 
 # 추력 벡터 디버그 시각화용 (draw_lines(starts, ends, colors, widths), draw_points)
 from isaacsim.core.utils.extensions import enable_extension
@@ -54,43 +56,8 @@ _ARROWHEAD_MAX_LEN  = 0.03   # [m] 화살촉 길이 상한
 _COB_COLOR  = (0.0, 1.0, 1.0, 1.0)   # 시안
 _COB_SIZE   = 12.0
 
-# 로봇 고유 파라미터 YAML — PhysX가 모르는 값(부력/CB/유체계수/스러스터)의 정본.
-# brov2_spec.md §8 참조. mass/inertia/collision은 USD가 정본이라 여기 없음.
-_BROV2_YAML_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "robots", "data", "BROV2", "brov2_heavy.yaml"
-)
-
-
-def _load_brov2_yaml(yaml_path: str = _BROV2_YAML_PATH) -> dict:
-    """brov2_heavy.yaml 전체를 읽어서 dict로 반환한다.
-
-    CAD/유체계수가 바뀌면 이 YAML만 갱신하면 되고, 코드에 값을 중복 하드코딩하지 않는다.
-    """
-    with open(yaml_path) as f:
-        return yaml.safe_load(f)
-
-
-def _coBM_vector_ned(params: dict) -> tuple[float, float, float]:
-    """params['coBM'](Z-up body frame, COM 기준)을 SNAME/NED body frame
-    (X=전방,Y=우현,Z=하방)으로 변환해 반환한다.
-    """
-    v = params["coBM"]
-    return (v[0], -v[1], -v[2])  # Z-up -> SNAME/NED (T3, self-inverse)
-
-
-def _thruster_pos_dir_ned(params: dict) -> tuple[list, list]:
-    """params['thrusters']['list']의 position/axis(Z-up body frame, USD 정본의 미러)를
-    SNAME/NED body frame(X=전방,Y=우현,Z=하방)으로 변환해 (pos, dir) 리스트로 반환한다.
-
-    리스트 순서가 곧 T1~T8 순서 — BROV2ThrusterModel._POS/_DIR과 동일 인덱싱.
-    """
-    pos, dir_ = [], []
-    for t in params["thrusters"]["list"]:
-        px, py, pz = t["position"]
-        ax, ay, az = t["axis"]
-        pos.append([px, -py, -pz])   # Z-up -> SNAME/NED (T3, self-inverse)
-        dir_.append([ax, -ay, -az])
-    return pos, dir_
+# 로봇 고유 파라미터 YAML 로더 — robots/dynamics/brov2/params.py로 승격됨(2026-07).
+# step_2_BROV뿐 아니라 향후 step_3도 재사용하므로 traj_env.py엔 더 이상 안 둠.
 
 
 class BROVTrajEnv(DirectRLEnv):
@@ -104,16 +71,16 @@ class BROVTrajEnv(DirectRLEnv):
         self._robot: Articulation = self.scene.articulations["robot"]
 
         phys_dt = cfg.sim.dt
-        yaml_params = _load_brov2_yaml()
+        yaml_params = load_brov2_yaml()
         hydro_coef  = yaml_params["hydro_coef"]
-        cob_vector  = _coBM_vector_ned(yaml_params)
-        thr_pos, thr_dir = _thruster_pos_dir_ned(yaml_params)
+        cob_vector  = coBM_vector_ned(yaml_params)
+        thr_pos, thr_dir = thruster_pos_dir_ned(yaml_params)
         self._thruster = BROV2ThrusterModel(
             self.num_envs, phys_dt, self.device, pos=thr_pos, dir=thr_dir,
         )
         self._volume        = yaml_params["volume"]
         self._water_density = yaml_params["environment"]["fluid_density"]
-        self._hydro    = BROV2Hydrodynamics(
+        self._hydro    = Hydrodynamics(
             self.num_envs, phys_dt, self.device,
             volume            = self._volume,
             cob_vector        = cob_vector,
@@ -205,7 +172,7 @@ class BROVTrajEnv(DirectRLEnv):
 
         base_link의 현재 world pose(위치+회전)만 쓰고, 스러스터가 실제 rigid body/joint로
         존재하는지 여부와는 완전히 무관하다 — 위치/방향은 이미 알고 있는 상수(_POS/_DIR)이고,
-        크기만 매 스텝 hydrodynamics.py가 계산한 실제 추력값을 그대로 사용한다.
+        크기만 매 스텝 robots/dynamics/brov2/thruster.py가 계산한 실제 추력값을 그대로 사용한다.
         """
         root_pos  = self._robot.data.root_pos_w                 # (N,3)
         root_quat = self._robot.data.root_quat_w                # (N,4)

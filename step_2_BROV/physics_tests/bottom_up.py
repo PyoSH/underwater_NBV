@@ -1,13 +1,15 @@
 import os
+import sys
 import torch
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from hydrodynamics import BROV2ThrusterModel
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from robots.dynamics.brov2.thruster import BROV2ThrusterModel
 
-_PLOT_DIR = os.path.join(os.path.dirname(__file__), "plots")
+_PLOT_DIR = os.path.join(os.path.dirname(__file__), "..", "plots")
 
 # BROV2_Heavy 질량/관성텐서 (Z-up body frame, brov2_custom_physics.usda에 실제 적용된
 # 값과 동일 — brov2_spec.md §2, principalAxes=identity라 비대각 성분 없음).
@@ -264,7 +266,7 @@ def test_straight_line(env, thrust: float = 0.5, duration_s: float = 3.0,
 
 
 # ── 검증 함수 3: 회전 (yaw/roll/pitch) ────────────────────────────────────────
-# 명령 조합은 hydrodynamics.py의 실제 _POS/_DIR(SNAME frame)로 thruster allocation을
+# 명령 조합은 robots/dynamics/brov2/thruster.py의 실제 _POS/_DIR(SNAME frame)로 thruster allocation을
 # 풀어서 구한 값 (최소자승, 교차축 성분 ~1e-16 수준으로 확인됨). T1~T4는 yaw만,
 # T5~T8은 roll/pitch만 담당하도록 그룹이 이미 분리되어 있어 두 그룹을 독립적으로 풀었음.
 _ROTATION_CMDS = {

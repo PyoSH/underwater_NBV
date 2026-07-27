@@ -35,6 +35,10 @@ class BROVVelPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     save_interval = 50
     experiment_name = "brov_vel"
     empirical_normalization = False
+    # wandb 계정(entity)은 agent_cfg가 아니라 WANDB_USERNAME 환경변수로 지정됨
+    # (rsl_rl.utils.wandb_utils.WandbSummaryWriter가 os.environ["WANDB_USERNAME"]을 읽음).
+    logger = "tensorboard"
+    wandb_project = "brov_vel"
     # 환경 관측이 "policy" 그룹 하나뿐이라 actor/critic 둘 다 거기서 읽는다.
     obs_groups = {"actor": ["policy"], "critic": ["policy"]}
 

@@ -5,17 +5,17 @@ IsaacLab DirectRLEnv 기반. Sim2Swim(arXiv:2512.08656) 저수준 컨트롤러 �
 
 계층 구조
 ---------
-[Waypoints] → 3D LOS Guidance(고전 제어, 추후 구현) → v_d^b, q_d
+[Waypoints] → 3D LOS Guidance(고전 제어, guidance/los_guidance.py) → v_d^b, q_d
                                                             │
                                                     BROVVelEnv(RL, 이 파일)
                                                             │  6-dim wrench
                                                     B_pinv 할당 → 8-thruster PWM
                                                             │
-                                            hydrodynamics.py (기존, 변경 없음)
+                                    robots/dynamics/ (step_2/step_3 공유 물리, 변경 없음)
 
 이 환경은 "경로 추종"을 학습하지 않는다 — body-frame 속도(v_d^b) + 자세(q_d)
 명령을 얼마나 잘 추종하는지만 학습한다. 경로 추종은 정책 고정 후 LOS guidance
-레이어가 담당 (env.py의 BROVTrajEnv는 end-to-end 대안으로 별도 유지).
+레이어가 담당 (envs/traj_env.py의 BROVTrajEnv는 end-to-end 대안으로 별도 유지).
 """
 
 from __future__ import annotations
@@ -36,18 +36,20 @@ from isaaclab.markers import (
     BLUE_ARROW_X_MARKER_CFG,
 )
 
-# 추력 벡터 디버그 시각화용 (env.py의 BROVTrajEnv._visualize_debug_overlays()와 동일 방식)
+# 추력 벡터 디버그 시각화용 (envs/traj_env.py의 BROVTrajEnv._visualize_debug_overlays()와 동일 방식)
 from isaacsim.core.utils.extensions import enable_extension
 enable_extension("isaacsim.util.debug_draw")
 from isaacsim.util.debug_draw import _debug_draw
 
-sys.path.insert(0, os.path.dirname(__file__))
-from velEnvCfg import BROVVelEnvCfg
-from hydrodynamics import BROV2ThrusterModel, BROV2Hydrodynamics, build_allocation_matrix
-from env import _load_brov2_yaml, _coBM_vector_ned, _thruster_pos_dir_ned  # 단일 정본 재사용
-from los_guidance import _heading_from_direction  # 방향벡터 → 자세 쿼터니언 (목표속도 화살표용)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from envs.vel_env_cfg import BROVVelEnvCfg
+from robots.dynamics.brov2.thruster import BROV2ThrusterModel, build_allocation_matrix
+from robots.dynamics.fossen import Hydrodynamics
+from robots.dynamics.brov2.params import load_brov2_yaml, coBM_vector_ned, thruster_pos_dir_ned
+from guidance.los_guidance import _heading_from_direction  # 방향벡터 → 자세 쿼터니언 (목표속도 화살표용)
 
-_THRUST_ARROW_SCALE = 0.02   # [m/N] 화살표 길이 = 추력[N] * 이 값 (env.py와 동일)
+_THRUST_ARROW_SCALE = 0.02   # [m/N] 화살표 길이 = 추력[N] * 이 값 (traj_env.py와 동일)
 _THRUST_ARROW_COLOR = (1.0, 0.35, 0.0, 1.0)   # RGBA, 주황
 _THRUST_ARROW_WIDTH = 3.0
 _ARROWHEAD_FRACTION = 0.25
@@ -78,15 +80,15 @@ class BROVVelEnv(DirectRLEnv):
         self._robot: Articulation = self.scene.articulations["robot"]
         self._policy_dt = cfg.sim.dt * cfg.decimation
 
-        yaml_params = _load_brov2_yaml()
+        yaml_params = load_brov2_yaml()
         hydro_coef  = yaml_params["hydro_coef"]
-        cob_vector  = _coBM_vector_ned(yaml_params)
-        thr_pos, thr_dir = _thruster_pos_dir_ned(yaml_params)
+        cob_vector  = coBM_vector_ned(yaml_params)
+        thr_pos, thr_dir = thruster_pos_dir_ned(yaml_params)
 
         self._thruster = BROV2ThrusterModel(
             self.num_envs, cfg.sim.dt, self.device, pos=thr_pos, dir=thr_dir,
         )
-        self._hydro = BROV2Hydrodynamics(
+        self._hydro = Hydrodynamics(
             self.num_envs, cfg.sim.dt, self.device,
             volume            = yaml_params["volume"],
             cob_vector        = cob_vector,
@@ -116,7 +118,7 @@ class BROVVelEnv(DirectRLEnv):
         self._actions  = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
 
         # 추력 벡터 디버그 시각화 — 스러스터 위치/방향(SNAME) → Z-up body frame으로 미리 변환
-        # (env.py의 BROVTrajEnv와 동일 방식 — 실제 생성된 self._thruster 인스턴스 값 사용).
+        # (envs/traj_env.py의 BROVTrajEnv와 동일 방식 — 실제 생성된 self._thruster 인스턴스 값 사용).
         t3 = torch.tensor([1., -1., -1.], device=self.device)
         self._thruster_pos_zup = self._thruster._pos * t3   # (8,3)
         self._thruster_dir_zup = self._thruster._dir * t3   # (8,3)
@@ -156,10 +158,10 @@ class BROVVelEnv(DirectRLEnv):
     def _visualize_thrust_arrows(self) -> None:
         """스러스터 8개의 실제 추력을 world-space 화살표(화살촉 포함)로 그린다.
 
-        `env.py`의 `BROVTrajEnv._visualize_debug_overlays()`에서 추력 화살표 부분만
-        이식 — 위치/방향은 이미 아는 상수(`_thruster_pos_zup`/`_dir_zup`), 크기만 매
-        스텝 `hydrodynamics.py`가 계산한 실제 추력값을 그대로 쓴다(COB 점 표시는
-        `env.py` 쪽에만 있음 — velEnv는 CoB가 env별로 랜덤화돼 있어 여기서는 생략).
+        `envs/traj_env.py`의 `BROVTrajEnv._visualize_debug_overlays()`에서 추력 화살표
+        부분만 이식 — 위치/방향은 이미 아는 상수(`_thruster_pos_zup`/`_dir_zup`), 크기만 매
+        스텝 `robots/dynamics/brov2/thruster.py`가 계산한 실제 추력값을 그대로 쓴다(COB 점 표시는
+        `traj_env.py` 쪽에만 있음 — velEnv는 CoB가 env별로 랜덤화돼 있어 여기서는 생략).
         """
         root_pos  = self._robot.data.root_pos_w                 # (N,3)
         root_quat = self._robot.data.root_quat_w                # (N,4)
