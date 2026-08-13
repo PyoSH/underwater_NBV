@@ -15,7 +15,6 @@ compute() 출력: Z-up body frame (IsaacLab)
 """
 
 from __future__ import annotations
-
 import torch
 
 # 좌표계 변환 상수 (Z-up body ↔ NED body) — fossen.py와 동일 정의, 작은 상수라 중복 유지
@@ -219,6 +218,8 @@ class BROV2ThrusterModel:
             rpm > 0, (rpm - 345.21) / 3659.9,
             torch.where(rpm < 0, (rpm + 433.50) / 3494.4, torch.zeros_like(rpm)),
         )
+
+        # print(f"inverse_thrust: {pwm}")
         return pwm.clamp(-1.0, 1.0)
 
     def reset(self, env_ids: torch.Tensor) -> None:

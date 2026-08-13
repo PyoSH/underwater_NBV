@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# colcon 생성물. 소스는 ros2_ws/src 아래에만 둔다.
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/

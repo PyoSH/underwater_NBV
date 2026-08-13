@@ -8,9 +8,7 @@ BROV2 파라미터 로더 — deploy/vendor/brov2_heavy.yaml의 단일 진입점
 CAD/유체계수가 바뀌면 `brov2_heavy.yaml`만 갱신하면 되고, 코드에 값을
 중복 하드코딩하지 않는다 — mass/inertia/collision은 USD가 정본이라 여기 없음.
 """
-
 from __future__ import annotations
-
 import os
 
 import yaml
