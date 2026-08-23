@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# macOS에서 XQuartz를 준비하고 brov-dev 컨테이너 셸에 진입한다.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+XHOST=/opt/X11/bin/xhost
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+    echo "이 스크립트는 Docker Desktop for Mac 전용입니다." >&2
+    exit 1
+fi
+
+if [[ ! -x "${XHOST}" ]]; then
+    echo "XQuartz가 설치되어 있지 않습니다: https://www.xquartz.org/" >&2
+    exit 1
+fi
+
+# XQuartz가 TCP 6000(display :0)을 수신하도록 설정한다. GUI의
+# 'Allow connections from network clients'와 같은 설정이다.
+current_nolisten="$(defaults read org.xquartz.X11 nolisten_tcp 2>/dev/null || true)"
+if [[ "${current_nolisten}" != "0" ]]; then
+    defaults write org.xquartz.X11 nolisten_tcp -bool false
+    killall XQuartz >/dev/null 2>&1 || true
+fi
+
+open -a XQuartz
+
+# XQuartz 초기화가 끝날 때까지 최대 약 10초 기다린다.
+x11_ready=false
+for _ in {1..40}; do
+    if DISPLAY=:0 "${XHOST}" >/dev/null 2>&1; then
+        x11_ready=true
+        break
+    fi
+    sleep 0.25
+done
+
+if [[ "${x11_ready}" != "true" ]]; then
+    echo "XQuartz display :0이 준비되지 않았습니다." >&2
+    echo "macOS 로그아웃/로그인 후 이 명령을 다시 실행하세요." >&2
+    exit 1
+fi
+
+cleanup() {
+    DISPLAY=:0 "${XHOST}" -localhost >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
+DISPLAY=:0 "${XHOST}" +localhost >/dev/null
+
+cd "${PROJECT_DIR}"
+docker compose up -d
+echo "X11 준비 완료 — brov-dev에 진입합니다. rqt 또는 rviz2를 실행할 수 있습니다."
+if (( $# > 0 )); then
+    docker compose exec brov bash -lc \
+        'source /workspace/deploy/docker/ros_env.sh && exec "$@"' -- "$@"
+else
+    # 이미지 재빌드 여부와 무관하게 현재 bind-mounted overlay를 먼저 로드한다.
+    docker compose exec brov bash -lc \
+        'source /workspace/deploy/docker/ros_env.sh && exec bash -i'
+fi

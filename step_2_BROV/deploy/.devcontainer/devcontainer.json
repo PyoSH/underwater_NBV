@@ -1,0 +1,23 @@
+{
+  "name": "BROV ROS 2 Humble",
+  "dockerComposeFile": "../compose.yaml",
+  "service": "brov",
+  "workspaceFolder": "/workspace/deploy",
+  "shutdownAction": "stopCompose",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-iot.vscode-ros"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3",
+        "python.analysis.extraPaths": [
+          "/workspace"
+        ],
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  },
+  "postCreateCommand": "bash docker/build_ros_workspace.sh"
+}

@@ -28,6 +28,11 @@ def quat_conjugate(q: torch.Tensor) -> torch.Tensor:
     return q * torch.tensor([1.0, -1.0, -1.0, -1.0], device=q.device, dtype=q.dtype)
 
 
+def quat_unique(q: torch.Tensor) -> torch.Tensor:
+    """동일 회전 q/-q 중 scalar(w) 성분이 음수가 아닌 표현을 반환한다."""
+    return torch.where((q[..., 0:1] < 0.0), -q, q)
+
+
 def quat_apply(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     """쿼터니언 q로 벡터 v를 회전 (q ⊗ [0,v] ⊗ q⁻¹의 벡터부, 전개식으로 직접 계산)."""
     q_w = q[..., 0:1]
@@ -46,6 +51,12 @@ def quat_from_euler_xyz(roll: torch.Tensor, pitch: torch.Tensor, yaw: torch.Tens
     y = cr * sp * cy + sr * cp * sy
     z = cr * cp * sy - sr * sp * cy
     return torch.stack([w, x, y, z], dim=-1)
+
+
+def yaw_from_quat(q: torch.Tensor) -> torch.Tensor:
+    """[w,x,y,z] 쿼터니언의 ZYX yaw를 반환한다."""
+    w, x, y, z = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
+    return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
 def sample_uniform(lo: float, hi: float, shape: tuple, device) -> torch.Tensor:

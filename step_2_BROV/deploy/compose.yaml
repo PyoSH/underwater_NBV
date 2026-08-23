@@ -1,0 +1,38 @@
+services:
+  brov:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: brov-ros2-humble:arm64
+    platform: linux/arm64
+    container_name: brov-dev
+    # Docker Desktop Settings > Resources > Network에서
+    # "Enable host networking"을 활성화해야 한다. BlueOS가 tether의 Mac IP로
+    # 보내는 MAVLink/영상 UDP를 Docker userland port proxy 없이 직접 수신한다.
+    network_mode: host
+    cap_add:
+      # GStreamer udpsrc가 2 MiB SO_RCVBUF를 설정해 H264 RTP burst를 흡수한다.
+      - NET_ADMIN
+    init: true
+    stdin_open: true
+    tty: true
+    working_dir: /workspace/deploy
+    command: ["sleep", "infinity"]
+    environment:
+      AMENT_PREFIX_PATH: /opt/ros/humble
+      CMAKE_PREFIX_PATH: /opt/ros/humble
+      LD_LIBRARY_PATH: /opt/ros/humble/lib:/opt/ros/humble/lib/aarch64-linux-gnu
+      PATH: /opt/ros/humble/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      PYTHONPATH: /workspace:/opt/ros/humble/lib/python3.10/site-packages:/opt/ros/humble/local/lib/python3.10/dist-packages
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
+      ROS_LOCALHOST_ONLY: "0"
+      DISPLAY: host.docker.internal:0
+      QT_X11_NO_MITSHM: "1"
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    volumes:
+      - .:/workspace/deploy
+      - brov-pip-cache:/root/.cache/pip
+    stop_grace_period: 10s
+
+volumes:
+  brov-pip-cache:

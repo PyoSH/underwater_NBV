@@ -11,6 +11,8 @@ _POS, _DIR : SNAME b-frame (X=전방, Y=우현, Z=하방) — 직접 정의
 compute() 출력: Z-up body frame (IsaacLab)
 """
 
+from __future__ import annotations
+
 import torch
 
 # 좌표계 변환 상수 (Z-up body ↔ NED body) — fossen.py와 동일 정의, 작은 상수라 중복 유지

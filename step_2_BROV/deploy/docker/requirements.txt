@@ -1,0 +1,5 @@
+# Runtime-only dependencies. IsaacLab/rsl_rl are needed only by export_policy.py
+# and intentionally do not belong in the real-robot deployment image.
+numpy>=1.23,<2
+PyYAML>=6,<7
+pymavlink>=2.4.40,<3
