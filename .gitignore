@@ -17,4 +17,8 @@ __pycache__/
 /step_2_BROV/videos
 /step_2_BROV/logs/*
 /step_2_BROV/wandb/*
+/step_2_BROV/stage2_results
+/step_2_BROV/stage3_results
+/step_2_BROV/deploy.zip
+/case_a_fault_20260814_170757
 .idea

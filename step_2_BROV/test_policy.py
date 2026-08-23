@@ -15,11 +15,11 @@ Sim2Swim(arXiv:2512.08656) 논문의 실물 검증 방법론을 시뮬레이션�
   (b) square_ballast        : 사각 웨이포인트 4개, 자세는 항상 수평(0,0,0) 유지,
                               600g 밸러스트로 순부력을 양성→음성 전환
                               ("changes vehicle's buoyancy from positive to
-                              negative"). **근사**: 실제 PhysX 질량은 안 바꾸고
-                              (mass 랜덤화는 2단계 미구현) 동일한 순부력 결손을
-                              내는 volume 감소로 대체 — 부력 역전 효과는 같지만
-                              밸러스트의 관성/무게중심 이동까지 정확히 재현하진
-                              않음.
+                              negative"). **근사**: Stage-3 학습에는 mass DR가
+                              있지만 이 legacy 평가 scenario는 실제 PhysX 질량을
+                              늘리지 않고 동일한 순부력 결손을 내는 volume 감소로
+                              대체한다. 부력 역전 효과는 같지만 밸러스트의 관성/
+                              무게중심 이동까지 정확히 재현하진 않는다.
   (c) square_random_attitude: 사각 웨이포인트 4개, 도달할 때마다 자세 목표를
                               roll,pitch~U(-π/2,π/2), yaw~U(-π,π)에서 새로 샘플
                               ("setpoints randomly generated and changed at
@@ -30,12 +30,17 @@ Sim2Swim(arXiv:2512.08656) 논문의 실물 검증 방법론을 시뮬레이션�
 
 사용법
 ------
-python test_policy.py --checkpoint logs/brov_vel/model_299.pt --test straight_line [--headless]
-python test_policy.py --checkpoint logs/brov_vel/model_299.pt --test square_ballast --duration 60 --headless
-python test_policy.py --checkpoint logs/brov_vel/model_299.pt --test square_random_attitude --record_video --headless
+python test_policy.py --checkpoint logs/brov_vel/model_299.pt --profile legacy_exact \
+  --allow_unverified_checkpoint --test straight_line [--headless]
+python test_policy.py --checkpoint logs/brov_vel/model_299.pt --profile legacy_exact \
+  --allow_unverified_checkpoint --test square_ballast --duration 60 --headless
+python test_policy.py --checkpoint logs/brov_vel/model_299.pt --profile legacy_exact \
+  --allow_unverified_checkpoint --test square_random_attitude --record_video --headless
 """
 
 import argparse
+import hashlib
+import json
 import os
 import sys
 
@@ -44,18 +49,55 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="BROV2 속도 컨트롤러 + LOS 유도 통합 검증")
 parser.add_argument("--checkpoint", type=str, required=True, help="RSL-RL model_*.pt 체크포인트 경로")
 parser.add_argument(
+    "--profile",
+    choices=["legacy_exact", "paper_ref_v1", "deploy_v2", "deploy_v3", "deploy_v4", "deploy_v5", "deploy_v6", "deploy_v6b"],
+    required=True,
+    help="checkpoint가 학습된 observation/action contract (혼용 방지용 필수)",
+)
+parser.add_argument(
+    "--eval_action_abs_limit",
+    type=float,
+    nargs=6,
+    default=None,
+    metavar=("SURGE", "SWAY", "HEAVE", "ROLL", "PITCH", "YAW"),
+    help=(
+        "--profile와 무관하게 액션 envelope 클램프를 강제 적용 (deploy_v6 도입 전 "
+        "체크포인트를 실기 envelope 하에서 재현/사전점검할 때 사용). "
+        "미지정 시 --profile이 정한 그대로(대개 클램프 없음)."
+    ),
+)
+parser.add_argument(
+    "--allow_unverified_checkpoint",
+    action="store_true",
+    help="manifest가 없는 legacy checkpoint를 의도적으로 평가(새 artifact에는 금지)",
+)
+parser.add_argument(
     "--test",
-    choices=["straight_line", "square_ballast", "square_random_attitude"],
+    choices=[
+        "velocity_hold",
+        "straight_line",
+        "square_ballast",
+        "square_random_attitude",
+    ],
     default="straight_line",
     help="Sim2Swim 논문 Fig.4 (a)/(b)/(c) 재현",
 )
 parser.add_argument("--duration", type=float, default=60.0,
                      help="[s] — square 경로는 한 바퀴 도는 데 시간이 걸려 straight_line보다 넉넉히")
+parser.add_argument("--seed", type=int, default=42, help="nominal evaluation seed")
 parser.add_argument("--cruise_speed", type=float, default=0.5,
                      help="[m/s] LOS 순항속도 — 학습 시 Vd(=0.5)와 맞추는 게 기본")
 parser.add_argument("--record_video", action="store_true",
                      help="경로 전체가 보이는 고정 조망 카메라로 mp4 기록 (거리는 경로 크기에서 자동 계산)")
 parser.add_argument("--video_path", type=str, default=None)
+parser.add_argument(
+    "--metrics_json",
+    type=str,
+    default=None,
+    help="machine-readable validation metrics path (default: plots/policy_eval_<test>_<speed>.json)",
+)
+parser.add_argument("--debug_vis", action="store_true",
+                     help="현재/목표 자세·속도와 thruster 화살표 표시 (기본 off; 성능 비용 큼)")
 parser.add_argument("--cam_eye", type=float, nargs=3, default=None,
                      help="미지정 시 웨이포인트 경로 크기로부터 자동 계산 (env-local 절대 좌표)")
 parser.add_argument("--cam_lookat", type=float, nargs=3, default=None,
@@ -84,11 +126,12 @@ from matplotlib.ticker import MultipleLocator
 from rsl_rl.runners import OnPolicyRunner
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 
-from envs.vel_env_cfg import BROVVelEnvCfg
+from envs.vel_env_cfg import BROVVelEnvCfg, apply_training_profile
 from envs.vel_env import BROVVelEnv
 from guidance.los_guidance import LOSGuidance
 from agents.rsl_rl_ppo_cfg import BROVVelPPORunnerCfg
 from robots.dynamics.brov2.params import load_brov2_yaml   # nominal volume 조회용 — 값 재사용, 하드코딩 안 함
+from robots.dynamics.brov2.mass_randomization import randomize_articulation_mass
 
 _PLOT_DIR = os.path.join(os.path.dirname(__file__), "plots")
 
@@ -105,6 +148,53 @@ _BALLAST_LATERAL_OFFSET = 0.05   # [m] port(−Y, SNAME) 방향 근사 오프셋
 _FORWARD_ARROW_LEN = 0.2   # [m] 3D 플롯의 forward direction 화살표 길이 — 경로 크기와 무관하게 작게 고정
 
 _STARTING_DEPTH = 5.0   # [m] world Z — 웨이포인트 Z와 반드시 맞춰야 함 (아래 _build_waypoints 참조)
+
+
+def _sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _verify_checkpoint_contract(checkpoint: str, profile: str) -> dict:
+    """Fail closed on profile/hash mismatches; legacy requires explicit opt-in."""
+
+    checkpoint_abs = os.path.abspath(checkpoint)
+    manifest_path = os.path.join(os.path.dirname(checkpoint_abs), "artifact_manifest.json")
+    if not os.path.isfile(manifest_path):
+        if not args.allow_unverified_checkpoint:
+            raise RuntimeError(
+                f"checkpoint manifest missing: {manifest_path}; use "
+                "--allow_unverified_checkpoint only for a named legacy artifact"
+            )
+        return {
+            "verified": False,
+            "checkpoint_sha256": _sha256(checkpoint_abs),
+            "manifest_path": None,
+        }
+
+    with open(manifest_path, encoding="utf-8") as stream:
+        manifest = json.load(stream)
+    if manifest.get("profile") != profile:
+        raise RuntimeError(
+            f"checkpoint profile mismatch: manifest={manifest.get('profile')!r}, "
+            f"requested={profile!r}"
+        )
+    actual_sha = _sha256(checkpoint_abs)
+    recorded_checkpoint = manifest.get("checkpoint")
+    if recorded_checkpoint and os.path.basename(recorded_checkpoint) == os.path.basename(checkpoint_abs):
+        expected_sha = manifest.get("checkpoint_sha256")
+        if expected_sha and expected_sha != actual_sha:
+            raise RuntimeError("checkpoint SHA256 does not match its artifact manifest")
+    return {
+        "verified": True,
+        "checkpoint_sha256": actual_sha,
+        "manifest_path": manifest_path,
+        "manifest_sha256": _sha256(manifest_path),
+        "manifest": manifest,
+    }
 
 
 def _quat_to_euler_zyx_deg(quat: torch.Tensor) -> torch.Tensor:
@@ -134,7 +224,9 @@ def _build_waypoints(test: str, device) -> torch.Tensor:
     square_*     : 4점 사각 경로(한 변 5m), 마찬가지로 순환해서 계속 돎 (Trial(b)/(c)).
     """
     z = _STARTING_DEPTH
-    if test == "straight_line":
+    if test == "velocity_hold":
+        wps = torch.tensor([[0.0, 0.0, z]], device=device)
+    elif test == "straight_line":
         wps = torch.tensor([[0.0, 0.0, z], [5.0, 0.0, z]], device=device)
     elif test in ("square_ballast", "square_random_attitude"):
         wps = torch.tensor([
@@ -146,6 +238,24 @@ def _build_waypoints(test: str, device) -> torch.Tensor:
     else:
         raise ValueError(f"Unknown test: {test}")
     return wps.unsqueeze(0)   # (1, N, 3)
+
+
+class _VelocityHoldGuidance:
+    """Minimal zero-velocity, level-attitude validation command source."""
+
+    def __init__(self, num_envs: int, device) -> None:
+        self._velocity = torch.zeros(num_envs, 3, device=device)
+        self._attitude = torch.zeros(num_envs, 4, device=device)
+        self._attitude[:, 0] = 1.0
+        self._wp_idx = torch.zeros(num_envs, dtype=torch.long, device=device)
+        self._reach = 0.15
+
+    def compute(self, pos_env: torch.Tensor, root_quat_w: torch.Tensor):
+        del pos_env, root_quat_w
+        return self._velocity, self._attitude
+
+    def reset(self, env_ids: torch.Tensor) -> None:
+        self._wp_idx[env_ids] = 0
 
 
 def _compute_overview_camera(waypoints_np: np.ndarray) -> tuple[tuple, tuple]:
@@ -182,6 +292,12 @@ def _apply_physics_scenario(env: "BROVVelEnv", test: str) -> None:
     env_ids = torch.zeros(1, dtype=torch.long, device=env.device)
     nominal_volume = load_brov2_yaml()["volume"]
 
+    # reset() applies training DR; evaluation must start from the exact nominal
+    # mass/inertia unless the scenario explicitly asks for ballast.
+    randomize_articulation_mass(
+        env._robot, env_ids, relative_range=(1.0, 1.0)
+    )
+
     if test == "square_ballast":
         deficit_volume = _BALLAST_MASS_KG / env._hydro._water_density
         volume = torch.full((1,), nominal_volume - deficit_volume, device=env.device)
@@ -210,7 +326,14 @@ def _forward_dir_from_quat(quat: np.ndarray) -> np.ndarray:
     ], axis=-1)
 
 
-def _plot_results(log: dict, test_name: str, waypoints: np.ndarray, reach_threshold: float) -> None:
+def _plot_results(
+    log: dict,
+    test_name: str,
+    waypoints: np.ndarray,
+    reach_threshold: float,
+    *,
+    artifact_label: str,
+) -> None:
     """Sim2Swim 논문 Fig.4 레이아웃 재현: 위 4단(u/v/w/자세, 실선=실제·점선=목표,
     surge-roll=빨강/sway-pitch=초록/heave-yaw=파랑 색 규칙까지 동일) + 아래 3D
     궤적(Position/Waypoints/Radius of acceptance/Forward direction, 시작=초록·끝=빨강).
@@ -284,7 +407,7 @@ def _plot_results(log: dict, test_name: str, waypoints: np.ndarray, reach_thresh
     ax3d.legend(loc="upper left", fontsize=7)
 
     fig.suptitle(f"BROVVelEnv + LOSGuidance — {test_name}")
-    save_path = os.path.join(_PLOT_DIR, f"policy_eval_{test_name}.png")
+    save_path = os.path.join(_PLOT_DIR, f"policy_eval_{artifact_label}.png")
     fig.savefig(save_path, dpi=120)
     plt.close(fig)
     print(f"[INFO] 결과 플롯 저장: {save_path}")
@@ -308,14 +431,26 @@ def _save_video(frames: list, cfg) -> None:
 
 
 def main() -> None:
-    env_cfg = BROVVelEnvCfg()
+    checkpoint_contract = _verify_checkpoint_contract(args.checkpoint, args.profile)
+    env_cfg = apply_training_profile(BROVVelEnvCfg(), args.profile)
+    env_cfg.seed = args.seed
     env_cfg.scene.num_envs = 1
+    env_cfg.debug_vis = args.debug_vis
     env_cfg.episode_length_s = args.duration + 5.0   # 테스트 도중 timeout으로 리셋되지 않게 여유
     env_cfg.max_bound = 30.0                           # 직선 경로가 학습용 경계보다 넓으니 완화
     # 웨이포인트 Z와 시작 높이를 맞춰야 함 — 안 맞으면 첫 순간부터 큰 수직 이동을 하게 됨
     # (실제로 이 불일치로 극초반 텀블링 발생을 확인함 — plots/policy_eval_square_ballast.png).
     # _build_waypoints()도 동일하게 Z=_STARTING_DEPTH를 쓰도록 맞춤.
     env_cfg.starting_depth = _STARTING_DEPTH
+
+    if args.eval_action_abs_limit is not None:
+        env_cfg.enable_action_envelope_clamp = True
+        env_cfg.enable_action_envelope_curriculum = False
+        env_cfg.deploy_v6_action_abs_limit = tuple(args.eval_action_abs_limit)
+        print(
+            "[INFO] action envelope 강제 클램프: "
+            f"{env_cfg.deploy_v6_action_abs_limit} (profile={args.profile})"
+        )
 
     render_mode = "rgb_array" if args.record_video else None
     if args.record_video:
@@ -333,10 +468,15 @@ def main() -> None:
     env = BROVVelEnv(cfg=env_cfg, render_mode=render_mode)
 
     waypoints = _build_waypoints(args.test, env.device)
-    los = LOSGuidance(
-        waypoints, env.device,
-        cruise_speed=args.cruise_speed, heading_mode=_HEADING_MODE[args.test],
-    )
+    if args.test == "velocity_hold":
+        los = _VelocityHoldGuidance(env.num_envs, env.device)
+    else:
+        los = LOSGuidance(
+            waypoints,
+            env.device,
+            cruise_speed=args.cruise_speed,
+            heading_mode=_HEADING_MODE[args.test],
+        )
     env.attach_guidance(los)
 
     # ── 정책 로드 (train.py와 동일 API, 이미 검증됨) ──
@@ -353,7 +493,7 @@ def main() -> None:
     frames: list = []
     log = {k: [] for k in (
         "t", "pos", "quat", "euler_deg", "v_actual", "v_desired", "q_desired_euler",
-        "action_mag", "reset", "wp_idx",
+        "action", "action_mag", "force_requested", "force_limited", "reset", "wp_idx",
     )}
 
     obs_dict, _ = env.reset()
@@ -377,7 +517,10 @@ def main() -> None:
             log["v_actual"].append(env._robot.data.root_lin_vel_b[0].cpu().tolist())
             log["v_desired"].append(env._v_d_b[0].cpu().tolist())
             log["q_desired_euler"].append(_quat_to_euler_zyx_deg(env._q_d[0]).cpu().tolist())
+            log["action"].append(env._actions[0].cpu().tolist())
             log["action_mag"].append(float(env._actions[0].abs().mean()))
+            log["force_requested"].append(env._force_requested[0].cpu().tolist())
+            log["force_limited"].append(env._force_limited[0].cpu().tolist())
             log["reset"].append(did_reset)
             log["wp_idx"].append(int(los._wp_idx[0]))
 
@@ -407,7 +550,142 @@ def main() -> None:
     print(f"  중간 리셋 발생 횟수(out_of_bounds/timeout): {reset_count} / {num_steps} step")
     print(f"  waypoint 전환 횟수: {len(switch_steps)}, 전환 시각[s]: {t_arr[switch_steps].round(2).tolist()}")
 
-    _plot_results(log, args.test, wp_world, reach_threshold)
+    v_act = np.asarray(log["v_actual"], dtype=np.float64)
+    v_des = np.asarray(log["v_desired"], dtype=np.float64)
+    action = np.asarray(log["action"], dtype=np.float64)
+    force_requested = np.asarray(log["force_requested"], dtype=np.float64)
+    force_limited = np.asarray(log["force_limited"], dtype=np.float64)
+    error = v_act - v_des
+    vector_rmse = float(np.sqrt(np.mean(np.sum(error * error, axis=1))))
+    desired_norm = np.linalg.norm(v_des, axis=1)
+    moving = desired_norm > 1e-6
+    if moving.any():
+        direction = v_des[moving] / desired_norm[moving, None]
+        parallel = np.sum(v_act[moving] * direction, axis=1)
+        cross = v_act[moving] - parallel[:, None] * direction
+        v_parallel_mean = float(parallel.mean())
+        cross_speed_rms = float(np.sqrt(np.mean(np.sum(cross * cross, axis=1))))
+    else:
+        v_parallel_mean = 0.0
+        cross_speed_rms = float(np.sqrt(np.mean(np.sum(v_act * v_act, axis=1))))
+
+    at_bound = np.abs(action) >= 0.99
+    opposite_bound_flip = (
+        (action[1:] * action[:-1] < 0.0)
+        & at_bound[1:]
+        & at_bound[:-1]
+    )
+    force_clamped = np.abs(force_requested - force_limited) > 1e-5
+    transition_exclusion_s = 1.0
+    steady = t_arr >= transition_exclusion_s
+    for switch_step in switch_steps:
+        steady &= np.abs(t_arr - t_arr[switch_step]) > transition_exclusion_s
+    steady_moving = steady & moving
+
+    def _tracking_window(mask: np.ndarray) -> dict:
+        if not mask.any():
+            return {
+                "sample_count": 0,
+                "vector_velocity_rmse_mps": None,
+                "v_parallel_mean_mps": None,
+                "cross_speed_rms_mps": None,
+            }
+        window_error = error[mask]
+        result = {
+            "sample_count": int(mask.sum()),
+            "vector_velocity_rmse_mps": float(
+                np.sqrt(np.mean(np.sum(window_error * window_error, axis=1)))
+            ),
+            "v_parallel_mean_mps": None,
+            "cross_speed_rms_mps": None,
+        }
+        moving_mask = mask & moving
+        if moving_mask.any():
+            direction = v_des[moving_mask] / desired_norm[moving_mask, None]
+            parallel = np.sum(v_act[moving_mask] * direction, axis=1)
+            cross = v_act[moving_mask] - parallel[:, None] * direction
+            result["v_parallel_mean_mps"] = float(parallel.mean())
+            result["cross_speed_rms_mps"] = float(
+                np.sqrt(np.mean(np.sum(cross * cross, axis=1)))
+            )
+        return result
+
+    steady_tracking = _tracking_window(steady)
+    action_delta = np.diff(action, axis=0)
+    steady_action = steady
+    steady_delta = steady[1:] & steady[:-1]
+    metrics = {
+        "schema": "brov_isaac_policy_validation_v1",
+        "checkpoint": os.path.abspath(args.checkpoint),
+        "checkpoint_sha256": checkpoint_contract["checkpoint_sha256"],
+        "checkpoint_contract_verified": checkpoint_contract["verified"],
+        "checkpoint_manifest": checkpoint_contract.get("manifest_path"),
+        "checkpoint_manifest_sha256": checkpoint_contract.get("manifest_sha256"),
+        "profile": args.profile,
+        "observation_contract": env_cfg.observation_contract,
+        "action_contract": env_cfg.action_contract,
+        "action_envelope_clamp_active": env_cfg.enable_action_envelope_clamp,
+        "action_abs_limit": list(env_cfg.deploy_v6_action_abs_limit),
+        "test": args.test,
+        "cruise_speed_mps": args.cruise_speed,
+        "duration_s": args.duration,
+        "vector_velocity_rmse_mps": vector_rmse,
+        "v_parallel_mean_mps": v_parallel_mean,
+        "cross_speed_rms_mps": cross_speed_rms,
+        "action_bound_any_fraction": float(at_bound.any(axis=1).mean()),
+        "action_bound_per_axis_fraction": at_bound.mean(axis=0).tolist(),
+        "opposite_bound_flip_per_axis_count": opposite_bound_flip.sum(axis=0).tolist(),
+        "thruster_force_clamp_scalar_fraction": float(force_clamped.mean()),
+        "thruster_force_clamp_any_fraction": float(force_clamped.any(axis=1).mean()),
+        "transition_exclusion_s": transition_exclusion_s,
+        "steady_tracking": steady_tracking,
+        "steady_action_bound_any_fraction": float(
+            at_bound[steady_action].any(axis=1).mean()
+        ) if steady_action.any() else None,
+        "steady_thruster_force_clamp_any_fraction": float(
+            force_clamped[steady_action].any(axis=1).mean()
+        ) if steady_action.any() else None,
+        "action_delta_rms_per_axis": np.sqrt(
+            np.mean(action_delta * action_delta, axis=0)
+        ).tolist(),
+        "steady_action_delta_rms_per_axis": np.sqrt(
+            np.mean(action_delta[steady_delta] * action_delta[steady_delta], axis=0)
+        ).tolist() if steady_delta.any() else None,
+        "reset_count": reset_count,
+        "waypoint_transition_count": int(len(switch_steps)),
+    }
+    metrics_path = args.metrics_json or os.path.join(
+        _PLOT_DIR,
+        f"policy_eval_{args.test}_{args.cruise_speed:g}mps.json",
+    )
+    os.makedirs(os.path.dirname(metrics_path) or ".", exist_ok=True)
+    with open(metrics_path, "w", encoding="utf-8") as stream:
+        json.dump(metrics, stream, indent=2, sort_keys=True)
+    print(f"  vector velocity RMSE             : {vector_rmse:.4f} m/s")
+    print(f"  v_parallel mean / cross RMS      : {v_parallel_mean:.4f} / {cross_speed_rms:.4f} m/s")
+    print(f"  any action bound / force clamp   : {metrics['action_bound_any_fraction']:.3%} / {metrics['thruster_force_clamp_any_fraction']:.3%}")
+    print(
+        "  steady vRMSE / v_parallel / cross: "
+        f"{steady_tracking['vector_velocity_rmse_mps']} / "
+        f"{steady_tracking['v_parallel_mean_mps']} / "
+        f"{steady_tracking['cross_speed_rms_mps']}"
+    )
+    print(
+        "  steady action bound / force clamp: "
+        f"{metrics['steady_action_bound_any_fraction']} / "
+        f"{metrics['steady_thruster_force_clamp_any_fraction']}"
+    )
+    print(f"  opposite ±bound flips per axis   : {metrics['opposite_bound_flip_per_axis_count']}")
+    print(f"  metrics JSON                     : {metrics_path}")
+
+    artifact_label = f"{args.test}_{args.cruise_speed:g}mps_{args.profile}"
+    _plot_results(
+        log,
+        args.test,
+        wp_world,
+        reach_threshold,
+        artifact_label=artifact_label,
+    )
     if args.record_video:
         _save_video(frames, env_cfg)
 

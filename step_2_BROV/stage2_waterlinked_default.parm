@@ -1,0 +1,27 @@
+# Stage-2 Water Linked official-default-aligned DVL-only contract.
+#
+# Assumptions forced by unavailable real-vehicle artifacts:
+# - BlueOS extension uses POSITION_DELTA with DVL_DOWN/body-FRD axes.
+# - DVL acoustic origin is treated as base_link and VISO_POS remains zero.
+# - No artificial transport queue is invented. The extension does not set
+#   VISO_DELAY_MS; pin this ArduPilot build's unmodified 10 ms default.
+# - Flat-bottom altitude is also sent as DISTANCE_SENSOR, matching the
+#   extension's default rangefinder=true behavior.
+AHRS_EKF_TYPE 3
+EK2_ENABLE 0
+EK3_ENABLE 1
+VISO_TYPE 1
+EK3_SRC1_POSXY 6
+EK3_SRC1_VELXY 6
+EK3_SRC1_POSZ 1
+EK3_SRC1_VELZ 0
+EK3_SRC1_YAW 1
+VISO_DELAY_MS 10
+VISO_ORIENT 0
+VISO_POS_X 0
+VISO_POS_Y 0
+VISO_POS_Z 0
+RNGFND1_TYPE 10
+SIM_GPS_DISABLE 1
+GPS1_TYPE 0
+GPS2_TYPE 0

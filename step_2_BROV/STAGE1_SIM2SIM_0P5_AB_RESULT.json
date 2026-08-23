@@ -1,0 +1,741 @@
+{
+  "schema": "brov_sim2sim_0p5_ab_analysis_v1",
+  "runs": [
+    {
+      "bag": "/home/pyo/Programing/brov_ros2-main/runtime/experiments/stage1_gt_feedback_0p5_20260817_040227",
+      "feedback_source": "gazebo_truth",
+      "active": {
+        "start_unix_s": 1786939465.1195757,
+        "stop_unix_s": 1786939491.7590208,
+        "duration_s": 26.639445066452026,
+        "waypoint_sequence": [
+          0,
+          1
+        ],
+        "mission_complete_observed": true,
+        "mission_complete_after_start_s": 13.480496883392334
+      },
+      "horizontal_steady": {
+        "definition": "waypoint_idx=1, mission_complete=false, first 1s excluded, ||v_desired||>=0.25 m/s",
+        "controller_visible": {
+          "samples": 218,
+          "desired_speed_mean_mps": 0.5000051149913927,
+          "actual_speed_mean_mps": 0.47000759734436054,
+          "actual_speed_p95_mps": 0.523227362476772,
+          "actual_speed_max_mps": 0.5376045517537225,
+          "v_parallel_mean_mps": 0.4683036742030382,
+          "v_parallel_p05_mps": 0.4231345307603519,
+          "v_parallel_p95_mps": 0.5184980253869708,
+          "v_parallel_over_command": 0.9365977670270429,
+          "target_opposite_fraction": 0.0,
+          "vector_error_rmse_mps": 0.0588162184943969,
+          "vector_error_rmse_over_command": 0.11763123362329882,
+          "cross_speed_rms_mps": 0.040370076897119814,
+          "cross_speed_rms_over_command": 0.08073932783230581
+        },
+        "gazebo_ground_truth": {
+          "samples": 218,
+          "desired_speed_mean_mps": 0.5000051149913927,
+          "actual_speed_mean_mps": 0.47000762493078424,
+          "actual_speed_p95_mps": 0.5232274262335187,
+          "actual_speed_max_mps": 0.5376045577124545,
+          "v_parallel_mean_mps": 0.468303701720348,
+          "v_parallel_p05_mps": 0.4231345619463763,
+          "v_parallel_p95_mps": 0.5184981195167077,
+          "v_parallel_over_command": 0.9365978220610995,
+          "target_opposite_fraction": 0.0,
+          "vector_error_rmse_mps": 0.05881620423342294,
+          "vector_error_rmse_over_command": 0.11763120510164267,
+          "cross_speed_rms_mps": 0.04037007903130396,
+          "cross_speed_rms_over_command": 0.08073933210063043
+        },
+        "controller_attitude_error": {
+          "samples": 219,
+          "mean_deg": 4.093005609061632,
+          "p95_deg": 5.861891579703278,
+          "max_deg": 7.105042355229844
+        },
+        "gazebo_ground_truth_attitude_error": {
+          "samples": 219,
+          "mean_deg": 4.09300280500644,
+          "p95_deg": 5.861891816859772,
+          "max_deg": 7.105046237194895,
+          "note": "reconstructed with first-active selected-feedback yaw"
+        },
+        "gazebo_path": {
+          "samples": 219,
+          "along_track_start_end_m": [
+            0.4523722616645956,
+            4.515716419127408
+          ],
+          "cross_track_rms_m": 0.002194800635946065,
+          "cross_track_max_abs_m": 0.006629549378956323,
+          "depth_error_rms_m": 0.0037771722620477204,
+          "depth_error_max_abs_m": 0.015940193831920635
+        }
+      },
+      "feedback_vs_gazebo_truth": {
+        "position_initial_offset_ned_m": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "position_drift_rms_m": 0.0,
+        "position_drift_p95_m": 0.0,
+        "position_drift_end_m": 0.0,
+        "velocity_vector_rmse_mps": 0.0,
+        "velocity_error_p95_mps": 0.0,
+        "velocity_component_bias_ned_mps": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "attitude_error_median_deg": 0.0,
+        "attitude_error_p95_deg": 2.4148365394514667e-06,
+        "attitude_error_max_deg": 3.4150945850063755e-06,
+        "pairing_recorder_skew_p95_ms": {
+          "position": 0.10633468627929688,
+          "velocity": 0.10460615158081055,
+          "attitude": 0.1010894775390625
+        },
+        "horizontal_steady": {
+          "velocity_vector_rmse_mps": 0.0,
+          "velocity_error_p95_mps": 0.0,
+          "velocity_component_bias_ned_mps": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "position_drift_rms_m": 0.0,
+          "position_drift_p95_m": 0.0,
+          "position_drift_end_m": 0.0,
+          "constant_lag_search": {
+            "samples": 219,
+            "zero_lag_rmse_mps": 8.472679444003759e-05,
+            "best_rmse_mps": 8.472679444003759e-05,
+            "truth_query_minus_feedback_s": 2.220446049250313e-16,
+            "estimated_feedback_delay_s": -2.220446049250313e-16,
+            "rmse_improvement_fraction": 0.0,
+            "search_range_s": 0.25,
+            "step_s": 0.005
+          }
+        }
+      },
+      "position_velocity_consistency": {
+        "selected_feedback": {
+          "samples": 666,
+          "duration_s": 26.599740028381348,
+          "overall_residual_xyz_m": [
+            0.03057141378619388,
+            -0.009631747055279583,
+            0.00418148860088427
+          ],
+          "overall_residual_norm_m": 0.03232439851169542,
+          "windows": {
+            "1s": {
+              "count": 641,
+              "median_m": 0.0009940271112386832,
+              "p95_m": 0.0088753772203052,
+              "max_m": 0.011470711982464979
+            },
+            "5s": {
+              "count": 541,
+              "median_m": 0.008057721688420158,
+              "p95_m": 0.018269104772220445,
+              "max_m": 0.021575616867195658
+            },
+            "10s": {
+              "count": 416,
+              "median_m": 0.01662658228408724,
+              "p95_m": 0.02696345410339506,
+              "max_m": 0.03130592955036046
+            }
+          }
+        },
+        "gazebo_truth": {
+          "samples": 666,
+          "duration_s": 26.59976100921631,
+          "overall_residual_xyz_m": [
+            0.030545466122771536,
+            -0.00961770314071364,
+            0.00420646584873785
+          ],
+          "overall_residual_norm_m": 0.03229891746323512,
+          "windows": {
+            "1s": {
+              "count": 641,
+              "median_m": 0.0009935824479400917,
+              "p95_m": 0.008878771421468784,
+              "max_m": 0.011448323792524468
+            },
+            "5s": {
+              "count": 541,
+              "median_m": 0.008055935876443267,
+              "p95_m": 0.01823913832081606,
+              "max_m": 0.021575951520766135
+            },
+            "10s": {
+              "count": 416,
+              "median_m": 0.016610409848689018,
+              "p95_m": 0.026939658414629294,
+              "max_m": 0.03129843046384959
+            }
+          }
+        },
+        "pre_mission_complete": {
+          "selected_feedback": {
+            "samples": 338,
+            "duration_s": 13.479229211807251,
+            "overall_residual_xyz_m": [
+              0.02655052548573522,
+              -0.008230522787599837,
+              0.0024533705574472653
+            ],
+            "overall_residual_norm_m": 0.027905034241477375,
+            "windows": {
+              "1s": {
+                "count": 312,
+                "median_m": 0.0010140216767592003,
+                "p95_m": 0.010027546328429443,
+                "max_m": 0.011279325961273219
+              },
+              "5s": {
+                "count": 212,
+                "median_m": 0.008662601696360506,
+                "p95_m": 0.01899825460978589,
+                "max_m": 0.01996539590971472
+              },
+              "10s": {
+                "count": 88,
+                "median_m": 0.017120697974505827,
+                "p95_m": 0.027256460435860993,
+                "max_m": 0.027567740173938367
+              }
+            }
+          },
+          "gazebo_truth": {
+            "samples": 338,
+            "duration_s": 13.47925853729248,
+            "overall_residual_xyz_m": [
+              0.026533178687365044,
+              -0.008219484806226918,
+              0.002478245894836889
+            ],
+            "overall_residual_norm_m": 0.027887473970417503,
+            "windows": {
+              "1s": {
+                "count": 312,
+                "median_m": 0.0010167651789068732,
+                "p95_m": 0.01000482738626782,
+                "max_m": 0.011300772664365641
+              },
+              "5s": {
+                "count": 212,
+                "median_m": 0.008653284425426101,
+                "p95_m": 0.018995972130769655,
+                "max_m": 0.019980314828779818
+              },
+              "10s": {
+                "count": 88,
+                "median_m": 0.017092013709394942,
+                "p95_m": 0.027244551771090156,
+                "max_m": 0.027558173556197937
+              }
+            }
+          }
+        },
+        "horizontal_steady": {
+          "selected_feedback": {
+            "samples": 219,
+            "duration_s": 8.720093727111816,
+            "overall_residual_xyz_m": [
+              0.019483083279062896,
+              -0.005766916910078024,
+              0.001972334052288971
+            ],
+            "overall_residual_norm_m": 0.020414160926191964,
+            "windows": {
+              "1s": {
+                "count": 193,
+                "median_m": 0.00099904972249013,
+                "p95_m": 0.010458606477418798,
+                "max_m": 0.011279325961273219
+              },
+              "5s": {
+                "count": 93,
+                "median_m": 0.009139462588012104,
+                "p95_m": 0.019464357785219707,
+                "max_m": 0.01996539590971472
+              },
+              "10s": {
+                "count": 0,
+                "median_m": null,
+                "p95_m": null,
+                "max_m": null
+              }
+            }
+          },
+          "gazebo_truth": {
+            "samples": 219,
+            "duration_s": 8.720116138458252,
+            "overall_residual_xyz_m": [
+              0.01947521154284715,
+              -0.005765234543751774,
+              0.001988063003244167
+            ],
+            "overall_residual_norm_m": 0.020407699245333456,
+            "windows": {
+              "1s": {
+                "count": 193,
+                "median_m": 0.0010132481438553025,
+                "p95_m": 0.010475798391923285,
+                "max_m": 0.011300772664365641
+              },
+              "5s": {
+                "count": 93,
+                "median_m": 0.00912960227759786,
+                "p95_m": 0.01945851775499791,
+                "max_m": 0.019980314828779818
+              },
+              "10s": {
+                "count": 0,
+                "median_m": null,
+                "p95_m": null,
+                "max_m": null
+              }
+            }
+          }
+        }
+      },
+      "action_and_actuation": {
+        "steady_samples": 220,
+        "limited_any_axis_ge_0p99_fraction": 0.5818181818181818,
+        "limited_axis_ge_0p99_fraction": {
+          "surge": 0.0,
+          "sway": 0.0,
+          "heave": 0.0,
+          "roll": 0.022727272727272728,
+          "pitch": 0.5545454545454546,
+          "yaw": 0.013636363636363636
+        },
+        "raw_any_axis_outside_unit_fraction": 0.0,
+        "raw_axis_max_abs": {
+          "surge": 0.3043103516101837,
+          "sway": 0.24474772810935974,
+          "heave": 0.45093652606010437,
+          "roll": 1.0,
+          "pitch": 1.0,
+          "yaw": 1.0
+        },
+        "thruster_force_any_clamp_fraction": 0.0593607305936073,
+        "thruster_force_clamp_error_rms_N": 0.2788395578693242
+      },
+      "timing": {
+        "desired_velocity_topic": {
+          "count": 666,
+          "rate_hz": 25.000245681108073,
+          "gap_median_ms": 40.00115394592285,
+          "gap_p95_ms": 41.1158561706543,
+          "gap_max_ms": 43.11108589172363
+        },
+        "action_topic": {
+          "count": 666,
+          "rate_hz": 25.00012310884623,
+          "gap_median_ms": 39.99662399291992,
+          "gap_p95_ms": 41.01457595825195,
+          "gap_max_ms": 43.25556755065918
+        },
+        "selected_body_pair_skew_p95_ms": 0.028848648071289062,
+        "truth_velocity_pair_skew_p95_ms": 1.556694507598877,
+        "truth_attitude_pair_skew_p95_ms": 1.5316009521484375,
+        "feedback_timing_samples": 666,
+        "feedback_source_codes": [
+          1
+        ],
+        "selected_age_p95_ms": 19.685352002852596,
+        "selected_age_max_ms": 23.49007601151243,
+        "mav_att_age_p95_ms": 38.262077257968485,
+        "mav_pos_age_p95_ms": 37.22935327095911,
+        "gazebo_age_p95_ms": 19.685352002852596
+      },
+      "topic_contract": {
+        "missing_required": []
+      }
+    },
+    {
+      "bag": "/home/pyo/Programing/brov_ros2-main/runtime/experiments/stage1_ekf_feedback_0p5_20260817_040600",
+      "feedback_source": "mavlink_ekf",
+      "active": {
+        "start_unix_s": 1786939698.0847304,
+        "stop_unix_s": 1786939740.4848619,
+        "duration_s": 42.40013146400452,
+        "waypoint_sequence": [
+          0,
+          1
+        ],
+        "mission_complete_observed": true,
+        "mission_complete_after_start_s": 13.641111612319946
+      },
+      "horizontal_steady": {
+        "definition": "waypoint_idx=1, mission_complete=false, first 1s excluded, ||v_desired||>=0.25 m/s",
+        "controller_visible": {
+          "samples": 230,
+          "desired_speed_mean_mps": 0.5000365721315576,
+          "actual_speed_mean_mps": 0.48394126772560275,
+          "actual_speed_p95_mps": 0.5374066350532998,
+          "actual_speed_max_mps": 0.5570135562365575,
+          "v_parallel_mean_mps": 0.47763932188100294,
+          "v_parallel_p05_mps": 0.40986263462030886,
+          "v_parallel_p95_mps": 0.5301436962763,
+          "v_parallel_over_command": 0.9552087757199846,
+          "target_opposite_fraction": 0.0,
+          "vector_error_rmse_mps": 0.08879653423770743,
+          "vector_error_rmse_over_command": 0.17758007951135507,
+          "cross_speed_rms_mps": 0.07799647307856891,
+          "cross_speed_rms_over_command": 0.15598153700255418
+        },
+        "gazebo_ground_truth": {
+          "samples": 230,
+          "desired_speed_mean_mps": 0.5000365721315576,
+          "actual_speed_mean_mps": 0.4434009837596674,
+          "actual_speed_p95_mps": 0.5002543413016944,
+          "actual_speed_max_mps": 0.5250470378742258,
+          "v_parallel_mean_mps": 0.43601646374329706,
+          "v_parallel_p05_mps": 0.3824986008569186,
+          "v_parallel_p95_mps": 0.48816823482588434,
+          "v_parallel_over_command": 0.8719691479458084,
+          "target_opposite_fraction": 0.0,
+          "vector_error_rmse_mps": 0.10885586716446913,
+          "vector_error_rmse_over_command": 0.21769581112924993,
+          "cross_speed_rms_mps": 0.08106024096199266,
+          "cross_speed_rms_over_command": 0.16210862460809372
+        },
+        "controller_attitude_error": {
+          "samples": 231,
+          "mean_deg": 4.869439810376173,
+          "p95_deg": 7.597134415100758,
+          "max_deg": 11.270984963749184
+        },
+        "gazebo_ground_truth_attitude_error": {
+          "samples": 231,
+          "mean_deg": 5.142691428921335,
+          "p95_deg": 8.487180945817697,
+          "max_deg": 10.232475058753941,
+          "note": "reconstructed with first-active selected-feedback yaw"
+        },
+        "gazebo_path": {
+          "samples": 231,
+          "along_track_start_end_m": [
+            0.4807801625665067,
+            4.496782959810076
+          ],
+          "cross_track_rms_m": 0.012079655462703065,
+          "cross_track_max_abs_m": 0.025199647584129847,
+          "depth_error_rms_m": 0.010134957468628417,
+          "depth_error_max_abs_m": 0.036850762367248546
+        }
+      },
+      "feedback_vs_gazebo_truth": {
+        "position_initial_offset_ned_m": [
+          0.038239479064941406,
+          -0.00439453125,
+          -0.09499690681695938
+        ],
+        "position_drift_rms_m": 0.058575495148988625,
+        "position_drift_p95_m": 0.10060590200418042,
+        "position_drift_end_m": 0.0934299888845893,
+        "velocity_vector_rmse_mps": 0.06185452138225681,
+        "velocity_error_p95_mps": 0.101560174805079,
+        "velocity_component_bias_ned_mps": [
+          0.013577458445131972,
+          -0.006965107299007262,
+          -0.00011472276216902658
+        ],
+        "attitude_error_median_deg": 1.9943209371549138,
+        "attitude_error_p95_deg": 5.644512353833428,
+        "attitude_error_max_deg": 7.932278234003153,
+        "pairing_recorder_skew_p95_ms": {
+          "position": 0.10919570922851562,
+          "velocity": 0.10728836059570312,
+          "attitude": 0.10446310043334961
+        },
+        "horizontal_steady": {
+          "velocity_vector_rmse_mps": 0.06271336909715598,
+          "velocity_error_p95_mps": 0.09769651702444436,
+          "velocity_component_bias_ned_mps": [
+            0.03919311325787466,
+            0.016397591083596796,
+            -0.0005898245537726136
+          ],
+          "position_drift_rms_m": 0.07009761113512773,
+          "position_drift_p95_m": 0.11464315168592237,
+          "position_drift_end_m": 0.0845054342513285,
+          "constant_lag_search": {
+            "samples": 231,
+            "zero_lag_rmse_mps": 0.0626786816943458,
+            "best_rmse_mps": 0.05953306968962089,
+            "truth_query_minus_feedback_s": -0.009999999999999787,
+            "estimated_feedback_delay_s": 0.009999999999999787,
+            "rmse_improvement_fraction": 0.05018631406551547,
+            "search_range_s": 0.25,
+            "step_s": 0.005
+          }
+        }
+      },
+      "position_velocity_consistency": {
+        "selected_feedback": {
+          "samples": 1058,
+          "duration_s": 42.360164403915405,
+          "overall_residual_xyz_m": [
+            -0.6901487743403276,
+            0.2753742196850686,
+            0.020007185034371655
+          ],
+          "overall_residual_norm_m": 0.7433280426861457,
+          "windows": {
+            "1s": {
+              "count": 1033,
+              "median_m": 0.042157332149713594,
+              "p95_m": 0.08756002176602336,
+              "max_m": 0.11037868298451639
+            },
+            "5s": {
+              "count": 933,
+              "median_m": 0.19857397124830403,
+              "p95_m": 0.3290828671303906,
+              "max_m": 0.34367226953843566
+            },
+            "10s": {
+              "count": 808,
+              "median_m": 0.31390868279064105,
+              "p95_m": 0.5058052101701113,
+              "max_m": 0.514800420217987
+            }
+          }
+        },
+        "gazebo_truth": {
+          "samples": 1058,
+          "duration_s": 42.36018991470337,
+          "overall_residual_xyz_m": [
+            -0.019680460065873095,
+            -0.028702944419146004,
+            0.01580223661225058
+          ],
+          "overall_residual_norm_m": 0.03822159348696184,
+          "windows": {
+            "1s": {
+              "count": 1033,
+              "median_m": 0.0012674000831521546,
+              "p95_m": 0.0086475380073059,
+              "max_m": 0.011696846238682671
+            },
+            "5s": {
+              "count": 933,
+              "median_m": 0.004567797564103089,
+              "p95_m": 0.01846446292447152,
+              "max_m": 0.02009548206817574
+            },
+            "10s": {
+              "count": 808,
+              "median_m": 0.007392488243499659,
+              "p95_m": 0.027121597024213184,
+              "max_m": 0.028274290772101786
+            }
+          }
+        },
+        "pre_mission_complete": {
+          "selected_feedback": {
+            "samples": 341,
+            "duration_s": 13.639729976654053,
+            "overall_residual_xyz_m": [
+              -0.4244322849000213,
+              -0.13028220111766764,
+              0.0036776628380322807
+            ],
+            "overall_residual_norm_m": 0.44399295219346385,
+            "windows": {
+              "1s": {
+                "count": 315,
+                "median_m": 0.03569938797757483,
+                "p95_m": 0.0933531535668648,
+                "max_m": 0.10320580526068429
+              },
+              "5s": {
+                "count": 216,
+                "median_m": 0.09949394321077712,
+                "p95_m": 0.24436421552235693,
+                "max_m": 0.26427389488846703
+              },
+              "10s": {
+                "count": 91,
+                "median_m": 0.24732067605912753,
+                "p95_m": 0.3328050546392094,
+                "max_m": 0.343947245222522
+              }
+            }
+          },
+          "gazebo_truth": {
+            "samples": 341,
+            "duration_s": 13.639766454696655,
+            "overall_residual_xyz_m": [
+              -0.017373501191752183,
+              -0.022042457539076743,
+              0.004491142073253074
+            ],
+            "overall_residual_norm_m": 0.028423209444817445,
+            "windows": {
+              "1s": {
+                "count": 315,
+                "median_m": 0.001238401319952172,
+                "p95_m": 0.010490940112889768,
+                "max_m": 0.011696846238682671
+              },
+              "5s": {
+                "count": 216,
+                "median_m": 0.010680619686652952,
+                "p95_m": 0.01952077676673087,
+                "max_m": 0.02009548206817574
+              },
+              "10s": {
+                "count": 91,
+                "median_m": 0.026959809824639438,
+                "p95_m": 0.027914764055700675,
+                "max_m": 0.028274290772101786
+              }
+            }
+          }
+        },
+        "horizontal_steady": {
+          "selected_feedback": {
+            "samples": 231,
+            "duration_s": 9.239999294281006,
+            "overall_residual_xyz_m": [
+              -0.30013452486644354,
+              -0.1300969808515493,
+              0.008714860726078084
+            ],
+            "overall_residual_norm_m": 0.32723371806855284,
+            "windows": {
+              "1s": {
+                "count": 205,
+                "median_m": 0.04271295237328763,
+                "p95_m": 0.09609340592078973,
+                "max_m": 0.10320580526068429
+              },
+              "5s": {
+                "count": 106,
+                "median_m": 0.14730287114975665,
+                "p95_m": 0.25626170208797094,
+                "max_m": 0.26427389488846703
+              },
+              "10s": {
+                "count": 0,
+                "median_m": null,
+                "p95_m": null,
+                "max_m": null
+              }
+            }
+          },
+          "gazebo_truth": {
+            "samples": 231,
+            "duration_s": 9.240026473999023,
+            "overall_residual_xyz_m": [
+              -0.013760901895196298,
+              -0.01367359887207975,
+              0.00614098422536033
+            ],
+            "overall_residual_norm_m": 0.020348007625806564,
+            "windows": {
+              "1s": {
+                "count": 205,
+                "median_m": 0.001202082960552637,
+                "p95_m": 0.011026361536600646,
+                "max_m": 0.011696846238682671
+              },
+              "5s": {
+                "count": 106,
+                "median_m": 0.010956536870566318,
+                "p95_m": 0.019833964227064845,
+                "max_m": 0.02009548206817574
+              },
+              "10s": {
+                "count": 0,
+                "median_m": null,
+                "p95_m": null,
+                "max_m": null
+              }
+            }
+          }
+        }
+      },
+      "action_and_actuation": {
+        "steady_samples": 231,
+        "limited_any_axis_ge_0p99_fraction": 0.6406926406926406,
+        "limited_axis_ge_0p99_fraction": {
+          "surge": 0.0,
+          "sway": 0.0,
+          "heave": 0.0,
+          "roll": 0.08658008658008658,
+          "pitch": 0.5454545454545454,
+          "yaw": 0.06060606060606061
+        },
+        "raw_any_axis_outside_unit_fraction": 0.0,
+        "raw_axis_max_abs": {
+          "surge": 0.3476200997829437,
+          "sway": 0.5259621143341064,
+          "heave": 0.43081358075141907,
+          "roll": 1.0,
+          "pitch": 1.0,
+          "yaw": 1.0
+        },
+        "thruster_force_any_clamp_fraction": 0.12121212121212122,
+        "thruster_force_clamp_error_rms_N": 0.5149993930082165
+      },
+      "timing": {
+        "desired_velocity_topic": {
+          "count": 1058,
+          "rate_hz": 24.952716469933424,
+          "gap_median_ms": 39.99757766723633,
+          "gap_p95_ms": 40.90418815612792,
+          "gap_max_ms": 79.9870491027832
+        },
+        "action_topic": {
+          "count": 1058,
+          "rate_hz": 24.9528685708656,
+          "gap_median_ms": 39.995431900024414,
+          "gap_p95_ms": 40.92564582824707,
+          "gap_max_ms": 80.04236221313477
+        },
+        "selected_body_pair_skew_p95_ms": 0.02956390380859375,
+        "truth_velocity_pair_skew_p95_ms": 1.5371918678283691,
+        "truth_attitude_pair_skew_p95_ms": 1.513075828552246,
+        "feedback_timing_samples": 1058,
+        "feedback_source_codes": [
+          0
+        ],
+        "selected_age_p95_ms": 39.51526432938408,
+        "selected_age_max_ms": 53.220679983496666,
+        "mav_att_age_p95_ms": 37.42823890352156,
+        "mav_pos_age_p95_ms": 39.00624692614656,
+        "gazebo_age_p95_ms": 18.93959783192258
+      },
+      "topic_contract": {
+        "missing_required": []
+      }
+    }
+  ],
+  "comparison": {
+    "order": [
+      "gazebo_truth",
+      "mavlink_ekf"
+    ],
+    "physical_gt_delta_second_minus_first": {
+      "v_parallel_mean_mps": -0.032287237977050964,
+      "vector_error_rmse_mps": 0.05003966293104619,
+      "cross_speed_rms_mps": 0.040690161930688695
+    },
+    "feedback_truth_velocity_rmse_ratio_second_over_first": null,
+    "feedback_truth_position_drift_rms_ratio_second_over_first": null,
+    "interpretation_rule": "If gazebo_truth feedback tracks physically but mavlink_ekf feedback does not, the feedback/estimator path is causal. If both physical GT runs fail similarly, inspect policy/action/actuator/plant/guidance before retraining. If G0/G1 are not separately exercised, this A/B does not isolate actuator from plant."
+  }
+}

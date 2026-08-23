@@ -29,7 +29,11 @@ python train.py --logger wandb --log_project_name brov_vel [--headless]
 """
 
 import argparse
+import datetime as _dt
+import hashlib
+import json
 import os
+import subprocess
 import sys
 
 from isaaclab.app import AppLauncher
@@ -39,8 +43,18 @@ parser.add_argument("--num_envs", type=int, default=None,
                      help="기본값: velEnvCfg.py의 scene.num_envs(512)")
 parser.add_argument("--max_iterations", type=int, default=None,
                      help="기본값: BROVVelPPORunnerCfg.max_iterations")
-parser.add_argument("--seed", type=int, default=None)
+parser.add_argument("--num_steps_per_env", type=int, default=None,
+                     help="PPO rollout horizon override (policy steps per environment)")
+parser.add_argument("--save_interval", type=int, default=None,
+                     help="checkpoint 저장 iteration 간격 override")
+parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--experiment_name", type=str, default=None)
+parser.add_argument(
+    "--profile",
+    choices=["legacy_exact", "paper_ref_v1", "deploy_v2", "deploy_v3", "deploy_v4", "deploy_v5", "deploy_v5_pitch_fmax_diag", "deploy_v6", "deploy_v6b"],
+    default="deploy_v2",
+    help="MDP/observation/action contract; new training defaults to deploy_v2",
+)
 parser.add_argument("--resume", action="store_true", help="가장 최근 체크포인트에서 재개")
 parser.add_argument("--log_root", type=str,
                      default=os.path.join(os.path.dirname(__file__), "logs"))
@@ -62,23 +76,134 @@ import torch
 from rsl_rl.runners import OnPolicyRunner
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 
-from envs.vel_env_cfg import BROVVelEnvCfg
+from envs.vel_env_cfg import BROVVelEnvCfg, apply_training_profile
 from envs.vel_env import BROVVelEnv
 from agents.rsl_rl_ppo_cfg import BROVVelPPORunnerCfg
 
 
+def _sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _git_value(*git_args: str) -> str | None:
+    try:
+        return subprocess.check_output(
+            ["git", *git_args], cwd=os.path.dirname(__file__), text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def _write_manifest(
+    path: str,
+    env_cfg: BROVVelEnvCfg,
+    agent_cfg: BROVVelPPORunnerCfg,
+    *,
+    checkpoint: str | None = None,
+    exported: str | None = None,
+) -> None:
+    root = os.path.dirname(__file__)
+    source_files = {
+        "envs/vel_env.py": os.path.join(root, "envs/vel_env.py"),
+        "envs/vel_env_cfg.py": os.path.join(root, "envs/vel_env_cfg.py"),
+        "envs/observation_contract.py": os.path.join(root, "envs/observation_contract.py"),
+        "envs/desired_states.py": os.path.join(root, "envs/desired_states.py"),
+        "action_frame_contract.py": os.path.join(root, "action_frame_contract.py"),
+        "robots/dynamics/brov2/thruster.py": os.path.join(
+            root, "../robots/dynamics/brov2/thruster.py"
+        ),
+        "robots/dynamics/brov2/mass_randomization.py": os.path.join(
+            root, "../robots/dynamics/brov2/mass_randomization.py"
+        ),
+        "agents/rsl_rl_ppo_cfg.py": os.path.join(root, "agents/rsl_rl_ppo_cfg.py"),
+        "train.py": os.path.join(root, "train.py"),
+    }
+    manifest = {
+        "schema": "brov_stage3_training_artifact_v1",
+        "created_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        "command": sys.argv,
+        "git_commit": _git_value("rev-parse", "HEAD"),
+        "git_status_short": _git_value("status", "--short"),
+        "profile": env_cfg.training_profile,
+        "observation_contract": env_cfg.observation_contract,
+        "action_contract": env_cfg.action_contract,
+        "command_profile": env_cfg.command_profile,
+        "reward_profile": env_cfg.reward_profile,
+        "policy_dt_s": env_cfg.sim.dt * env_cfg.decimation,
+        "episode_length_s": env_cfg.episode_length_s,
+        "num_envs": env_cfg.scene.num_envs,
+        "seed": agent_cfg.seed,
+        "num_steps_per_env": agent_cfg.num_steps_per_env,
+        "max_iterations": agent_cfg.max_iterations,
+        "mass_scale_range": list(env_cfg.dr_mass_scale_range),
+        "source_sha256": {
+            label: _sha256(source_path)
+            for label, source_path in source_files.items()
+            if os.path.isfile(source_path)
+        },
+    }
+    if checkpoint and os.path.isfile(checkpoint):
+        manifest["checkpoint"] = os.path.abspath(checkpoint)
+        manifest["checkpoint_sha256"] = _sha256(checkpoint)
+    if exported and os.path.isfile(exported):
+        manifest["exported_state_dict"] = os.path.abspath(exported)
+        manifest["exported_state_dict_sha256"] = _sha256(exported)
+    with open(path, "w", encoding="utf-8") as stream:
+        json.dump(manifest, stream, indent=2, sort_keys=True)
+
+
+def _validate_resume_contract(
+    manifest_path: str,
+    env_cfg: BROVVelEnvCfg,
+    agent_cfg: BROVVelPPORunnerCfg,
+) -> None:
+    """Reject cross-profile/seed resumes before overwriting provenance."""
+
+    if not os.path.isfile(manifest_path):
+        raise RuntimeError(f"--resume requires an existing manifest: {manifest_path}")
+    with open(manifest_path, encoding="utf-8") as stream:
+        previous = json.load(stream)
+    expected = {
+        "profile": env_cfg.training_profile,
+        "observation_contract": env_cfg.observation_contract,
+        "action_contract": env_cfg.action_contract,
+        "command_profile": env_cfg.command_profile,
+        "reward_profile": env_cfg.reward_profile,
+        "policy_dt_s": env_cfg.sim.dt * env_cfg.decimation,
+        "seed": agent_cfg.seed,
+    }
+    mismatches = {
+        key: {"previous": previous.get(key), "requested": value}
+        for key, value in expected.items()
+        if previous.get(key) != value
+    }
+    if mismatches:
+        raise RuntimeError(f"resume contract mismatch: {mismatches}")
+
+
 def main() -> None:
-    env_cfg = BROVVelEnvCfg()
+    env_cfg = apply_training_profile(BROVVelEnvCfg(), args.profile)
     if args.num_envs is not None:
         env_cfg.scene.num_envs = args.num_envs
+    # RSL-RL and the Isaac environment must share the effective seed.  Keeping
+    # a concrete default also makes the value written to the manifest true.
+    env_cfg.seed = args.seed
 
     agent_cfg = BROVVelPPORunnerCfg()
     if args.max_iterations is not None:
         agent_cfg.max_iterations = args.max_iterations
+    if args.num_steps_per_env is not None:
+        agent_cfg.num_steps_per_env = args.num_steps_per_env
+    if args.save_interval is not None:
+        agent_cfg.save_interval = args.save_interval
     if args.experiment_name is not None:
         agent_cfg.experiment_name = args.experiment_name
-    if args.seed is not None:
-        agent_cfg.seed = args.seed
+    agent_cfg.seed = args.seed
     if args.logger is not None:
         agent_cfg.logger = args.logger
     # 프로젝트 이름은 wandb/neptune일 때만 의미 있음 (cli_args.py의 update_rsl_rl_cfg와 동일 조건)
@@ -93,6 +218,17 @@ def main() -> None:
 
     log_dir = os.path.join(args.log_root, agent_cfg.experiment_name)
     os.makedirs(log_dir, exist_ok=True)
+    manifest_path = os.path.join(log_dir, "artifact_manifest.json")
+    if args.resume:
+        _validate_resume_contract(manifest_path, env_cfg, agent_cfg)
+    _write_manifest(manifest_path, env_cfg, agent_cfg)
+
+    # deploy_v6b only: the curriculum needs the total step budget to compute
+    # its ramp, and must be set before BROVVelEnv is constructed.
+    if env_cfg.enable_action_envelope_curriculum:
+        env_cfg.action_envelope_curriculum_total_steps = (
+            agent_cfg.max_iterations * agent_cfg.num_steps_per_env
+        )
 
     env = BROVVelEnv(cfg=env_cfg, render_mode=None)
     env = RslRlVecEnvWrapper(env)
@@ -127,10 +263,29 @@ def main() -> None:
     export_dir = os.path.join(log_dir, "exported")
     os.makedirs(export_dir, exist_ok=True)
     try:
-        torch.save(policy.state_dict(), os.path.join(export_dir, "policy_state_dict.pt"))
+        exported_path = os.path.join(export_dir, "policy_state_dict.pt")
+        torch.save(policy.state_dict(), exported_path)
         print(f"[INFO] 정책 state_dict 저장 완료: {export_dir}")
     except Exception as e:
         print(f"[WARN] 정책 내보내기 실패(학습 결과는 정상 저장됨, log_dir 체크포인트 참고): {e}")
+
+    checkpoints = [
+        os.path.join(log_dir, name)
+        for name in os.listdir(log_dir)
+        if name.startswith("model_") and name.endswith(".pt")
+    ]
+    latest_checkpoint = (
+        max(checkpoints, key=lambda p: int(os.path.basename(p)[len("model_"):-len(".pt")]))
+        if checkpoints else None
+    )
+    exported_path = os.path.join(export_dir, "policy_state_dict.pt")
+    _write_manifest(
+        manifest_path,
+        env_cfg,
+        agent_cfg,
+        checkpoint=latest_checkpoint,
+        exported=exported_path,
+    )
 
     env.close()
     simulation_app.close()

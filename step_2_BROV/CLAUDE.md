@@ -5,7 +5,7 @@
 BlueROV2 Heavy(8-thruster)를 IsaacLab으로 시뮬레이션하는 RL 환경. 두 갈래로 구성된다:
 
 1. **물리 검증 단계 (완료)** — `BROVTrajEnv`: 수중 동역학/유체역학이 실제 BROV2 거동과 일치하는지 확인, 추진기 모델(PWM→추력) 정확도 확인, 중성부력/자세 안정성 확보. `bottom_up.py`의 축별 테스트로 검증됨.
-2. **Sim2Swim 재현 단계 (구현·1차 검증 완료, 본 학습 전)** — `BROVVelEnv` + `LOSGuidance`: "Sim2Swim: Zero-Shot Velocity Control for Agile AUV Maneuvering in 3 Minutes"(arXiv:2512.08656, SINTEF Ocean) 논문을 계층형(고전 유도 + RL 저수준 속도 컨트롤러)으로 재현. 실물 실험체가 BlueROV2 Heavy로 동일.
+2. **Sim2Swim 재현 단계 (부분 구현, Stage 3 교정 전)** — `BROVVelEnv` + `LOSGuidance`: "Sim2Swim: Zero-Shot Velocity Control for Agile AUV Maneuvering in 3 Minutes"(arXiv:2512.08656, SINTEF Ocean)의 계층형 구조(고전 유도 + RL 저수준 속도 컨트롤러)를 구현했다. 다만 현재 checkpoint는 논문의 Eq. 9를 velocity command로 오독한 MDP에서 학습됐으므로 논문 충실 재현 artifact가 아니다. 상세 감사와 재학습 사양은 `STAGE3_PAPER_IMPLEMENTATION_AUDIT.md`를 따른다.
 
 **향후 계획**:
 - step_1_NBV(수중 인지)과 step_2_BROV(수중 물리)를 통합하는 **step_3** — `LOSGuidance`를 커버리지/NBV 기반 유도 모듈로 교체하고, 학습된 Sim2Swim 저수준 정책은 그대로(frozen) 재사용하는 구조를 염두에 둠. 이 때문에 물리 엔진(Fossen 코어+BROV2 액추에이터)을 `robots/dynamics/`로 승격해 step_2/step_3이 공유하도록 리팩토링하고(2026-07), step_2_BROV 내부도 `envs/`/`guidance/`/`physics_tests/`/`legacy/` 역할별 서브디렉토리로 재배치함(2026-07).
@@ -84,7 +84,7 @@ _get_rewards        →  Sim2Swim Eq.5-8
 _get_dones          →  terminated(out_of_bounds) / truncated(episode_length_s)
 ```
 
-`attach_guidance(los)` 미호출 시(학습 중) `_current_v_d_b()`가 논문 Eq.9 랜덤 궤적을 자동생성, 호출 시(평가/배포) `LOSGuidance.compute()`로 대체 — 호출 지점 하나만 갈아끼우는 구조라 `_get_observations()` 중복 호출/적분항 이중누적 문제가 없음.
+`attach_guidance(los)` 미호출 시에는 현재 `_current_v_d_b()`가 Eq. 9 계수로 body velocity template을 만들고, 호출 시에는 `LOSGuidance.compute()`로 대체한다. 이 교체 구조와 적분 단일 갱신은 유효하지만, 논문에서 Eq. 9는 velocity command가 아니라 Frenet–Serret 기반 `q_d(t)` 생성용이다. 따라서 Stage 3에서 학습용 desired-state generator를 교정해야 한다.
 
 ### BROVTrajEnv 물리 루프 (물리검증, 매 policy step)
 
@@ -136,8 +136,14 @@ r = w_quat·exp(-‖q_e_vec‖²) + w_vel·exp(-‖v_e_b‖²) + w_omega·exp(-�
 ```
 가중치(Table 1): `w_quat=0.4, w_vel=0.2, w_omega=0.05, w_action=0.3`
 
-### 속도 명령 (학습 중, 논문 Eq.9)
-`v_d^b(t) = q_cmd ⊗ [a, b·sin(ωt), c·cos(ωt)]`, `[a,b,c]=[0.5,0.5,0.3]`, `ω=0.2 rad/s`, `q_cmd`는 에피소드마다 랜덤 샘플.
+### Desired-state 명령 (학습 중)
+
+논문 계약은 다음 두 명령을 분리한다.
+
+- Eq. 9 `[a,b·sin(ωt),c·cos(ωt)]`의 Frenet–Serret frame으로 시간변화하는 `q_d(t)`를 만든다.
+- `v_d^b`는 episode마다 단위구에서 방향을 샘플하고 정확히 `||v_d^b||=0.5 m/s`로 둔다.
+
+현재 코드는 반대로 Eq. 9 벡터를 `v_d^b(t)`로 쓰고 `q_d`를 episode 동안 고정한다. 그 결과 5 s 속력은 `0.5831–0.6733 m/s`이며, 기존 checkpoint는 이 잘못된 MDP의 baseline으로만 취급한다.
 
 ### 도메인 랜덤화 — 1단계 (mass는 2단계로 연기)
 | 파라미터 | 중심값(YAML 실측) | 범위 | 근거 |
@@ -200,7 +206,7 @@ python validate_physics.py --test thruster_model
 
 ## 디버그 시각화 (`envs/vel_env.py`)
 
-`BROVVelEnv`에 `_set_debug_vis_impl`/`_debug_vis_callback`(IsaacLab 내장 훅) + `isaacsim.util.debug_draw` 병용:
+`BROVVelEnv`에 `_set_debug_vis_impl`/`_debug_vis_callback`(IsaacLab 내장 훅) + `isaacsim.util.debug_draw`를 병용한다. 기본값은 `debug_vis=False`이며 debug extension/resource도 lazy-load한다. 학습에서는 항상 비활성화하고, `test_policy.py --debug_vis`를 명시한 단일-env 진단에서만 사용한다.
 - 🟢 초록 화살표: 현재 자세 (로봇 위치에 표시)
 - 🔴 빨강 화살표: 목표 자세 q_d (같은 위치에 겹쳐 그림 — 위치 목표가 없는 속도컨트롤러라 자세 오차를 직접 비교하기 위함)
 - 🔵 파랑 화살표: 목표 속도 v_d_b (방향+길이=속력 비례)
@@ -211,22 +217,22 @@ python validate_physics.py --test thruster_model
 ## 알려진 이슈
 
 1. **`traj_env_cfg.rew_scale_terminated` 미적용**: `envs/traj_env.py._get_rewards()`에서 미사용.
-2. **mass 도메인 랜덤화 미구현**: 위 도메인 랜덤화 표 참조. 2단계 작업.
-3. **디버그 시각화 코드 중복**: `envs/traj_env.py`/`envs/vel_env.py`에 스러스터 추력 화살표 로직이 각각 구현됨 — 통합 여지.
-4. **`legacy/brov_env.py` 실행 불가**: relative import 파손, 레거시 참조용.
-5. **본 규모 학습 미실행**: `train.py`의 `num_envs=512`/`max_iterations=300`은 초기 추정값. 지금까지 검증에 쓴 체크포인트(`model_99.pt`)는 소규모 테스트 런이라 추종 품질이 논문과 비교할 수준이 아님.
+2. **논문 Eq. 9 의미가 반대로 구현됨**: time-varying Frenet–Serret `q_d(t)`가 없고, Eq. 9를 속도 template으로 사용한다. Stage 3 재학습 전 최우선 수정.
+3. **mass 도메인 랜덤화 미구현**: 위 도메인 랜덤화 표 참조.
+4. **Isaac/runtime 계약 불일치**: quaternion hemisphere, integral dt/clamp/reset/stale 규칙과 Z-up/FLU→SNAME/FRD action 변환을 golden test로 통일해야 한다.
+5. **디버그 시각화 코드 중복**: `envs/traj_env.py`/`envs/vel_env.py`에 스러스터 추력 화살표 로직이 각각 구현됨 — 통합 여지.
+6. **`legacy/brov_env.py` 실행 불가**: relative import 파손, 레거시 참조용.
+7. **기존 full checkpoint는 reference가 아님**: `model_299.pt`는 512 env × 300 iteration으로 학습됐지만 위 desired-state 오류를 포함한다. actor tensor가 배포 TorchScript와 동일하다는 사실은 확인했으나 논문 재현 policy로 승인하지 않는다.
 
 ---
 
 ## 다음 개발 순서
 
-1. **학습 중 검증(validation) + wandb 연동** — `train.py`에 주기적 mid-training 평가와 로깅 추가. `step_1_NBV`의 방식(`train/train_GenNBV.py` 등)은 직접 만든 PPO 루프에 raw `wandb.init/log/watch/finish`를 손으로 꽂은 것이라 RSL-RL 기반인 `train.py`엔 그대로 못 옮김 — 대신 RSL-RL의 `RslRlOnPolicyRunnerCfg`가 자체 지원하는 `logger`/`wandb_project`/`wandb_entity` 필드(`agents/rsl_rl_ppo_cfg.py`의 `BROVVelPPORunnerCfg`에 추가)를 쓰는 게 올바른 경로. mid-training 평가 자체(주기적으로 정책을 멈추고 짧은 롤아웃 돌려 성능 확인)는 step_1의 `--eval_interval`/`--eval_episodes` CLI 플래그 네이밍과 "같은 env 인스턴스로 greedy rollout" 방식을 참고할 만함(`algorithm/algo_GenNBV.py`의 `run_eval()` 패턴). **아직 미구현.**
-2. **학습 중 검증에 비디오 녹화 옵션 추가** — 위 mid-training 평가 시, `train.py`에 사용자가 지정하는 CLI 플래그(예: `--eval_record_video`)에 따라 `test_policy.py`의 영상 기록 방식(`_save_video`, 카메라 세팅)을 재사용해 mp4로 저장. step_1_NBV엔 선례가 없음(영상 저장은 `evaluate/evaluate_utils.py`의 `save_episode_video`뿐이고 학습 루프/wandb와는 완전히 분리돼 있음) — step_2_BROV에서 새로 설계해야 함. **아직 미구현.**
-3. **mass 도메인 랜덤화(2단계)** — `root_physx_view.set_masses()` 기반 구현
-4. **부족구동 어뢰형 AUV 지원** — MarineGym iAUV(`m600.py`+`fin200.py`+`underwaterVehicleFin.py`) 참고, `robots/dynamics/`에 새 액추에이터(주추진기+핀) 추가. Fossen 코어는 그대로 재사용
-5. **step_3 통합** — step_1_NBV(수중 인지) + step_2_BROV(수중 물리), `LOSGuidance`를 NBV/커버리지 유도 모듈로 교체, 학습된 Sim2Swim 정책은 frozen 재사용
-
-**본 규모 학습(`num_envs=2048` 등)은 사용자가 직접 진행 중** — 이 목록에서 별도 항목으로 추적하지 않음.
+1. **Stage 3 P1 계약 수정** — Frenet–Serret `q_d(t)`, exact 0.5 m/s sphere command, 공용 16-D observation, explicit `T6`, mass DR와 golden tests를 먼저 구현한다.
+2. **시간 제한형 재학습** — debug visualization을 끈 2048 env headless profile로 3-iteration smoke 후 50 iteration candidate를 학습한다. 2048 env × 64 step capacity는 검증됐지만 corrected MDP 학습은 아직 시작하지 않았다.
+3. **자동 validation/checkpoint 선택** — reward가 아니라 0/0.1/0.5 m/s, 180° reversal, action/force clamp, 60 s integral gate로 선택한다. mid-training 영상은 이번 일정에서 제외한다.
+4. **부족구동 어뢰형 AUV 지원** — MarineGym iAUV(`m600.py`+`fin200.py`+`underwaterVehicleFin.py`) 참고, `robots/dynamics/`에 새 액추에이터(주추진기+핀) 추가. Fossen 코어는 그대로 재사용한다.
+5. **step_3 통합** — step_1_NBV(수중 인지) + step_2_BROV(수중 물리), `LOSGuidance`를 NBV/커버리지 유도 모듈로 교체하고 승인된 저수준 policy를 frozen 재사용한다.
 
 ---
 

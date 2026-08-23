@@ -1,0 +1,55 @@
+name: BROV2_Heavy
+
+# ── §2: mass/com/inertia는 여기 없음. USD(brov2_custom_physics.usda)에서 읽고 아래 expect와 대조(assert)한다 ──
+expect:
+  mass: 14.635
+  com: [0.001, 0.000, 0.003]
+  inertia: [0.289, 0.329, 0.337]
+
+# ── §3: 부력. PhysX가 모르는 값이므로 여기서 관리 (USD custom attribute 사용 안 함) ──
+volume: 0.014665            # m^3, displaced volume (역산값 — mass+0.03kgf 순부력 목표로 역산).
+                             # spec §3 원안은 +0.30kgf였으나 heave damping(33.0, 190.0) 조합 시
+                             # 종단속도 0.065m/s로 |ΔZ|<0.1m/10s 검증 기준을 못 넘겨 마진을 1/10로 축소.
+                             # test_neutral_buoyancy로 종단속도 ~0.0085m/s, ΔZ<0.1m/10s 확인 예정.
+coBM: [0.0, 0.0, 0.010]      # m, body frame (COM 기준). x,y는 좌우 대칭 가정, 실측 안 됨
+
+environment:
+  fluid_density: 1000.0       # kg/m^3, 담수
+  gravity: 9.81
+
+# ── §4: Fossen 유체계수 (von Benzon et al., JMSE 2022, 10, 1898, Table A1) ──
+hydro_coef:
+  added_mass:        [6.36, 7.12, 18.68, 0.189, 0.135, 0.222]
+  linear_damping:    [13.7, 0.0, 33.0, 0.0, 0.8, 0.0]
+  quadratic_damping: [141.0, 217.0, 190.0, 1.19, 0.47, 1.5]
+  source: "von Benzon et al., JMSE 2022, 10, 1898, Table A1"
+
+# ── §5.4, §6: 스러스터 — articulation 아님, USD 프레임(*_frame Xform)이 정본, 아래 list는 대조용 미러 ──
+thrusters:
+  num: 8
+  frame_prim_suffix: "_frame"   # USD에서 {name}{frame_prim_suffix} 프리미티브를 찾음
+  model: T200
+  max_thrust_forward: 64.1      # N, T200 다항식 역산값 (step_2_BROV/hydrodynamics.py 기준) — 데이터시트 미대조
+  max_thrust_reverse: -51.5     # N, 상동
+  time_constant: 0.05           # s, 1차 지연 시정수 (step_2_BROV/hydrodynamics.py _TAU와 일치)
+  deadzone: 0.075               # step_2_BROV/hydrodynamics.py _DEADBAND와 일치
+  list:                          # USD Xform과 대조(assert)용 미러. 정본은 USD.
+    # 2026-07-15: 좌우 쌍 Y좌표가 전부 ±3.5mm로 어긋나 있던 것을 발견 (body 원점
+    # 좌우대칭 오프셋으로 추정, brov2_spec.md §6 참조) — 쌍별 평균으로 대칭화함.
+    - {name: thruster_1_CCW, position: [0.1381,-0.1011,0.0016], axis: [-0.7071,-0.7071,0.0], spin: CCW}
+    - {name: thruster_2_CCW, position: [0.1381, 0.1011,0.0016], axis: [-0.7071, 0.7071,0.0], spin: CCW}
+    - {name: thruster_3_CW,  position: [-0.1376,-0.1003,0.0016], axis: [0.7071,-0.7071,0.0], spin: CW}
+    - {name: thruster_4_CW,  position: [-0.1376, 0.1003,0.0016], axis: [0.7071, 0.7071,0.0], spin: CW}
+    - {name: thruster_5_CCW, position: [0.1290,-0.2177,0.0608], axis: [0.0,0.0,-1.0], spin: CCW}
+    - {name: thruster_6_CW,  position: [0.1290, 0.2177,0.0608], axis: [0.0,0.0,-1.0], spin: CW}
+    - {name: thruster_7_CW,  position: [-0.1110,-0.2177,0.0608], axis: [0.0,0.0,-1.0], spin: CW}
+    - {name: thruster_8_CCW, position: [-0.1110, 0.2177,0.0608], axis: [0.0,0.0,-1.0], spin: CCW}
+
+sensors:
+  dvl:    {frame: DVL_frame,    rate_hz: 15, delay_s: 0.1, velocity_noise_std: 0.003}
+  camera: {frame: Camera_frame, convention: ros, fov_deg: 80, resolution: [640, 480]}
+  imu:    {rate_hz: 200, gyro_noise_std: 0.005, accel_noise_std: 0.05}
+
+sim:
+  physics_dt: 0.01     # s, 100 Hz (envCfg.py sim.dt와 일치)
+  decimation: 4         # -> 25 Hz control (envCfg.py decimation과 일치)

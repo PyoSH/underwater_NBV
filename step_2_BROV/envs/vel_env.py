@@ -36,15 +36,30 @@ from isaaclab.markers import (
     BLUE_ARROW_X_MARKER_CFG,
 )
 
-# 추력 벡터 디버그 시각화용 (envs/traj_env.py의 BROVTrajEnv._visualize_debug_overlays()와 동일 방식)
-from isaacsim.core.utils.extensions import enable_extension
-enable_extension("isaacsim.util.debug_draw")
-from isaacsim.util.debug_draw import _debug_draw
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from envs.vel_env_cfg import BROVVelEnvCfg
+from envs.observation_contract import (
+    build_velocity_observation,
+    canonicalize_quaternion,
+)
+from envs.desired_states import (
+    DeployV2Config,
+    DeployV2Scheduler,
+    DeployV3Config,
+    DeployV3Scheduler,
+    DeployV6Config,
+    DeployV6Scheduler,
+    PaperReferenceBatch,
+    PaperReferenceConfig,
+)
+from envs.dvl_realism import DVLRealismConfig, DVLRealismModel
+from action_frame_contract import (
+    T6_DIAGONAL,
+    build_policy_action_to_sname_frd_multiplier,
+)
 from robots.dynamics.brov2.thruster import BROV2ThrusterModel, build_allocation_matrix
+from robots.dynamics.brov2.mass_randomization import randomize_articulation_mass
 from robots.dynamics.fossen import Hydrodynamics
 from robots.dynamics.brov2.params import load_brov2_yaml, coBM_vector_ned, thruster_pos_dir_ned
 from guidance.los_guidance import _heading_from_direction  # 방향벡터 → 자세 쿼터니언 (목표속도 화살표용)
@@ -101,8 +116,28 @@ class BROVVelEnv(DirectRLEnv):
         # 할당행렬 B(6,8) → pseudo-inverse(8,6). YAML 위치/방향에서 매번 계산
         # (하드코딩 금지 — coBM/hydro_coef와 동일한 단일 정본 원칙).
         B = build_allocation_matrix(self._thruster._pos, self._thruster._dir)
-        self._B_pinv = torch.linalg.pinv(B).to(self.device)              # (8,6)
+        self._B = B.to(self.device)                                      # (6,8)
+        self._B_pinv = torch.linalg.pinv(self._B)                         # (8,6)
         self._f_max  = torch.tensor(cfg.f_max, device=self.device)       # (6,)
+        # deploy_v6: physical action-envelope clamp (see _pre_physics_step).
+        # f_max/WRENCH_SCALE are never touched -- only the action that
+        # multiplies it is bounded, before that multiplication happens.
+        self._action_envelope = torch.tensor(
+            cfg.deploy_v6_action_abs_limit, device=self.device
+        )
+        self._action_to_sname_multiplier = (
+            build_policy_action_to_sname_frd_multiplier(
+                cfg.f_max,
+                contract=cfg.action_contract,
+                dtype=self._f_max.dtype,
+                device=self.device,
+            )
+        )
+        self._sname_to_zup_sign = torch.tensor(
+            T6_DIAGONAL, dtype=self._f_max.dtype, device=self.device
+        )
+        lower_force, upper_force = self._thruster.force_limits_n
+        self._thruster_force_scale = max(abs(lower_force), abs(upper_force))
 
         # 도메인 랜덤화 기준값 (nominal, hydro.randomize() 오프셋/배율 기준)
         self._nominal_added_mass_rot = torch.tensor(
@@ -115,32 +150,176 @@ class BROVVelEnv(DirectRLEnv):
         self._cmd_quat = torch.zeros(self.num_envs, 4, device=self.device)   # 속도궤적 방향 랜덤화용
         self._z_v      = torch.zeros(self.num_envs, 3, device=self.device)
         self._z_q      = torch.zeros(self.num_envs, 3, device=self.device)
+        # Integrals advance once per unique policy sample.  This keeps reset
+        # observations at z=0 and makes duplicate getter calls idempotent,
+        # matching the source-sample gate used by brov_ros2.
+        self._last_integrated_episode_step = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
         self._actions  = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
+        self._prev_actions = torch.zeros_like(self._actions)
+        self._raw_actions = torch.zeros_like(self._actions)
+        # [-1,1]-clamped actor output, before any deploy_v6 envelope clamp --
+        # matches real /brov/action_raw exactly (see _pre_physics_step).
+        self._pre_envelope_actions = torch.zeros_like(self._actions)
+        self._force_requested = torch.zeros(self.num_envs, 8, device=self.device)
+        self._force_limited = torch.zeros_like(self._force_requested)
+        self._wrench_requested_zup = torch.zeros(self.num_envs, 6, device=self.device)
+        self._wrench_achieved_zup = torch.zeros_like(self._wrench_requested_zup)
+        self._mass_scale = torch.ones(self.num_envs, 1, device=self.device)
+        self._command_transition_mask = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._command_transition_mode = torch.full(
+            (self.num_envs,), -1, dtype=torch.long, device=self.device
+        )
+        self._command_reversal_mask = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
 
-        # 추력 벡터 디버그 시각화 — 스러스터 위치/방향(SNAME) → Z-up body frame으로 미리 변환
-        # (envs/traj_env.py의 BROVTrajEnv와 동일 방식 — 실제 생성된 self._thruster 인스턴스 값 사용).
-        t3 = torch.tensor([1., -1., -1.], device=self.device)
-        self._thruster_pos_zup = self._thruster._pos * t3   # (8,3)
-        self._thruster_dir_zup = self._thruster._dir * t3   # (8,3)
-        self._draw = _debug_draw.acquire_debug_draw_interface()
+        command_seed = int(cfg.seed if cfg.seed is not None else 42)
+        self._paper_reference = None
+        self._deploy_scheduler = None
+        if cfg.command_profile == "paper_ref_v1":
+            self._paper_reference = PaperReferenceBatch(
+                self.num_envs,
+                device=self.device,
+                seed=command_seed,
+                config=PaperReferenceConfig(
+                    speed_mps=cfg.paper_command_speed,
+                    trajectory_coefficients=tuple(cfg.cmd_coeffs),
+                    trajectory_omega_rad_s=cfg.cmd_omega,
+                    episode_length_s=cfg.episode_length_s,
+                ),
+            )
+        elif cfg.command_profile == "deploy_v2":
+            self._deploy_scheduler = DeployV2Scheduler(
+                self.num_envs,
+                device=self.device,
+                seed=command_seed,
+                config=DeployV2Config(
+                    episode_length_s=cfg.episode_length_s,
+                    transition_time_range_s=tuple(
+                        cfg.command_transition_time_range_s
+                    ),
+                    speed_bins_mps=tuple(cfg.deploy_speed_bins),
+                    exact_reversal=True,
+                    policy_dt_s=self._policy_dt,
+                    trajectory_coefficients=tuple(cfg.cmd_coeffs),
+                    trajectory_omega_rad_s=cfg.cmd_omega,
+                ),
+            )
+        elif cfg.command_profile == "deploy_v3":
+            self._deploy_scheduler = DeployV3Scheduler(
+                self.num_envs,
+                device=self.device,
+                seed=command_seed,
+                config=DeployV3Config(
+                    episode_length_s=cfg.episode_length_s,
+                    leg_duration_range_s=tuple(cfg.deploy_v3_leg_duration_range_s),
+                    speed_bins_mps=tuple(cfg.deploy_speed_bins),
+                    new_attitude_probability=cfg.deploy_v3_new_attitude_probability,
+                    policy_dt_s=self._policy_dt,
+                    trajectory_coefficients=tuple(cfg.cmd_coeffs),
+                    trajectory_omega_rad_s=cfg.cmd_omega,
+                    max_legs=cfg.deploy_v3_max_legs,
+                ),
+            )
+        elif cfg.command_profile == "deploy_v6":
+            self._deploy_scheduler = DeployV6Scheduler(
+                self.num_envs,
+                device=self.device,
+                seed=command_seed,
+                config=DeployV6Config(
+                    episode_length_s=cfg.episode_length_s,
+                    leg_duration_range_s=tuple(cfg.deploy_v3_leg_duration_range_s),
+                    speed_bins_mps=tuple(cfg.deploy_speed_bins),
+                    new_attitude_probability=cfg.deploy_v3_new_attitude_probability,
+                    policy_dt_s=self._policy_dt,
+                    trajectory_coefficients=tuple(cfg.cmd_coeffs),
+                    trajectory_omega_rad_s=cfg.cmd_omega,
+                    max_legs=cfg.deploy_v3_max_legs,
+                    los_coupled_retarget_probability=(
+                        cfg.deploy_v6_los_coupled_retarget_probability
+                    ),
+                ),
+            )
+        elif cfg.command_profile != "legacy_eq9_velocity":
+            raise ValueError(f"unsupported command profile {cfg.command_profile!r}")
 
-        # 현재/목표 자세·목표 속도 화살표(IsaacLab 내장 debug-vis 훅) — 활성화
-        self.set_debug_vis(True)
+        # deploy_v4 (spec item B): DVL sensor realism. Only v_e_b/z_v pass
+        # through this -- q_e/omega_b stay on the IMU path (see
+        # envs/dvl_realism.py).
+        self._dvl_realism = None
+        if cfg.enable_dvl_realism:
+            self._dvl_realism = DVLRealismModel(
+                self.num_envs,
+                device=self.device,
+                seed=command_seed,
+                config=DVLRealismConfig(
+                    rate_hz_range=tuple(cfg.dvl_rate_hz_range),
+                    noise_std_range_mps=tuple(cfg.dvl_noise_std_range_mps),
+                    delay_s_range=tuple(cfg.dvl_delay_s_range),
+                    policy_dt_s=self._policy_dt,
+                ),
+            )
+
+        # Debug drawing is deliberately lazy.  ``--headless`` only disables the
+        # window; it does not make ``draw_lines(...tolist())`` free.  The previous
+        # implementation updated 8 thruster arrows for every parallel environment
+        # during training, so visualization is now an explicit evaluation option.
+        self._draw = None
+        self.set_debug_vis(cfg.debug_vis)
 
     def _setup_scene(self) -> None:
         self.scene.clone_environments(copy_from_source=False)
         self.scene.filter_collisions(global_prim_paths=[])
 
+    def _current_action_envelope(self) -> torch.Tensor:
+        """deploy_v6b only: ramp from [1]*6 down to the target envelope.
+
+        Holds at the exact target envelope for the last
+        ``action_envelope_curriculum_hold_fraction`` of training so the
+        exported checkpoint is trained under the real target, not a
+        mid-ramp one. No-op (returns the fixed target) unless
+        ``enable_action_envelope_curriculum`` is set.
+        """
+        if not self.cfg.enable_action_envelope_curriculum:
+            return self._action_envelope
+        total = max(1, self.cfg.action_envelope_curriculum_total_steps)
+        ramp_total = max(
+            1.0, total * (1.0 - self.cfg.action_envelope_curriculum_hold_fraction)
+        )
+        progress = min(1.0, self.common_step_counter / ramp_total)
+        full = torch.ones_like(self._action_envelope)
+        return (1.0 - progress) * full + progress * self._action_envelope
+
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
-        self._actions = actions.clamp(-1.0, 1.0)
+        self._prev_actions.copy_(self._actions)
+        self._raw_actions = actions.clone()
+        self._pre_envelope_actions = actions.clamp(-1.0, 1.0)
+        if self.cfg.enable_action_envelope_clamp:
+            envelope = self._current_action_envelope()
+            self._actions = self._pre_envelope_actions.clamp(-envelope, envelope)
+        else:
+            self._actions = self._pre_envelope_actions
 
     def _apply_action(self) -> None:
         """6-dim wrench → B_pinv 할당 → 8-thruster PWM → 추력/유체역학 계산 후 외력 적용."""
-        tau_cmd   = self._f_max * self._actions                              # (N,6)
-        f_desired = (self._B_pinv @ tau_cmd.unsqueeze(-1)).squeeze(-1)       # (N,8) [N]
-        pwm = self._thruster.inverse_thrust(f_desired)
+        # The policy speaks FLU/Z-up.  The allocation matrix is SNAME/FRD.
+        # Cache the six signed scale factors at construction so this 100 Hz
+        # hot path has no validation or device-to-host synchronization.
+        tau_cmd_sname = self._actions * self._action_to_sname_multiplier
+        self._wrench_requested_zup.copy_(
+            tau_cmd_sname * self._sname_to_zup_sign
+        )
+        f_desired = (self._B_pinv @ tau_cmd_sname.unsqueeze(-1)).squeeze(-1)
+        self._force_requested.copy_(f_desired)
+        self._force_limited.copy_(self._thruster.clamp_thrust(f_desired))
+        pwm = self._thruster.inverse_thrust(self._force_limited)
 
         f_thrust, t_thrust = self._thruster.compute(pwm)
+        self._wrench_achieved_zup.copy_(torch.cat((f_thrust, t_thrust), dim=-1))
         f_hydro, t_hydro = self._hydro.compute(
             self._robot.data.root_quat_w,
             self._robot.data.root_lin_vel_b,
@@ -153,7 +332,23 @@ class BROVVelEnv(DirectRLEnv):
             forces=total_forces, torques=total_torques, body_ids=[0]
         )
 
-        self._visualize_thrust_arrows()
+        if self.cfg.debug_vis:
+            self._visualize_thrust_arrows()
+
+    def _ensure_debug_draw(self) -> None:
+        """Lazily create debug-draw resources only for an opted-in visual run."""
+        if self._draw is not None:
+            return
+
+        from isaacsim.core.utils.extensions import enable_extension
+
+        enable_extension("isaacsim.util.debug_draw")
+        from isaacsim.util.debug_draw import _debug_draw
+
+        t3 = torch.tensor([1.0, -1.0, -1.0], device=self.device)
+        self._thruster_pos_zup = self._thruster._pos * t3
+        self._thruster_dir_zup = self._thruster._dir * t3
+        self._draw = _debug_draw.acquire_debug_draw_interface()
 
     def _visualize_thrust_arrows(self) -> None:
         """스러스터 8개의 실제 추력을 world-space 화살표(화살촉 포함)로 그린다.
@@ -163,6 +358,9 @@ class BROVVelEnv(DirectRLEnv):
         스텝 `robots/dynamics/brov2/thruster.py`가 계산한 실제 추력값을 그대로 쓴다(COB 점 표시는
         `traj_env.py` 쪽에만 있음 — velEnv는 CoB가 env별로 랜덤화돼 있어 여기서는 생략).
         """
+        if self._draw is None:
+            return
+
         root_pos  = self._robot.data.root_pos_w                 # (N,3)
         root_quat = self._robot.data.root_quat_w                # (N,4)
         thrust    = self._thruster._last_thrust                 # (N,8)
@@ -219,6 +417,7 @@ class BROVVelEnv(DirectRLEnv):
         """현재/목표 자세, 목표 속도 화살표 — Project_BROV/brov_env.py의
         VisualizationMarkers 패턴을 그대로 따름 (IsaacLab DirectRLEnv 내장 훅)."""
         if debug_vis:
+            self._ensure_debug_draw()
             if not hasattr(self, "cur_att_visualizer"):
                 marker_cfg = GREEN_ARROW_X_MARKER_CFG.copy()
                 marker_cfg.prim_path = "/Visuals/Command/cur_attitude"
@@ -273,21 +472,56 @@ class BROVVelEnv(DirectRLEnv):
         self._guidance = guidance
 
     def _current_v_d_b(self) -> torch.Tensor:
-        """Sim2Swim Eq.9: v_d^b(t) = q_cmd ⊗ [a, b·sin(ωt), c·cos(ωt)].
+        """Return the selected desired-state contract at the current policy tick.
 
-        q_cmd는 에피소드마다 랜덤 샘플되는 방향(자세와는 별개) — 템플릿 곡선의
-        모양은 고정하고 방향만 env마다 다양화한다. `attach_guidance()`로 외부
-        유도기가 연결된 경우엔 이 자동생성 대신 유도기 출력을 그대로 쓴다
-        (q_d도 여기서 함께 갱신 — 유도기가 자세 명령까지 책임지므로).
+        ``legacy_eq9_velocity`` preserves model_299 exactly.  ``paper_ref_v1``
+        uses Eq.9 for Frenet--Serret attitude and an independent exact 0.5 m/s
+        S² velocity.  ``deploy_v2`` adds one balanced stop/restart/reversal
+        transition.  Attached LOS guidance always takes precedence for eval.
         """
         guidance = getattr(self, "_guidance", None)
         if guidance is not None:
             pos_env = self._robot.data.root_pos_w - self.scene.env_origins
             v_d_b, q_d = guidance.compute(pos_env, self._robot.data.root_quat_w)
             self._q_d[:] = q_d
+            self._command_transition_mask.zero_()
+            self._command_transition_mode.fill_(-1)
+            self._command_reversal_mask.zero_()
             return v_d_b
 
         t = self.episode_length_buf.float() * self._policy_dt
+        if self._paper_reference is not None:
+            v_d_b, q_d = self._paper_reference.sample(t)
+            self._q_d.copy_(q_d)
+            self._command_transition_mask.zero_()
+            self._command_transition_mode.fill_(-1)
+            self._command_reversal_mask.zero_()
+            return v_d_b
+
+        if self._deploy_scheduler is not None:
+            sample = self._deploy_scheduler.sample(t)
+            self._q_d.copy_(sample.desired_quaternion)
+            self._command_transition_mask.copy_(sample.transition_mask)
+            self._command_transition_mode.copy_(sample.transition_mode)
+            self._command_reversal_mask.copy_(sample.reversal_mask)
+            los_coupled_mask = getattr(sample, "los_coupled_mask", None)
+            if los_coupled_mask is not None:
+                # deploy_v6 item 4: mirror guidance/los_guidance.py's
+                # heading_mode="align", where v_d_b is the world-frame LOS
+                # direction rotated into the vehicle's CURRENT attitude
+                # every tick -- not a static per-leg body-frame value. Uses
+                # live root_quat_w, exactly like LOSGuidance.compute() does.
+                q = self._robot.data.root_quat_w
+                v_body_coupled = math_utils.quat_apply(
+                    math_utils.quat_conjugate(q), sample.world_direction
+                )
+                return torch.where(
+                    los_coupled_mask.unsqueeze(-1), v_body_coupled, sample.velocity_body
+                )
+            return sample.velocity_body
+
+        # Frozen model_299 compatibility path.  This is the historical
+        # misinterpretation of Eq.9 and must never be used for a new artifact.
         a, b, c = self.cfg.cmd_coeffs
         w = self.cfg.cmd_omega
         template = torch.stack(
@@ -299,15 +533,93 @@ class BROVVelEnv(DirectRLEnv):
     def _get_observations(self) -> dict:
         self._v_d_b = self._current_v_d_b()
 
+        # deploy_v3 only (guarded by cfg flag -- deploy_v2's single mid-episode
+        # transition keeps carrying the integral through it, unchanged, so old
+        # checkpoints stay reproducible).  Mirrors the deployment-side
+        # waypoint-transition reset (bumpless transfer): z_v/z_q jump to 0
+        # exactly on the tick the active command leg changes.  This is safe
+        # because z_v=0 is a value the policy has seen at every episode start;
+        # per project_step2_brov_retrain_spec (memory), this alone only
+        # accounts for a minority of the observed windup (~27% in the real
+        # Case-A bag) -- the episode-length extension is what makes the
+        # majority (sustained single-leg accumulation) trainable.
+        if self.cfg.reset_integral_on_command_transition and bool(
+            self._command_transition_mask.any()
+        ):
+            reset_mask = self._command_transition_mask.unsqueeze(-1)
+            self._z_v = torch.where(reset_mask, torch.zeros_like(self._z_v), self._z_v)
+            self._z_q = torch.where(reset_mask, torch.zeros_like(self._z_q), self._z_q)
+
         q = self._robot.data.root_quat_w
         q_e = math_utils.quat_mul(math_utils.quat_conjugate(self._q_d), q)   # q̄_d ⊗ q
-        v_e_b = self._robot.data.root_lin_vel_b - self._v_d_b
         omega_b = self._robot.data.root_ang_vel_b
 
-        self._z_v = self._z_v + v_e_b * self._policy_dt
-        self._z_q = self._z_q + q_e[:, 1:] * self._policy_dt   # vector part만 적분
+        # deploy_v4 (spec item B): the OBSERVED v_e_b uses a delayed/held/
+        # noised "DVL measurement" of body velocity instead of the perfect
+        # PhysX value.  Delay is applied to the measurement itself, not to
+        # v_e_b -- v_d_b keeps updating in real time (guidance has no sensor
+        # lag), matching brov_base/observation.py's real structure exactly.
+        # _get_rewards() below independently recomputes v_e_b from the true
+        # PhysX velocity, so only the *observation* -- never the training
+        # signal -- sees this realism model.
+        dvl_fresh_mask = None
+        if self._dvl_realism is not None:
+            t_episode = self.episode_length_buf.float() * self._policy_dt
+            v_measured, dvl_fresh_mask = self._dvl_realism.step(
+                self._robot.data.root_lin_vel_b, t_episode
+            )
+        else:
+            v_measured = self._robot.data.root_lin_vel_b
+        v_e_b = v_measured - self._v_d_b
 
-        obs = torch.cat([q_e, v_e_b, omega_b, self._z_v, self._z_q], dim=-1)   # 4+3+3+3+3=16
+        if self.cfg.observation_contract == "legacy_exact_0p5":
+            self._z_v = self._z_v + v_e_b * self._policy_dt
+            self._z_q = self._z_q + q_e[:, 1:] * self._policy_dt
+            obs = torch.cat([q_e, v_e_b, omega_b, self._z_v, self._z_q], dim=-1)
+        else:
+            integrate_mask = (
+                self.episode_length_buf != self._last_integrated_episode_step
+            )
+            integrate_velocity = (
+                integrate_mask if dvl_fresh_mask is None
+                else integrate_mask & dvl_fresh_mask
+            )
+            integrate_attitude = integrate_mask
+            # deploy_v6 (2026-08-18 3rd-round diagnosis): per-axis
+            # conditional-integration anti-windup. Halts a z_v/z_q axis's
+            # integration on ticks where its own action is being clamped
+            # away by the envelope -- reuses the same pre_envelope_actions
+            # vs action_envelope comparison as the envelope_overflow reward
+            # term in _get_rewards. brov_base/observation.py's independent
+            # z_v/z_q reimplementation needs this same rule for parity.
+            if self.cfg.enable_velocity_integral_antiwindup or (
+                self.cfg.enable_attitude_integral_antiwindup
+            ):
+                not_saturated = (
+                    self._pre_envelope_actions.abs() <= self._action_envelope
+                )   # (N,6) bool: surge,sway,heave,roll,pitch,yaw
+                if self.cfg.enable_velocity_integral_antiwindup:
+                    integrate_velocity = (
+                        integrate_velocity.unsqueeze(-1) & not_saturated[:, 0:3]
+                    )
+                if self.cfg.enable_attitude_integral_antiwindup:
+                    integrate_attitude = (
+                        integrate_mask.unsqueeze(-1) & not_saturated[:, 3:6]
+                    )
+            obs, self._z_v, self._z_q = build_velocity_observation(
+                quaternion_error_wxyz=q_e,
+                velocity_error_body=v_e_b,
+                angular_velocity_body=omega_b,
+                integral_velocity=self._z_v,
+                integral_attitude=self._z_q,
+                dt=self._policy_dt,
+                integrate=integrate_mask,
+                integrate_velocity=integrate_velocity,
+                integrate_attitude=integrate_attitude,
+                integral_velocity_limit=self.cfg.integral_velocity_limit,
+                integral_attitude_limit=self.cfg.integral_attitude_limit,
+            )
+            self._last_integrated_episode_step.copy_(self.episode_length_buf)
         return {"policy": obs}
 
     def _get_rewards(self) -> torch.Tensor:
@@ -316,15 +628,53 @@ class BROVVelEnv(DirectRLEnv):
 
         q = self._robot.data.root_quat_w
         q_e = math_utils.quat_mul(math_utils.quat_conjugate(self._q_d), q)
+        if self.cfg.observation_contract != "legacy_exact_0p5":
+            q_e = canonicalize_quaternion(q_e)
         v_e_b = self._robot.data.root_lin_vel_b - self._v_d_b
         omega_b = self._robot.data.root_ang_vel_b
 
+        if cfg.reward_profile == "paper_eq5_8":
+            return (
+                cfg.rew_w_quat   * torch.exp(-(q_e[:, 1:] ** 2).sum(-1))
+                + cfg.rew_w_vel   * torch.exp(-(v_e_b ** 2).sum(-1))
+                + cfg.rew_w_omega * torch.exp(-(omega_b ** 2).sum(-1))
+                + cfg.rew_w_quat  * torch.exp(-math_utils.quat_error_magnitude(self._q_d, q))
+                + cfg.rew_w_action* torch.exp(-self._actions.norm(dim=-1))
+            )
+
+        vel_error_sq = (v_e_b ** 2).sum(-1)
+        action_delta = self._actions - self._prev_actions
+        clamp_residual = (
+            self._force_requested - self._force_limited
+        ) / self._thruster_force_scale
+        # raw_overflow sees the actor's pre-clamp output -- self._actions is
+        # already clamped by _pre_physics_step, so it cannot distinguish a
+        # raw output that barely exceeded [-1,1] from one that overshot it
+        # by several units. Both existing action penalties above are blind
+        # to this (see MK2_SIM2SIM_DEPLOY_RESULT.md sec.6/8 and
+        # project_step2_brov_retrain_spec memory item D).
+        raw_overflow = (self._raw_actions.abs() - 1.0).clamp_min(0.0)
+        # deploy_v6 item 1: the actor's [-1,1]-clamped-but-pre-envelope
+        # output beyond the deployment envelope has zero marginal physical
+        # effect once enable_action_envelope_clamp makes self._actions the
+        # envelope-limited value -- without this term the actor has no
+        # reason to stop producing it (mirrors deploy_v5's raw_overflow
+        # penalty, item D, keyed to the envelope instead of 1.0).
+        envelope_overflow = (
+            self._pre_envelope_actions.abs() - self._action_envelope
+        ).clamp_min(0.0)
         return (
-            cfg.rew_w_quat   * torch.exp(-(q_e[:, 1:] ** 2).sum(-1))                       # Eq.6, o_i=q_e
-            + cfg.rew_w_vel   * torch.exp(-(v_e_b ** 2).sum(-1))                           # Eq.6, o_i=v_e^b
-            + cfg.rew_w_omega * torch.exp(-(omega_b ** 2).sum(-1))                         # Eq.6, o_i=ω^b
-            + cfg.rew_w_quat  * torch.exp(-math_utils.quat_error_magnitude(self._q_d, q))  # Eq.7, r_q (제곱 없음)
-            + cfg.rew_w_action* torch.exp(-self._actions.norm(dim=-1))                     # Eq.8
+            cfg.deploy_rew_w_quat * torch.exp(-(q_e[:, 1:] ** 2).sum(-1))
+            + cfg.deploy_rew_w_quat * torch.exp(-math_utils.quat_error_magnitude(self._q_d, q))
+            + cfg.deploy_rew_w_vel_coarse * torch.exp(-vel_error_sq)
+            + cfg.deploy_rew_w_vel_precision
+            * torch.exp(-vel_error_sq / (cfg.deploy_rew_vel_sigma ** 2))
+            + cfg.deploy_rew_w_omega * torch.exp(-(omega_b ** 2).sum(-1))
+            - cfg.deploy_penalty_action_l2 * (self._actions ** 2).sum(-1)
+            - cfg.deploy_penalty_action_delta_l2 * (action_delta ** 2).sum(-1)
+            - cfg.deploy_penalty_thruster_clamp_l2 * (clamp_residual ** 2).sum(-1)
+            - cfg.deploy_penalty_raw_overflow_l2 * (raw_overflow ** 2).sum(-1)
+            - cfg.deploy_penalty_envelope_overflow_l2 * (envelope_overflow ** 2).sum(-1)
         )
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -349,13 +699,52 @@ class BROVVelEnv(DirectRLEnv):
         self._robot.write_root_pose_to_sim(default_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_state[:, 7:], env_ids)
 
-        # 속도/자세 명령 재샘플 — 에피소드당 1회, episode_length_s 동안 고정
-        self._cmd_quat[env_ids_t] = math_utils.random_orientation(n, device=self.device)
-        self._q_d[env_ids_t]      = math_utils.random_orientation(n, device=self.device)
+        # Per-profile desired state.  Only the frozen compatibility profile
+        # consumes the historical process-global random orientations.
+        if self._paper_reference is not None:
+            self._paper_reference.reset(env_ids_t)
+        elif self._deploy_scheduler is not None:
+            self._deploy_scheduler.reset(env_ids_t)
+        else:
+            self._cmd_quat[env_ids_t] = math_utils.random_orientation(
+                n, device=self.device
+            )
+            self._q_d[env_ids_t] = math_utils.random_orientation(
+                n, device=self.device
+            )
+        self._command_transition_mask[env_ids_t] = False
+        self._command_transition_mode[env_ids_t] = -1
+        self._command_reversal_mask[env_ids_t] = False
         self._z_v[env_ids_t] = 0.0
         self._z_q[env_ids_t] = 0.0
+        self._last_integrated_episode_step[env_ids_t] = 0
+        self._actions[env_ids_t] = 0.0
+        self._prev_actions[env_ids_t] = 0.0
+        self._raw_actions[env_ids_t] = 0.0
+        self._pre_envelope_actions[env_ids_t] = 0.0
+        self._force_requested[env_ids_t] = 0.0
+        self._force_limited[env_ids_t] = 0.0
+        self._wrench_requested_zup[env_ids_t] = 0.0
+        self._wrench_achieved_zup[env_ids_t] = 0.0
 
-        # ── 도메인 랜덤화 1단계 (volume/CoB/added_mass, mass는 2단계로 연기) ──
+        # Paper-disclosed mass randomization.  Inertia uses the identical
+        # ratio and every reset starts from PhysX nominal values (no drift).
+        if self.cfg.dr_enable_mass:
+            mass_result = randomize_articulation_mass(
+                self._robot,
+                env_ids_t,
+                relative_range=self.cfg.dr_mass_scale_range,
+            )
+            self._mass_scale[env_ids_t] = mass_result.scale.to(self.device)
+        else:
+            mass_result = randomize_articulation_mass(
+                self._robot,
+                env_ids_t,
+                relative_range=(1.0, 1.0),
+            )
+            self._mass_scale[env_ids_t] = mass_result.scale.to(self.device)
+
+        # ── 도메인 랜덤화: volume/CoB/added-mass ──
         vol_lo, vol_hi = self.cfg.dr_volume_range
         volume = math_utils.sample_uniform(vol_lo, vol_hi, (n,), self.device)
 
@@ -369,8 +758,22 @@ class BROVVelEnv(DirectRLEnv):
             env_ids_t, volume=volume, cob_offset=cob_offset, added_mass_rot=added_mass_rot,
         )
 
+        # deploy_v4 (spec item C): voltage sag (shared across all 8
+        # thrusters -- one battery) x per-thruster manufacturing/wear
+        # variance (independent per thruster).  1.0 = datasheet curve as-is.
+        if self.cfg.dr_enable_thrust_scale:
+            volt_lo, volt_hi = self.cfg.dr_thrust_voltage_scale_range
+            voltage_scale = math_utils.sample_uniform(volt_lo, volt_hi, (n, 1), self.device)
+            ind_lo, ind_hi = self.cfg.dr_thrust_individual_scale_range
+            individual_scale = math_utils.sample_uniform(ind_lo, ind_hi, (n, 8), self.device)
+            self._thruster.randomize(
+                env_ids_t, thrust_scale=voltage_scale * individual_scale
+            )
+
         self._thruster.reset(env_ids_t)
         self._hydro.reset(env_ids_t)
+        if self._dvl_realism is not None:
+            self._dvl_realism.reset(env_ids_t)
 
         guidance = getattr(self, "_guidance", None)
         if guidance is not None:

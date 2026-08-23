@@ -1,0 +1,20 @@
+# Stage-2 diagnostic oracle.  This keeps the real-like no-GPS DVL/INS/AHRS
+# estimator topology, but removes DVL measurement delay and noise so that EKF
+# structure can be separated from the provisional sensor model.
+AHRS_EKF_TYPE 3
+EK2_ENABLE 0
+EK3_ENABLE 1
+VISO_TYPE 1
+EK3_SRC1_POSXY 6
+EK3_SRC1_VELXY 6
+EK3_SRC1_POSZ 1
+EK3_SRC1_VELZ 0
+EK3_SRC1_YAW 1
+VISO_DELAY_MS 0
+VISO_ORIENT 0
+VISO_POS_X 0
+VISO_POS_Y 0
+VISO_POS_Z 0
+SIM_GPS_DISABLE 1
+GPS1_TYPE 0
+GPS2_TYPE 0

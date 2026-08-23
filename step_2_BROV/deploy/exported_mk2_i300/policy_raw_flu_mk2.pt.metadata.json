@@ -1,0 +1,18 @@
+{
+  "action_contract": "explicit_flu_zup_to_sname_frd_v1",
+  "checkpoint": "/workspace/OceanRL_test/step_2_BROV/logs/stage3_deploy_v2_2048x128_seed42_i300_20260817/model_299.pt",
+  "checkpoint_contract_verified": true,
+  "checkpoint_sha256": "f425f7046e828f98a89f083a0cb669a72d0b5b737bf579a4e55bf3b21c955004",
+  "command_profile": "deploy_v2",
+  "input_dim": 16,
+  "observation_contract": "brov_velocity_observation_v2",
+  "output_dim": 6,
+  "policy": "/workspace/OceanRL_test/step_2_BROV/deploy/exported_mk2_i300/policy_raw_flu_mk2.pt",
+  "policy_sha256": "5f52f2966ecb9b5ba50a98e20eaa1b154d09685616686690857cab09236dad1b",
+  "profile": "deploy_v2",
+  "reward_profile": "deploy_v2",
+  "schema": "brov_torchscript_policy_v2",
+  "seed": 42,
+  "training_manifest": "/workspace/OceanRL_test/step_2_BROV/logs/stage3_deploy_v2_2048x128_seed42_i300_20260817/artifact_manifest.json",
+  "training_manifest_sha256": "7432a594c8e56c4898f9f63d8eb795bc876515e43ccd89be7baf0a848a30d32d"
+}
