@@ -238,14 +238,47 @@ class EnvUtilsMixin:
         return verts, faces
 
     def _triangulate(self, indices: np.ndarray, counts: np.ndarray) -> np.ndarray:
-        triangles = []
-        offset = 0
-        for n in counts:
-            v0 = indices[offset]
-            for j in range(1, n - 1):
-                triangles.append([v0, indices[offset + j], indices[offset + j + 1]])
-            offset += n
-        return np.array(triangles, dtype=np.int64)
+        """다각형 face를 fan 삼각분할한다 — face당 (v0, v_j, v_{j+1}), j=1..n-2.
+
+        **성능 주의**: 여기는 리셋 비용 전체를 좌우하는 지점이다. 원래는 face마다
+        도는 이중 Python 루프였는데, 바위 메쉬가 **삼각형 163만 개**라 env 하나당
+        2.5초가 걸렸다. `_voxelize_gt_mesh()`가 env마다 이걸 호출하므로 비용이
+        env 수에 비례해 늘어나 병렬화 이득을 전부 잡아먹었다 — 2026-08-26 프로파일
+        실측으로 전체 wall time의 **80~83%**(env 16/64 공통, 물리는 0.6%)를
+        차지했고, 128 env가 첫 롤아웃도 못 끝내고 2시간 넘게 멈춰 있던 원인이다.
+        아래는 동일 결과를 내는 벡터화 버전이다.
+        """
+        counts = np.asarray(counts, dtype=np.int64)
+        indices = np.asarray(indices, dtype=np.int64)
+
+        # 이미 전부 삼각형인 메쉬(현재 바위 자산이 이 경우)는 reshape로 끝난다.
+        if counts.size == 0:
+            return np.zeros((0, 3), dtype=np.int64)
+        if bool((counts == 3).all()):
+            return indices.reshape(-1, 3)
+
+        # 혼합 다각형 메쉬 일반 경로 — Stage 4에서 타겟 메쉬 풀을 늘릴 때를 대비.
+        tri_per_face = np.maximum(counts - 2, 0)
+        total = int(tri_per_face.sum())
+        if total == 0:
+            return np.zeros((0, 3), dtype=np.int64)
+
+        # face_start[i] = i번째 face의 indices 내 시작 오프셋 (원본의 `offset`)
+        face_start = np.zeros(counts.size, dtype=np.int64)
+        np.cumsum(counts[:-1], out=face_start[1:])
+        # tri_start[i] = i번째 face가 만드는 삼각형들의 출력 배열 내 시작 위치
+        tri_start = np.zeros(counts.size, dtype=np.int64)
+        np.cumsum(tri_per_face[:-1], out=tri_start[1:])
+
+        face_id = np.repeat(np.arange(counts.size, dtype=np.int64), tri_per_face)
+        j = np.arange(total, dtype=np.int64) - tri_start[face_id] + 1  # 원본의 `j`
+        base = face_start[face_id]
+
+        tris = np.empty((total, 3), dtype=np.int64)
+        tris[:, 0] = indices[base]
+        tris[:, 1] = indices[base + j]
+        tris[:, 2] = indices[base + j + 1]
+        return tris
 
     def _randomize_rock_pose(self, env_ids: Sequence[int]) -> None:
         from pxr import UsdGeom, Gf
