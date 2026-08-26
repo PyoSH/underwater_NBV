@@ -61,6 +61,14 @@ parser.add_argument("--ckpt_dir",       type=str,   default="checkpoints")
 parser.add_argument("--save_interval",  type=int,   default=20, help="N 롤아웃마다 저장")
 parser.add_argument("--smoke", action="store_true",
                     help="스모크 모드: 소규모로 몇 롤아웃만 돌고 종료, 이상치 검사 강화")
+parser.add_argument("--wandb_project", type=str, default="step3_NBV_BROV",
+                    help="wandb 프로젝트. --no_wandb로 끌 수 있다")
+parser.add_argument("--wandb_name",    type=str, default=None,
+                    help="run 이름(미지정 시 wandb가 자동 생성)")
+parser.add_argument("--wandb_entity",  type=str, default=os.environ.get("WANDB_ENTITY"),
+                    help="wandb entity. 미지정 시 로그인 계정 기본값을 쓴다 "
+                         "(계정명에 대시가 붙는 경우가 있으니 주의)")
+parser.add_argument("--no_wandb", action="store_true", help="wandb 로깅 비활성화")
 
 AppLauncher.add_app_launcher_args(parser)
 if "--enable_cameras" not in sys.argv:
@@ -75,6 +83,13 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# wandb가 없거나 로그인이 안 돼 있어도 학습 자체는 계속돼야 한다 — 9시간짜리 런이
+# 로깅 문제로 죽으면 손해가 크다.
+try:
+    import wandb
+except ImportError:
+    wandb = None
 from envs.env_cfg import NBVBROVEnvCfg
 from envs.env import NBVBROVEnv
 from algorithm.algo_nbv_continuous import (
@@ -120,11 +135,30 @@ def main() -> int:
         env.cfg.curriculum_total_steps = args.total_steps
         print(f"[train] curriculum_total_steps = {args.total_steps} (자동 설정)")
 
+    # ── wandb ────────────────────────────────────────────────────────────────
+    use_wandb = (not args.no_wandb) and (not args.smoke) and wandb is not None
+    if use_wandb:
+        try:
+            wandb.init(project=args.wandb_project, name=args.wandb_name,
+                       entity=args.wandb_entity, config=vars(args), resume="allow")
+            wandb.define_metric("train/global_step")
+            wandb.define_metric("*", step_metric="train/global_step")
+            print(f"[train] wandb: {wandb.run.url}")
+        except Exception as exc:                                      # noqa: BLE001
+            print(f"[train] wandb 초기화 실패 — 로깅 없이 계속한다: {exc}")
+            use_wandb = False
+    elif args.no_wandb:
+        print("[train] wandb 비활성화(--no_wandb)")
+    elif wandb is None:
+        print("[train] wandb 미설치 — 로깅 없이 진행")
+
     obs, _ = env.reset()
     ep_return = torch.zeros(E, device=device)
     ep_len = torch.zeros(E, dtype=torch.long, device=device)
     done_returns: list[float] = []
     done_covs: list[float] = []
+    done_lens: list[float] = []
+    done_term: list[float] = []   # 1=커버리지 달성 종료, 0=시간초과
 
     os.makedirs(args.ckpt_dir, exist_ok=True)
     n_rollouts = max(1, args.total_steps // (T * E))
@@ -157,6 +191,10 @@ def main() -> int:
                 # step()이 반환될 시점엔 done env의 curr_coverage가 이미 0으로
                 # 리셋돼 있다(envs/env.py `_reset_idx()` 주석 참조).
                 done_covs.append(env.terminal_coverage[eid].item())
+                done_lens.append(float(ep_len[eid].item()))
+                # terminated=커버리지 목표 달성, truncated=시간초과 — 커리큘럼이
+                # 조여지는지 보려면 이 둘을 반드시 구분해야 한다.
+                done_term.append(float(terminated[eid].item()))
                 ep_return[eid] = 0.0
                 ep_len[eid] = 0
 
@@ -187,6 +225,38 @@ def main() -> int:
             f"({time.time()-t0:.0f}s)"
         )
 
+        if use_wandb:
+            global_step = (it + 1) * T * E
+            log = {
+                "train/global_step":   global_step,
+                "train/rollout":       it,
+                "train/reward_mean":   rew_mean,
+                "train/policy_loss":   stats["policy_loss"],
+                "train/value_loss":    stats["value_loss"],
+                "train/entropy":       stats["entropy"],
+                "train/approx_kl":     stats["approx_kl"],
+                # 매 롤아웃 True면 샘플 재사용이 1에폭뿐이라는 뜻 → target_kl 상향 검토
+                "train/early_stop":    float(stats["early_stop"]),
+                "train/explained_var": ev,
+                "train/log_std":       actor.log_std.mean().item(),
+                "train/lr":            opt_a.param_groups[0]["lr"],
+                "diag/dist_moved":     env.last_dist_moved.mean().item(),
+                # 커리큘럼이 실제로 조여지고 있는지 — cov와 함께 봐야 의미가 있다
+                "curriculum/coverage_terminal": float(env._current_coverage_terminal()),
+                "perf/env_steps_per_sec": global_step / max(time.time() - t0, 1e-6),
+            }
+            for k, v in term_abs.items():
+                log[f"reward_share/{k}"] = v / tot          # 보상 항목별 기여 비중
+            if done_returns:
+                log["episode/mean_return"]   = float(np.mean(done_returns[-20:]))
+                log["episode/mean_coverage"] = float(np.mean(done_covs[-20:]))
+                log["episode/mean_length"]   = float(np.mean(done_lens[-20:]))
+                log["episode/success_rate"]  = float(np.mean(done_term[-20:]))
+            try:
+                wandb.log(log, step=global_step)
+            except Exception as exc:                                  # noqa: BLE001
+                print(f"[train] wandb.log 실패(무시하고 계속): {exc}")
+
         # ── 이상치 검사 (스모크 모드에서 특히 중요) ──
         bad = []
         if not np.isfinite(rew_mean):
@@ -198,6 +268,8 @@ def main() -> int:
             bad.append("log_std NaN/Inf")
         if bad:
             print(f"[train] FAIL — {', '.join(bad)}")
+            if use_wandb:
+                wandb.finish(exit_code=1)
             env.close()
             return 1
 
@@ -209,6 +281,8 @@ def main() -> int:
 
     print(f"[train] {'SMOKE PASSED' if args.smoke else 'DONE'} — "
           f"{n_rollouts} 롤아웃, {time.time()-t0:.0f}s")
+    if use_wandb:
+        wandb.finish()
     env.close()
     return 0
 
