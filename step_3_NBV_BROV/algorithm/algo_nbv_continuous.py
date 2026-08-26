@@ -1,0 +1,361 @@
+"""
+algo_nbv_continuous.py — step_3 NBV PPO (연속 액션)
+======================================================
+`step_1_NBV/algorithm/algo_UW_NBV.py`를 기반으로 **액션 헤드만 연속화**한 것.
+
+왜 step_1 알고리즘을 그대로 가져왔는가
+--------------------------------------
+step_3의 성패는 "step_1 대비 물리 제약이 들어가서 얼마나 어려워졌나"로 해석해야
+하는데, 알고리즘이 다르면 그 비교가 성립하지 않는다. 인코더 3종(3D CNN/2D CNN/
+pose MLP), PPO 루프, `RolloutBuffer`, `target_kl` 조기종료를 전부 동일하게 두고
+**액션 공간만 다른** 상태를 만드는 것이 실험 설계상 깔끔하다.
+(`target_kl=0.02`는 step_1에서 UW_NBV_3 붕괴를 막은 실적이 있는 설정이다.)
+
+step_1 대비 변경점 (이 4가지가 전부)
+------------------------------------
+1. `Categorical(logits)` → **tanh-squashed `Normal(mu, std)`**
+   - `log_std`가 학습 가능한 파라미터(상태 무관, PPO 표준 관례)
+2. `RolloutBuffer.pose_acts`(long) → `actions`(float, action_dim)
+   - **저장하는 값은 tanh 적용 *전*의 `u`**(아래 설명)
+3. `make_env_action()` 삭제 — 이산 인덱스→one-hot 변환이 불필요해짐
+4. log_prob/entropy가 다차원이므로 `.sum(-1)`
+
+왜 tanh 스쿼시인가
+------------------
+step_2(Sim2Swim)는 unsquashed Gaussian + 환경측 클리핑을 썼는데, raw actor 출력이
+`[-1,1]`을 벗어나는 비율이 99%까지 올라가 별도 페널티 항(`deploy_penalty_raw_
+overflow_l2`)을 만들어 억눌러야 했다([[project_step2_brov_retrain_spec]]).
+tanh는 경계를 **구조적으로** 보장해 그 실패 모드 자체를 없앤다.
+
+왜 buffer에 `u`(pre-tanh)를 저장하는가
+--------------------------------------
+PPO ratio는 "같은 액션"에 대한 new/old log-prob 비율이어야 한다. squash된 `a`만
+저장하면 갱신 시 `atanh(a)`로 역산해야 하는데 `a`가 ±1 근처면 수치적으로 발산한다.
+`u`를 저장하면 역산 없이 `new_dist.log_prob(u)`를 바로 쓸 수 있고 `a=tanh(u)`도
+결정론적으로 복원되므로 정확하고 안전하다.
+
+entropy 주의
+------------
+tanh-squashed 분포의 엔트로피는 해석해가 없다. 여기서는 **squash 이전 Normal의
+엔트로피를 대리값으로** 쓴다(PPO 구현에서 널리 쓰이는 관례). 절대값 자체보다
+`ent_coef`와의 상대 스케일이 중요하고, 붕괴 감지용 모니터링 지표로는 충분하다.
+"""
+
+from __future__ import annotations
+from dataclasses import dataclass
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.distributions import Normal
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PPO 하이퍼파라미터 (step_1 algo_UW_NBV.py와 동일 — 비교 가능성 유지)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class PPOConfig:
+    ppo_epochs:     int   = 6
+    minibatch_size: int   = 256
+    clip_eps:       float = 0.2
+    ent_coef:       float = 0.03
+    vf_coef:        float = 0.5
+    max_grad_norm:  float = 0.5
+    gamma:          float = 0.99
+    lam:            float = 0.95
+    target_kl:      float = 0.02    # 에포크 평균 KL 초과 시 조기 종료
+
+
+_GEO_EMBED  = 256
+_SEM_EMBED  = 256
+_POSE_EMBED = 64
+_STATE_DIM  = 256
+_LOG_STD_MIN, _LOG_STD_MAX = -5.0, 2.0
+_TANH_EPS = 1e-6
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 인코더 3종 — step_1에서 무수정 이식
+# ══════════════════════════════════════════════════════════════════════════════
+
+class GeometricEncoder(nn.Module):
+    """(B, 3, Nx, Ny, Nz) → (B, _GEO_EMBED).
+
+    ch0 unknown / ch1 free / ch2 occupied — `envs/env.py::_get_vox_actor()` 참조.
+    (step_1 주석은 ch2를 quality라 했지만 step_3는 binary occupancy를 쓴다.)
+    """
+    def __init__(self, in_ch: int = 3):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv3d(in_ch, 64, kernel_size=3, padding=1), nn.ReLU(),
+            nn.Conv3d(64,    64, kernel_size=3, stride=2, padding=1), nn.ReLU(),
+            nn.AdaptiveAvgPool3d(4),
+            nn.Flatten(),
+        )
+        self.proj = nn.Linear(4096, _GEO_EMBED)   # 64ch × 4×4×4
+
+    def forward(self, vox: torch.Tensor) -> torch.Tensor:
+        return self.proj(self.conv(vox))
+
+
+class SemanticEncoder(nn.Module):
+    """(B, M, H, W) grayscale 시퀀스 → (B, _SEM_EMBED)."""
+    def __init__(self, in_ch: int = 2, H: int = 84, W: int = 84):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_ch, 32, kernel_size=8, stride=4), nn.ReLU(),
+            nn.Conv2d(32,    64, kernel_size=4, stride=2), nn.ReLU(),
+            nn.Flatten(),
+        )
+        with torch.no_grad():
+            n_flat = self.conv(torch.zeros(1, in_ch, H, W)).shape[1]
+        self.proj = nn.Linear(n_flat, _SEM_EMBED)
+
+    def forward(self, img: torch.Tensor) -> torch.Tensor:
+        return self.proj(self.conv(img))
+
+
+class StateEmbedding(nn.Module):
+    def __init__(self, img_ch: int = 2, scalar_dim: int = 3,
+                 H: int = 84, W: int = 84):
+        super().__init__()
+        self.geo    = GeometricEncoder()
+        self.sem    = SemanticEncoder(in_ch=img_ch, H=H, W=W)
+        self.pose   = nn.Linear(scalar_dim, _POSE_EMBED)
+        self.fusion = nn.Linear(_GEO_EMBED + _SEM_EMBED + _POSE_EMBED, _STATE_DIM)
+
+    def forward(self, vox: torch.Tensor, img: torch.Tensor,
+                scalar: torch.Tensor) -> torch.Tensor:
+        s_G = self.geo(vox)
+        s_S = self.sem(img)
+        s_A = F.relu(self.pose(scalar))
+        return F.relu(self.fusion(torch.cat([s_G, s_S, s_A], dim=-1)))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Actor — 연속 액션 (tanh-squashed Gaussian)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class Actor(nn.Module):
+    """행동: (Δθ, Δφ, Δψ) ∈ [-1,1]^3 (env가 max_rate_*로 스케일)."""
+
+    def __init__(self, img_ch: int = 2, scalar_dim: int = 3,
+                 action_dim: int = 3, H: int = 84, W: int = 84,
+                 log_std_init: float = -0.5):
+        super().__init__()
+        self.embed = StateEmbedding(img_ch, scalar_dim, H, W)
+        self.mlp   = nn.Sequential(
+            nn.Linear(_STATE_DIM, 256), nn.ReLU(),
+            nn.Linear(256,        256), nn.ReLU(),
+            nn.Linear(256, action_dim),
+        )
+        # 상태 무관 학습 파라미터 (PPO 표준 관례)
+        self.log_std = nn.Parameter(torch.full((action_dim,), float(log_std_init)))
+
+    def _dist(self, vox, img, scalar) -> Normal:
+        mu  = self.mlp(self.embed(vox, img, scalar))
+        std = self.log_std.clamp(_LOG_STD_MIN, _LOG_STD_MAX).exp().expand_as(mu)
+        return Normal(mu, std)
+
+    @staticmethod
+    def _squash(dist: Normal, u: torch.Tensor):
+        """u(pre-tanh) → (a, log_prob(a)). tanh 야코비안 보정 포함."""
+        a = torch.tanh(u)
+        logp = dist.log_prob(u).sum(-1) - torch.log(1.0 - a.pow(2) + _TANH_EPS).sum(-1)
+        return a, logp
+
+    def greedy(self, vox, img, scalar) -> torch.Tensor:
+        """평가용 결정론적 행동."""
+        return torch.tanh(self._dist(vox, img, scalar).mean)
+
+    def sample(self, vox, img, scalar):
+        """Returns (a, u, log_prob, entropy).
+
+        `a`는 환경에 넣을 행동, `u`는 buffer에 저장할 pre-tanh 값(모듈 docstring 참조).
+        """
+        dist = self._dist(vox, img, scalar)
+        u = dist.sample()
+        a, logp = self._squash(dist, u)
+        return a, u, logp, dist.entropy().sum(-1)
+
+    def evaluate(self, vox, img, scalar, u):
+        """저장된 pre-tanh `u`에 대한 새 정책의 log_prob/entropy."""
+        dist = self._dist(vox, img, scalar)
+        _, logp = self._squash(dist, u)
+        return logp, dist.entropy().sum(-1)
+
+
+class Critic(nn.Module):
+    """scalar_dim=4: (θ, φ, ψ, curr_coverage) — step_1과 동일하게 critic만 coverage 수신."""
+    def __init__(self, img_ch: int = 2, scalar_dim: int = 4,
+                 H: int = 84, W: int = 84):
+        super().__init__()
+        self.embed = StateEmbedding(img_ch, scalar_dim, H, W)
+        self.mlp   = nn.Sequential(
+            nn.Linear(_STATE_DIM, 256), nn.ReLU(),
+            nn.Linear(256,        256), nn.ReLU(),
+            nn.Linear(256,          1),
+        )
+
+    def forward(self, vox, img, scalar) -> torch.Tensor:
+        return self.mlp(self.embed(vox, img, scalar)).squeeze(-1)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Rollout Buffer — step_1 대비 actions만 long → float(action_dim)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class RolloutBuffer:
+    """vox는 uint8로 저장(메모리 절약), `flat()`에서 float 변환."""
+
+    def __init__(self, T: int, E: int,
+                 Nx: int, Ny: int, Nz: int,
+                 M: int, H: int, W: int,
+                 scalar_dim: int, scalar_dim_critic: int,
+                 action_dim: int, device):
+        self.T, self.E, self.ptr = T, E, 0
+        kw = dict(device=device)
+
+        self.vox               = torch.zeros(T, E, 3, Nx, Ny, Nz, dtype=torch.uint8, **kw)
+        self.img               = torch.zeros(T, E, M, H, W,            **kw)
+        self.obs_scalar        = torch.zeros(T, E, scalar_dim,          **kw)
+        self.obs_scalar_critic = torch.zeros(T, E, scalar_dim_critic,   **kw)
+        self.actions           = torch.zeros(T, E, action_dim,          **kw)   # pre-tanh u
+        self.logprobs          = torch.zeros(T, E,                      **kw)
+        self.rewards           = torch.zeros(T, E,                      **kw)
+        self.dones             = torch.zeros(T, E,                      **kw)
+        self.values            = torch.zeros(T, E,                      **kw)
+
+    def add(self, vox, img, obs_scalar, obs_scalar_critic,
+            action_u, logprob, reward, done, value):
+        t = self.ptr
+        self.vox              [t] = vox.to(torch.uint8)
+        self.img              [t] = img
+        self.obs_scalar       [t] = obs_scalar
+        self.obs_scalar_critic[t] = obs_scalar_critic
+        self.actions          [t] = action_u
+        self.logprobs         [t] = logprob
+        self.rewards          [t] = reward
+        self.dones            [t] = done
+        self.values           [t] = value
+        self.ptr += 1
+
+    def compute_gae(self, last_value: torch.Tensor, gamma: float, lam: float):
+        adv = torch.zeros_like(self.rewards)
+        gae = torch.zeros(self.E, device=self.rewards.device)
+        for t in reversed(range(self.T)):
+            nv    = last_value if t == self.T - 1 else self.values[t + 1]
+            mask  = 1.0 - self.dones[t]
+            delta = self.rewards[t] + gamma * nv * mask - self.values[t]
+            gae   = delta + gamma * lam * mask * gae
+            adv[t] = gae
+        self.returns    = adv + self.values
+        self.advantages = adv
+
+    def flat(self) -> dict[str, torch.Tensor]:
+        TE = self.T * self.E
+        def _r(x): return x.reshape(TE, *x.shape[2:])
+        return {
+            "vox":               _r(self.vox).float(),
+            "img":               _r(self.img),
+            "obs_scalar":        _r(self.obs_scalar),
+            "obs_scalar_critic": _r(self.obs_scalar_critic),
+            "actions":           _r(self.actions),
+            "logprobs":          _r(self.logprobs),
+            "returns":           _r(self.returns),
+            "advantages":        _r(self.advantages),
+            "old_values":        _r(self.values),
+        }
+
+    def reset(self):
+        self.ptr = 0
+
+
+def explained_variance(values: torch.Tensor, returns: torch.Tensor) -> float:
+    var_ret = returns.var()
+    if var_ret < 1e-8:
+        return float("nan")
+    return (1.0 - (returns - values).var() / var_ret).item()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PPO 업데이트 — step_1 무수정(액션 키 이름만 pose_acts → actions)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def ppo_update(actor: Actor, critic: Critic,
+               optimizer_actor:  torch.optim.Optimizer,
+               optimizer_critic: torch.optim.Optimizer,
+               buf: RolloutBuffer,
+               cfg: PPOConfig) -> dict:
+    data = buf.flat()
+    adv  = data["advantages"]
+    adv  = (adv - adv.mean()) / (adv.std() + 1e-8)
+
+    TE         = adv.shape[0]
+    acc        = dict(policy_loss=0., value_loss=0., entropy=0., approx_kl=0., n=0)
+    early_stop = False
+
+    for _epoch in range(cfg.ppo_epochs):
+        perm     = torch.randperm(TE, device=adv.device)
+        epoch_kl = 0.0
+        epoch_n  = 0
+
+        for s in range(0, TE, cfg.minibatch_size):
+            mb = perm[s : s + cfg.minibatch_size]
+            if mb.numel() == 0:
+                continue
+
+            new_logp, entropy = actor.evaluate(
+                data["vox"][mb], data["img"][mb],
+                data["obs_scalar"][mb],
+                data["actions"][mb],
+            )
+
+            # abs(log-ratio): policy가 더 확신하는 방향도 감지 (signed KL은 음수 가능)
+            approx_kl_mb = (data["logprobs"][mb] - new_logp).abs().mean().item()
+            ratio  = (new_logp - data["logprobs"][mb]).exp()
+            mb_adv = adv[mb]
+
+            pg = torch.max(
+                -mb_adv * ratio,
+                -mb_adv * ratio.clamp(1 - cfg.clip_eps, 1 + cfg.clip_eps),
+            ).mean()
+
+            actor_loss = pg - cfg.ent_coef * entropy.mean()
+            optimizer_actor.zero_grad()
+            actor_loss.backward()
+            nn.utils.clip_grad_norm_(actor.parameters(), cfg.max_grad_norm)
+            optimizer_actor.step()
+
+            v = critic(data["vox"][mb], data["img"][mb],
+                       data["obs_scalar_critic"][mb])
+            v_clipped = data["returns"][mb] + (v - data["old_values"][mb]).clamp(
+                -cfg.clip_eps, cfg.clip_eps
+            )
+            vl = torch.max(
+                F.mse_loss(v,         data["returns"][mb]),
+                F.mse_loss(v_clipped, data["returns"][mb]),
+            )
+
+            critic_loss = cfg.vf_coef * vl
+            optimizer_critic.zero_grad()
+            critic_loss.backward()
+            nn.utils.clip_grad_norm_(critic.parameters(), cfg.max_grad_norm)
+            optimizer_critic.step()
+
+            B = mb.numel()
+            acc["policy_loss"] += pg.item()             * B
+            acc["value_loss"]  += vl.item()             * B
+            acc["entropy"]     += entropy.mean().item() * B
+            acc["approx_kl"]   += approx_kl_mb          * B
+            acc["n"]           += B
+            epoch_kl           += approx_kl_mb          * B
+            epoch_n            += B
+
+        if epoch_n > 0 and (epoch_kl / epoch_n) > cfg.target_kl:
+            early_stop = True
+            break
+
+    n = max(acc.pop("n"), 1)
+    return {k: v / n for k, v in acc.items()} | {"early_stop": early_stop}

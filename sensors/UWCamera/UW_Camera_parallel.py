@@ -4,9 +4,16 @@ from typing import TYPE_CHECKING, Sequence
 import numpy as np
 import torch
 import warp as wp
-import omni.ui as ui
 
 from isaaclab.sensors import Camera
+
+# NOTE: `omni.ui`는 여기서 import하지 않는다 — viewport 창(_make_viewport)에서만
+# 쓰이는 선택적 의존인데, 최상단에서 무조건 import하면 `omni.ui`가 없는 headless
+# kit(isaaclab.python.headless*.kit)에서 이 모듈을 **쓰지도 않았는데** import
+# 단계에서 ModuleNotFoundError로 죽는다. 그 때문에 "조명/이미징 문제로 headless
+# 학습이 불가능하다"고 알려져 있었으나, 실제 원인은 이 import 하나였다
+# (2026-08-26 확인). headless + 카메라는 isaaclab.python.headless.rendering.kit로
+# 정상 지원되므로, 지연 import로 바꿔 headless 학습이 가능해졌다.
 from .UWrenderer_parallel_utils import UW_render_batch
 if TYPE_CHECKING:
     from .UW_Camera_cfg import UWCameraCfg
@@ -103,6 +110,10 @@ class UWCamera(Camera):
                 self._backscatter_coeff_t[env_ids] = torch.from_numpy(val).to(self._backscatter_coeff_t.device)
 
     def _make_viewport(self):
+        # 지연 import — 모듈 최상단 주석 참조(headless kit에는 omni.ui가 없다).
+        # viewport를 실제로 켠 경우에만 필요하므로 여기서 가져온다.
+        import omni.ui as ui
+
         width, height = self.cfg.width, self.cfg.height
         self.window = ui.Window(f"UW Camera Viewport (Env: {self.cfg.viewport_env_id})",
                                 width=width, height=height + 40)

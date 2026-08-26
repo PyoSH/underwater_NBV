@@ -28,9 +28,12 @@ import numpy as np
 import torch
 import warp as wp
 import omni.replicator.core as rep
-import omni.ui as ui
 
 from isaaclab.sensors import Camera
+
+# NOTE: `omni.ui`는 지연 import한다(_make_viewport 참조) — viewport 창에서만 쓰이는
+# 선택적 의존인데 최상단에서 import하면 omni.ui가 없는 headless kit에서 이 모듈을
+# 쓰지도 않았는데 ModuleNotFoundError로 죽는다. UW_Camera_parallel.py와 동일 사유.
 
 from .ImagingSonar_kernels import (
     compute_intensity,
@@ -368,6 +371,9 @@ class ImagingSonar(Camera):
     # ------------------------------------------------------------------
 
     def _make_viewport(self) -> None:
+        # 지연 import — 모듈 최상단 주석 참조(headless kit에는 omni.ui가 없다).
+        import omni.ui as ui
+
         self._viewport_window = ui.Window("ImagingSonar Viewport", width=800, height=840)
         self._sonar_provider  = ui.ByteImageProvider()
         with self._viewport_window.frame:
