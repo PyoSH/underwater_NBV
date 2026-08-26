@@ -47,13 +47,28 @@ from envs.env import NBVBROVEnv
 _timings = defaultdict(list)
 
 
-def _wrap(obj, name: str, key: str):
-    """메서드를 감싸 호출 시간을 기록한다(원본 동작 불변)."""
+def _wrap(obj, name: str, key: str, sync: bool = True):
+    """메서드를 감싸 호출 시간을 기록한다(원본 동작 불변).
+
+    `sync`: 호출 전후로 `torch.cuda.synchronize()`를 넣는다. **없으면 GPU 작업을
+    전혀 못 잰다** — torch 연산은 비동기라 커널 큐잉만 하고 즉시 반환하므로,
+    1차 프로파일에서 `_get_observations`가 0.5 ms, `_get_rewards`가 5.4 ms로
+    나오고 실제 GPU 시간 65 초가 통째로 미계측 구간에 숨었다. 동기화 자체가
+    약간의 오버헤드를 만들지만 진단에서는 정확한 귀속이 우선이다.
+    """
+    if not hasattr(obj, name):
+        print(f"[prof] (건너뜀) {key}: {type(obj).__name__}.{name} 없음")
+        return None
     original = getattr(obj, name)
+    do_sync = sync and torch.cuda.is_available()
 
     def timed(*a, **kw):
+        if do_sync:
+            torch.cuda.synchronize()
         t0 = time.perf_counter()
         out = original(*a, **kw)
+        if do_sync:
+            torch.cuda.synchronize()
         _timings[key].append(time.perf_counter() - t0)
         return out
 
@@ -84,10 +99,17 @@ def _report(total_wall: float, n_env: int, n_dec: int):
         print(f"{key:<28} {len(v):>6} {tot:>10.2f} {tot/len(v)*1000:>10.1f} "
               f"{tot/total_wall*100:>6.1f}%")
     print("-" * 72)
+    # 최상위 구간(들여쓰기 없는 키)만 더해 미계측 잔여를 드러낸다.
+    measured = sum(sum(v) for k, v in _timings.items() if not k.startswith(" "))
+    gap = total_wall - measured
+    print(f"{'계측된 최상위 합계':<28} {'':>6} {measured:>10.2f} {'':>10} "
+          f"{measured/total_wall*100:>6.1f}%")
+    print(f"{'미계측 잔여':<28} {'':>6} {gap:>10.2f} {'':>10} "
+          f"{gap/total_wall*100:>6.1f}%")
     env_steps = n_env * n_dec
     print(f"[prof] 전체 wall {total_wall:.2f}s / env-step {env_steps} "
           f"→ **env-step당 {total_wall/env_steps:.3f}s**, 결정당 {total_wall/n_dec:.2f}s")
-    print("[prof] GPU util이 낮고 특정 구간이 지배적이면 그 구간이 Python 병목이다.")
+    print("[prof] 미계측 잔여가 크면 아직 못 찾은 구간이 있다는 뜻이다.")
 
 
 def main() -> int:
@@ -114,6 +136,16 @@ def main() -> int:
     _wrap(env, "_apply_action", "_apply_action (물리 서브스텝)")
     _wrap(env, "_get_observations", "_get_observations (렌더/버퍼)")
     _wrap(env, "_get_rewards", "_get_rewards (TSDF융합)")
+
+    # DirectRLEnv.step()이 decimation 루프 안에서 직접 부르는 것들 —
+    # 1차 프로파일의 "설명 안 되는 65초"가 여기 있을 것으로 보고 계측 대상에 넣는다.
+    _wrap(env.sim, "step", "sim.step (PhysX)")
+    _wrap(env.sim, "render", "sim.render (렌더)")
+    _wrap(env.scene, "update", "scene.update (센서갱신)")
+    # 카메라 실제 렌더 트리거(IsaacLab 센서는 지연 평가라 .data 접근 시 여기서 채운다)
+    cam = getattr(env, "_camera", None)
+    if cam is not None:
+        _wrap(cam, "_update_outdated_buffers", "  └ 카메라 버퍼 채우기")
 
     try:
         t_reset0 = time.perf_counter()
