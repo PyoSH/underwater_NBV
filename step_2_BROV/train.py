@@ -79,6 +79,7 @@ from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 from envs.vel_env_cfg import BROVVelEnvCfg, apply_training_profile
 from envs.vel_env import BROVVelEnv
 from agents.rsl_rl_ppo_cfg import BROVVelPPORunnerCfg
+from robots.dynamics.brov2.thruster import BROV2ThrusterModel
 
 
 def _sha256(path: str) -> str:
@@ -117,6 +118,19 @@ def _write_manifest(
         "robots/dynamics/brov2/thruster.py": os.path.join(
             root, "../robots/dynamics/brov2/thruster.py"
         ),
+        # The thrust curve now lives in measured data, not in source constants,
+        # so the .npz has to be part of the provenance chain -- regenerating it
+        # with a different noise floor would otherwise change the plant without
+        # changing any hash the manifest records.
+        "robots/dynamics/brov2/t200_table.py": os.path.join(
+            root, "../robots/dynamics/brov2/t200_table.py"
+        ),
+        "robots/dynamics/brov2/t200_table.npz": os.path.join(
+            root, "../robots/dynamics/brov2/t200_table.npz"
+        ),
+        "robots/dynamics/brov2/thruster_dynamics.py": os.path.join(
+            root, "../robots/dynamics/brov2/thruster_dynamics.py"
+        ),
         "robots/dynamics/brov2/mass_randomization.py": os.path.join(
             root, "../robots/dynamics/brov2/mass_randomization.py"
         ),
@@ -141,6 +155,11 @@ def _write_manifest(
         "num_steps_per_env": agent_cfg.num_steps_per_env,
         "max_iterations": agent_cfg.max_iterations,
         "mass_scale_range": list(env_cfg.dr_mass_scale_range),
+        # Actuator plant. The thrust curve is voltage-dependent measured data
+        # and the dynamics model is selectable, so both change what the policy
+        # is trained against and neither is recoverable from the profile name.
+        "thruster_nominal_voltage_v": BROV2ThrusterModel.NOMINAL_VOLTAGE,
+        "thruster_dynamics_model": "third_order",
         "source_sha256": {
             label: _sha256(source_path)
             for label, source_path in source_files.items()

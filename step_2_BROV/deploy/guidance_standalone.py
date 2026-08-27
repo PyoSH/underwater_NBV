@@ -26,11 +26,12 @@ class LOSGuidance:
         waypoints      : torch.Tensor,
         device,
         lookahead_dist : float = 1.0,
+        lookahead_vert : float | None = None,
         cruise_speed   : float = 0.5,
         reach_threshold: float = 0.5,
         heading_mode   : str = "align",
         loop           : bool = True,
-        depth_hold_kp  : float = 0.8,
+        depth_hold_kp  : float | None = None,
         depth_speed_limit: float | None = None,
         terminal_hold_kp: float = 0.5,
         terminal_speed_limit: float | None = None,
@@ -44,20 +45,26 @@ class LOSGuidance:
         self._wp = waypoints
         self.device = device
         self._lookahead = lookahead_dist
+        self._lookahead_v = lookahead_dist if lookahead_vert is None else lookahead_vert
         self._speed = cruise_speed
         self._reach = reach_threshold
         self._heading_mode = heading_mode
         self._loop = loop
-        self._depth_hold_kp = float(depth_hold_kp)
-        self._depth_speed_limit = float(
-            cruise_speed if depth_speed_limit is None else depth_speed_limit
-        )
+        # depth_hold_kp / depth_speed_limit: **deprecated, no-op**.
+        # 이전 구현("lookahead 지점을 향하는 3D 벡터 정규화")은 수평 보정과 수직
+        # 보정이 고정 크기 U_d를 두고 경쟁했기 때문에 수평 오차가 커지면 깊이
+        # 보정이 잠식됐고(실측 32%), 그 우회로 Z축에 별도 P 제어기를 덧댔었다.
+        # 그 덧댐은 v_d_world[2]를 정규화 이후에 덮어써서 ||v_d||를 0.5에서
+        # 이탈시켰다 — 정책이 학습한 명령 크기는 정확히 0.5 m/s 하나뿐이다.
+        # Breivik-Fossen LOS는 수직축(υ_d)이 수평축(χ_d)과 독립이라 잠식이 없고
+        # ||v_d|| = U_d를 정확히 보존하므로 두 우회가 모두 불필요해졌다.
+        # 기존 config/launch가 계속 이 키를 넘겨도 깨지지 않도록 인자는 남긴다.
+        self._depth_hold_kp = depth_hold_kp
+        self._depth_speed_limit = depth_speed_limit
         self._terminal_hold_kp = float(terminal_hold_kp)
         self._terminal_speed_limit = float(
             cruise_speed if terminal_speed_limit is None else terminal_speed_limit
         )
-        if self._depth_hold_kp <= 0.0 or self._depth_speed_limit <= 0.0:
-            raise ValueError("depth hold gain/speed limit은 양수여야 함")
         if self._terminal_hold_kp <= 0.0 or self._terminal_speed_limit <= 0.0:
             raise ValueError("terminal hold gain/speed limit은 양수여야 함")
 
@@ -131,17 +138,38 @@ class LOSGuidance:
             idx = reached.nonzero(as_tuple=True)[0]
             self._random_q_d[idx] = self._sample_random_attitude(len(idx))
 
+        # ── Breivik & Fossen (2005) Sec. IV, 3D LOS ──
+        # 경로 고정 방위각 χ_p / 앙각 υ_p를 기준으로 두고, path-parallel frame에서
+        # 분해한 cross-track 오차 e(수평)와 vertical-track 오차 h에 각각 독립적인
+        # lookahead 보정을 더한다. 두 축이 독립이라 서로의 보정을 잠식하지 않고,
+        # 각각 ±90°로 자연 포화하며, ||v_d_world|| = cruise_speed가 정확히 보존된다.
+        # 조향각이 (e, h)만의 함수이고 진행률 s와 무관하다 — 이전 구현은 lookahead
+        # 지점을 세그먼트 끝에 clamp해서, 끝에 가까울수록 명령이 경로 방향에서
+        # waypoint 방향으로 끌려갔다(경로 위 끝점에서는 |to_los|=0으로 퇴화).
+        # 회귀 테스트: deploy/test_guidance_los_bf.py
+        #
+        # 이 블록은 frame-agnostic이다 — 호출자가 NED를 주든 Z-up을 주든 χ_p/υ_p와
+        # e/h가 같은 축 규약으로 계산되므로 보정 부호가 자기일관적이다. "위/아래"의
+        # 해석만 뒤집힌다. q_d도 _heading_from_direction(v_d_world)로 만들어
+        # frame 가정을 두지 않는다(순수 대수 조건 quat_apply(q,x̂)==v̂).
         seg = next_wp - cur_wp
-        seg_len = seg.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-        seg_dir = seg / seg_len
+        seg_dir = seg / seg.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        chi_p = torch.atan2(seg_dir[:, 1], seg_dir[:, 0])
+        ups_p = torch.atan2(seg_dir[:, 2], seg_dir[:, :2].norm(dim=-1).clamp_min(1e-9))
 
-        s = ((pos_env - cur_wp) * seg_dir).sum(-1, keepdim=True).clamp(min=0.0)
-        s = torch.minimum(s, seg_len)
-        look_s = torch.minimum(s + self._lookahead, seg_len)
-        los_point = cur_wp + look_s * seg_dir
+        cs, sn = torch.cos(chi_p), torch.sin(chi_p)
+        cu, su = torch.cos(ups_p), torch.sin(ups_p)
+        d = pos_env - cur_wp
+        e = -sn * d[:, 0] + cs * d[:, 1]
+        h = -su * (cs * d[:, 0] + sn * d[:, 1]) + cu * d[:, 2]
 
-        to_los = los_point - pos_env
-        v_d_world = self._speed * to_los / to_los.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        chi_d = chi_p + torch.atan(-e / self._lookahead)
+        ups_d = ups_p + torch.atan(-h / self._lookahead_v)
+
+        current_speed = self._speed
+        cd, sd = torch.cos(chi_d), torch.sin(chi_d)
+        cv, sv = torch.cos(ups_d), torch.sin(ups_d)
+        v_d_world = current_speed * torch.stack([cd * cv, sd * cv, sv], dim=-1)
 
         if not self._loop:
             # 마지막 waypoint에 한 번 도달했더라도 속도 목표를 0으로 고정하면
@@ -157,15 +185,6 @@ class LOSGuidance:
             v_d_world = torch.where(
                 self.mission_complete.unsqueeze(-1), terminal_velocity, v_d_world
             )
-
-        # 3D LOS 정규화에서는 긴 수평 lookahead가 작은 깊이 오차를 압도한다.
-        # Z(NED)는 항상 현재 세그먼트의 next waypoint 깊이를 독립 추종한다.
-        depth_error = next_wp[:, 2] - pos_env[:, 2]
-        v_d_world[:, 2] = torch.clamp(
-            self._depth_hold_kp * depth_error,
-            -self._depth_speed_limit,
-            self._depth_speed_limit,
-        )
 
         v_d_b = mu.quat_apply(mu.quat_conjugate(root_quat_w), v_d_world)
 
@@ -184,6 +203,6 @@ class LOSGuidance:
 def _heading_from_direction(direction_w: torch.Tensor, device) -> torch.Tensor:
     d = direction_w / direction_w.norm(dim=-1, keepdim=True).clamp_min(1e-6)
     yaw = torch.atan2(d[:, 1], d[:, 0])
-    pitch = torch.asin(d[:, 2].clamp(-1.0, 1.0))
+    pitch = -torch.asin(d[:, 2].clamp(-1.0, 1.0))
     roll = torch.zeros_like(yaw)
     return mu.quat_from_euler_xyz(roll, pitch, yaw)

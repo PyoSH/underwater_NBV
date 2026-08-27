@@ -85,11 +85,43 @@ parser.add_argument(
 parser.add_argument("--duration", type=float, default=60.0,
                      help="[s] — square 경로는 한 바퀴 도는 데 시간이 걸려 straight_line보다 넉넉히")
 parser.add_argument("--seed", type=int, default=42, help="nominal evaluation seed")
+parser.add_argument(
+    "--heading_mode",
+    default=None,
+    choices=["align", "upright", "random_at_waypoint"],
+    help=(
+        "--test이 정한 heading_mode를 덮어쓴다. 경로/DR은 그대로 두고 자세 목표만 "
+        "바꾸는 진단용 — Fig.4 (a)(b)는 실패하고 (c)만 동작한 원인이 자세 목표 "
+        "난이도인지 분리한다. 미지정 시 --test의 기본 매핑을 쓴다."
+    ),
+)
+parser.add_argument(
+    "--hold_velocity", type=float, nargs=3, default=(0.0, 0.0, 0.0),
+    metavar=("VX", "VY", "VZ"),
+    help="--test velocity_hold 전용: body frame 고정 목표속도 [m/s]. 학습 명령과 "
+         "같은 형태(||v||=0.5)를 주면 guidance를 배제한 채 정책의 정상상태 추종 "
+         "능력만 분리해서 볼 수 있다.")
 parser.add_argument("--cruise_speed", type=float, default=0.5,
                      help="[m/s] LOS 순항속도 — 학습 시 Vd(=0.5)와 맞추는 게 기본")
 parser.add_argument("--record_video", action="store_true",
                      help="경로 전체가 보이는 고정 조망 카메라로 mp4 기록 (거리는 경로 크기에서 자동 계산)")
 parser.add_argument("--video_path", type=str, default=None)
+parser.add_argument(
+    "--keep_training_dr",
+    action="store_true",
+    help=(
+        "_apply_physics_scenario()의 DR 공칭 고정을 건너뛰고 reset()이 넣은 학습 DR을 "
+        "그대로 둔다. 학습 분포는 자세오차 ~23° 상태인데 align/upright 평가는 ~0.5°까지 "
+        "수렴해 분포 밖으로 나간다 — DR이 만드는 상시 외란이 그 간극을 메우는지 검사한다. "
+        "square_ballast는 밸러스트도 적용되지 않으므로 straight_line 진단용."
+    ),
+)
+parser.add_argument(
+    "--dump_log",
+    type=str,
+    default=None,
+    help="시계열 로그 전체를 JSON으로 덤프 (요약 metric이 아니라 원 데이터를 볼 때)",
+)
 parser.add_argument(
     "--metrics_json",
     type=str,
@@ -143,7 +175,14 @@ _HEADING_MODE = {
 }
 
 _BALLAST_MASS_KG        = 0.6    # 600g, 논문 Trial(b)
-_BALLAST_LATERAL_OFFSET = 0.05   # [m] port(−Y, SNAME) 방향 근사 오프셋 — 실측 아님, 예시값
+# [m] port(−Y, SNAME) 방향 CoB-CoM 오프셋.
+# 600 g을 기체 어디에 붙여도 CoM은 frame_width/2 = 0.29 m보다 멀리 갈 수 없으므로
+# 이동량의 물리적 상한은 0.6 × 0.29 / (14.635 + 0.6) = 11.4 mm다. 논문이 부착 위치를
+# 공개하지 않으므로 그 상한을 쓴다 — 가장 가혹하면서 여전히 물리적으로 가능한 값.
+# 이 값은 학습 DR(dr_cob_radius = 15 mm 구) 안에 들어오므로 공정한 시험이 된다.
+# 2026-08-27 이전 값 0.05는 물리적 상한의 4.4배, 학습 DR의 3.3배 바깥이었고
+# 무제어 평형 롤 78.7°를 만들었다 — heading_mode="upright" 목표와 정면 충돌하는 조건.
+_BALLAST_LATERAL_OFFSET = 0.0114
 
 _FORWARD_ARROW_LEN = 0.2   # [m] 3D 플롯의 forward direction 화살표 길이 — 경로 크기와 무관하게 작게 고정
 
@@ -241,10 +280,17 @@ def _build_waypoints(test: str, device) -> torch.Tensor:
 
 
 class _VelocityHoldGuidance:
-    """Minimal zero-velocity, level-attitude validation command source."""
+    """Constant body-frame velocity, level attitude — LOS/위치 되먹임 없는 명령원.
 
-    def __init__(self, num_envs: int, device) -> None:
-        self._velocity = torch.zeros(num_envs, 3, device=device)
+    학습 MDP와 정확히 같은 형태의 명령이다(에피소드 내내 body frame 고정 v_d^b).
+    경로/위치가 관여하지 않으므로, 여기서 재현되는 거동은 guidance가 아니라
+    정책 자체의 성질이다.
+    """
+
+    def __init__(self, num_envs: int, device, velocity=(0.0, 0.0, 0.0)) -> None:
+        self._velocity = torch.as_tensor(
+            velocity, dtype=torch.float32, device=device
+        ).expand(num_envs, 3).contiguous()
         self._attitude = torch.zeros(num_envs, 4, device=device)
         self._attitude[:, 0] = 1.0
         self._wp_idx = torch.zeros(num_envs, dtype=torch.long, device=device)
@@ -469,13 +515,13 @@ def main() -> None:
 
     waypoints = _build_waypoints(args.test, env.device)
     if args.test == "velocity_hold":
-        los = _VelocityHoldGuidance(env.num_envs, env.device)
+        los = _VelocityHoldGuidance(env.num_envs, env.device, tuple(args.hold_velocity))
     else:
         los = LOSGuidance(
             waypoints,
             env.device,
             cruise_speed=args.cruise_speed,
-            heading_mode=_HEADING_MODE[args.test],
+            heading_mode=args.heading_mode or _HEADING_MODE[args.test],
         )
     env.attach_guidance(los)
 
@@ -494,10 +540,12 @@ def main() -> None:
     log = {k: [] for k in (
         "t", "pos", "quat", "euler_deg", "v_actual", "v_desired", "q_desired_euler",
         "action", "action_mag", "force_requested", "force_limited", "reset", "wp_idx",
+        "z_v", "z_q", "omega_b", "obs",
     )}
 
     obs_dict, _ = env.reset()
-    _apply_physics_scenario(env, args.test)   # reset()이 넣은 랜덤 DR 값을 재현 가능한 고정값으로 교체
+    if not args.keep_training_dr:
+        _apply_physics_scenario(env, args.test)   # reset()이 넣은 랜덤 DR 값을 재현 가능한 고정값으로 교체
 
     num_steps = int(args.duration / env._policy_dt)
     reset_count = 0
@@ -523,6 +571,14 @@ def main() -> None:
             log["force_limited"].append(env._force_limited[0].cpu().tolist())
             log["reset"].append(did_reset)
             log["wp_idx"].append(int(los._wp_idx[0]))
+            # 관측 안의 적분 상태. Sim2Swim의 핵심 기여이면서 논문이 운용 규칙을
+            # 공개하지 않은 부분이라, 미션이 학습 episode(5s)보다 길어졌을 때
+            # clamp에 눌러붙는지가 재현 평가의 직접적인 관심사다.
+            log["z_v"].append(env._z_v[0].cpu().tolist())
+            log["z_q"].append(env._z_q[0].cpu().tolist())
+            log["omega_b"].append(env._robot.data.root_ang_vel_b[0].cpu().tolist())
+            # 정책이 실제로 본 16-D 관측 그대로 — Jacobian을 관측 지점에서 평가하려면 필요
+            log["obs"].append(obs_dict["policy"][0].cpu().tolist())
 
             if args.record_video:
                 frames.append(env.render())
@@ -575,6 +631,13 @@ def main() -> None:
         & at_bound[1:]
         & at_bound[:-1]
     )
+    z_v = np.asarray(log["z_v"], dtype=np.float64)
+    z_q = np.asarray(log["z_q"], dtype=np.float64)
+    integral_limit = float(env.cfg.integral_velocity_limit)
+    attitude_limit = float(env.cfg.integral_attitude_limit)
+    z_v_pinned = np.abs(z_v) >= 0.999 * integral_limit
+    z_q_pinned = np.abs(z_q) >= 0.999 * attitude_limit
+
     force_clamped = np.abs(force_requested - force_limited) > 1e-5
     transition_exclusion_s = 1.0
     steady = t_arr >= transition_exclusion_s
@@ -637,6 +700,12 @@ def main() -> None:
         "opposite_bound_flip_per_axis_count": opposite_bound_flip.sum(axis=0).tolist(),
         "thruster_force_clamp_scalar_fraction": float(force_clamped.mean()),
         "thruster_force_clamp_any_fraction": float(force_clamped.any(axis=1).mean()),
+        "integral_velocity_pinned_per_axis_fraction": z_v_pinned.mean(axis=0).tolist(),
+        "integral_attitude_pinned_per_axis_fraction": z_q_pinned.mean(axis=0).tolist(),
+        "integral_velocity_abs_max_per_axis": np.abs(z_v).max(axis=0).tolist(),
+        "integral_attitude_abs_max_per_axis": np.abs(z_q).max(axis=0).tolist(),
+        "integral_velocity_limit": integral_limit,
+        "integral_attitude_limit": attitude_limit,
         "transition_exclusion_s": transition_exclusion_s,
         "steady_tracking": steady_tracking,
         "steady_action_bound_any_fraction": float(
@@ -676,7 +745,18 @@ def main() -> None:
         f"{metrics['steady_thruster_force_clamp_any_fraction']}"
     )
     print(f"  opposite ±bound flips per axis   : {metrics['opposite_bound_flip_per_axis_count']}")
+    print(f"  z_v |max| per axis (limit {integral_limit:.1f})  : "
+          f"{[round(v, 3) for v in metrics['integral_velocity_abs_max_per_axis']]}")
+    print(f"  z_q |max| per axis (limit {attitude_limit:.1f})  : "
+          f"{[round(v, 3) for v in metrics['integral_attitude_abs_max_per_axis']]}")
+    print(f"  z_v / z_q clamp 고착 비율        : "
+          f"{[f'{v:.1%}' for v in metrics['integral_velocity_pinned_per_axis_fraction']]} / "
+          f"{[f'{v:.1%}' for v in metrics['integral_attitude_pinned_per_axis_fraction']]}")
     print(f"  metrics JSON                     : {metrics_path}")
+    if args.dump_log:
+        with open(args.dump_log, "w", encoding="utf-8") as stream:
+            json.dump({k: v for k, v in log.items()}, stream)
+        print(f"  raw log JSON                     : {args.dump_log}")
 
     artifact_label = f"{args.test}_{args.cruise_speed:g}mps_{args.profile}"
     _plot_results(

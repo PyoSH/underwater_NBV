@@ -344,23 +344,26 @@ def test_thruster_model(env, duration_s: float = 2.0) -> None:
 
     # [Part A] 정적 변환표
     print("\n  [Part A] 정적 PWM → RPM → Thrust 변환표\n")
-    print(f"  {'PWM':>6} | {'RPM (approx)':>14} | {'Thrust [N]':>12}")
+    print(f"  {'PWM':>6} | {'PWM (filtered)':>14} | {'Thrust [N]':>12}")
     print("  " + "-" * 38)
 
     model = BROV2ThrusterModel(num_envs=1, dt=1.0, device="cpu")
-    db = model._DEADBAND
+    dead_rev, dead_fwd = model.dead_zone()
+    print(f"  공급 전압 {model.voltage[0]:.1f} V, "
+          f"dead zone {dead_rev.item():+.2f} ~ {dead_fwd.item():+.2f} N\n")
 
     for pwm_val in [-1.0, -0.75, -0.5, -0.25, -0.1, 0.0, 0.1, 0.25, 0.5, 0.75, 1.0]:
-        model._pwm_state.zero_()
+        model.reset(torch.arange(1))   # 동특성 상태 초기화 (_pwm_state는 이제 읽기 전용)
         cmd = torch.zeros((1, 8))
         cmd[0, 0] = pwm_val   # T1 채널 하나만 활성화 (8개 전부 켜면 T1~T4 수평 성분이 서로 상쇄됨)
         for _ in range(50): model.compute(cmd)
         f, _ = model.compute(cmd)
         thrust_mag = f[0].norm().item()   # 벡터 크기 사용 — 축/부호 관례에 무관하게 |thrust|와 정확히 일치
 
+        # 추력은 제조사 실측 테이블에서 직접 보간되므로 중간 RPM 단계가 없다.
+        # 대신 1차 지연을 통과한 실제 입력 PWM을 보여준다.
         pwm_s = model._pwm_state[0, 0].item()
-        rpm_est = (3659.9 * pwm_s + 345.21) if pwm_s > db else (3494.4 * pwm_s - 433.50) if pwm_s < -db else 0.0
-        print(f"  {pwm_val:>6.2f} | {rpm_est:>14.1f} | {thrust_mag:>12.4f}")
+        print(f"  {pwm_val:>6.2f} | {pwm_s:>14.4f} | {thrust_mag:>12.4f}")
 
     # [Part B] 시뮬레이션 램프
     print(f"\n  [Part B] 시뮬레이션 T1 PWM 선형 램프 (0 → 1)")

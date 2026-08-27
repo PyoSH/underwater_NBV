@@ -129,8 +129,11 @@ class ModelBasedController:
         wrench_sname = wrench_zup * self._wrench_transform
         desired_force = self.B_pinv @ wrench_sname
         # inverse_thrust() 내부와 같은 물리 한계. 여기서 먼저 clamp해야 진단값도
-        # 실제 PWM으로 실현 가능한 추력을 나타낸다.
-        desired_force = desired_force.clamp(-51.5, 64.1)
+        # 실제 PWM으로 실현 가능한 추력을 나타낸다. 하드코딩 (-51.5, 64.1)은
+        # BlueRobotics 공개 데이터의 20V 값이었고, 4S 팩이 부하에서 내는 14V에서는
+        # 실측 -34.5/+44.4 N이다. 이제 thruster 모델에 설정된 공급 전압의 실측
+        # 테이블에서 가져온다.
+        desired_force = self.thruster.clamp_thrust(desired_force)
         pwm = self.thruster.inverse_thrust(desired_force.unsqueeze(0)).squeeze(0)
         # T200 모델은 |pwm|<=0.075에서 추력이 정확히 0이다. 역함수는 작은
         # non-zero force를 deadband 내부 PWM으로 돌려줄 수 있으므로 그대로 보내면

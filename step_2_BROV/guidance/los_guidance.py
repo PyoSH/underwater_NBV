@@ -5,18 +5,34 @@
 `BROVVelEnv`(RL 저수준 속도/자세 컨트롤러)의 명령 생성기로 쓰인다 — 정책이 고정된
 뒤 평가/배포 단계에서만 사용하고, 학습 루프에는 관여하지 않는다.
 
-BROV2는 완전구동(6DOF thruster)이라 어뢰형 AUV의 표준 Fossen LOS(선수각 조향으로
-경로에 수렴)를 그대로 쓰지 않는다. 대신 "월드 프레임에서 lookahead 지점을 향하는
-속도벡터"를 직접 만들어 body frame으로 변환하는 방식을 쓴다 — 자세와 무관하게 어느
-방향으로든 추력을 낼 수 있으므로(Sim2Swim 논문이 "attitude-independent" LOS라 부르는
-것과 같은 아이디어). q_d(희망 자세)는 별도로, 진행방향에 맞춰 정렬한다(heading_mode
-="align" 기본값 — roll=0, yaw/pitch를 이동방향에서 계산. 자세를 진행방향과 분리하고
-싶으면 "upright"로 전환 가능, Sim2Swim 논문의 square-path 테스트처럼 임의 자세 명령을
-따로 주입하고 싶을 때도 q_d를 이 클래스 밖에서 덮어쓰면 됨).
+유도 법칙은 Sim2Swim이 인용한 Breivik & Fossen (2005), "Principles of Guidance-Based
+Path Following in 2D and 3D", CDC 2005, Sec. IV의 3D LOS다. 경로에 고정된 방위각 χ_p와
+앙각 υ_p를 기준으로 두고, path-parallel frame에서 분해한 cross-track 오차 e(수평)와
+vertical-track 오차 h(수직)에 각각 독립적인 lookahead 보정을 더한다:
 
-논문(arXiv:2512.08656)이 "3D LOS guidance"라고만 언급하고 구체 수식은 안 줘서,
-정확한 lookahead/cross-track 처리 방식은 이 프로젝트에서 직접 설계한 것 — 표준
-Fossen 2D/3D LOS의 lookahead 개념만 차용했다.
+    χ_d = χ_p + arctan(-e / Δ_h)          (방위각)
+    υ_d = υ_p + arctan(-h / Δ_v)          (앙각)
+    v_d^w = U_d · [cos χ_d cos υ_d,  sin χ_d cos υ_d,  sin υ_d]
+
+BROV2는 완전구동(6DOF thruster)이라 이 v_d^w를 선수각 조향 명령으로 쓰지 않고 body
+frame으로 그대로 변환해 속도 명령으로 넣는다 — 자세와 무관하게 어느 방향으로든 추력을
+낼 수 있으므로(Sim2Swim이 "attitude-independent"라 부르는 것과 같은 아이디어).
+q_d는 논문 서술("the desired heading and pitch equal to the desired course and
+elevation angles calculated by the LOS guidance law") 그대로 (χ_d, υ_d)에서 직접
+만든다(heading_mode="align"). "upright"/"random_at_waypoint"로 자세를 진행방향과
+분리할 수도 있다(Sim2Swim Fig.4 (b)/(c) 재현용).
+
+이전 구현은 "lookahead 지점을 향하는 3D 벡터를 정규화"하는 자체 설계였다. 직선 경로
+초반에는 BF와 수식이 일치하지만(cross-track 0.24m에서 각도차 0.24°), 수평/수직 보정이
+고정된 크기 U_d를 두고 경쟁하기 때문에 수평 오차가 커지면 수직 보정이 잠식된다 —
+실측으로 cross-track 1.9m / vertical 1.24m 상태에서 수직 성분이 32% 작았다. 또한
+lookahead 지점을 세그먼트 끝에 clamp하므로, 세그먼트 끝에 가까워질수록 명령 방향이
+경로 방향에서 waypoint 방향으로 끌려갔다 — 같은 cross-track 오차라도 진행률 s에 따라
+조향이 달라졌고, 경로 위 정확히 끝점에서는 |to_los|=0으로 퇴화했다(보통 reach 판정이
+먼저 나서 가려짐). BF에는 lookahead "지점" 자체가 없어 조향각이 (e, h)만의 함수다.
+
+좌표계 주의: 원논문은 NED(Z-down)라 v_z = -U_d sin υ_d 이지만, 여기(IsaacLab)는
+Z-up이므로 +υ = 상승이고 v_z = +U_d sin υ_d 이다.
 """
 
 from __future__ import annotations
@@ -34,8 +50,13 @@ class LOSGuidance:
     waypoints       : (num_envs, num_wp, 3) env-local 상대좌표 — envs/traj_env.py의
                       `_generate_trajectories`/`_waypoints`와 동일한 규약.
     device          : torch device
-    lookahead_dist  : float, [m] — lookahead 거리 Δ. 현재 세그먼트 길이보다 작게
-                      잡아야 한다 (기본 궤적 세그먼트 길이 ~1.57m 기준 1.0m).
+    lookahead_dist  : float, [m] — 수평 lookahead 거리 Δ_h. 경로 수렴의 시상수를
+                      결정하는 주 튜닝 파라미터로, waypoint 간격과는 무관하다.
+                      작을수록 공격적(cross-track e에 대한 조향 이득이 ~1/Δ rad/m).
+                      Breivik & Fossen은 기체 길이의 수 배를 권한다 — BROV2 0.46m
+                      기준 1~2.3m.
+    lookahead_vert  : float | None, [m] — 수직 lookahead 거리 Δ_v. None이면
+                      lookahead_dist와 동일. 깊이 응답을 수평과 따로 조율할 때 사용.
     cruise_speed    : float, [m/s] — v_d_b 크기. Sim2Swim 학습 속도(Vd=0.5)와
                       맞춰서 정책의 학습 분포를 벗어나지 않게 한다.
     reach_threshold : float, [m] — 다음 waypoint로 전환하는 거리.
@@ -49,6 +70,7 @@ class LOSGuidance:
         waypoints      : torch.Tensor,
         device,
         lookahead_dist : float = 1.0,
+        lookahead_vert : float | None = None,
         cruise_speed   : float = 0.5,
         reach_threshold: float = 0.5,
         heading_mode   : str = "align",
@@ -56,6 +78,7 @@ class LOSGuidance:
         self._wp = waypoints
         self.device = device
         self._lookahead = lookahead_dist
+        self._lookahead_v = lookahead_dist if lookahead_vert is None else lookahead_vert
         self._speed = cruise_speed
         self._reach = reach_threshold
         self._heading_mode = heading_mode
@@ -115,29 +138,49 @@ class LOSGuidance:
             idx = reached.nonzero(as_tuple=True)[0]
             self._random_q_d[idx] = self._sample_random_attitude(len(idx))
 
-        # ── lookahead 지점 계산 (현재 세그먼트 cur→next 위) ──
+        # ── 경로 고정 방위각 χ_p / 앙각 υ_p (Breivik & Fossen 2005, Sec. IV) ──
         seg = next_wp - cur_wp                                          # (N,3)
-        seg_len = seg.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-        seg_dir = seg / seg_len
+        seg_dir = seg / seg.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        chi_p = torch.atan2(seg_dir[:, 1], seg_dir[:, 0])
+        ups_p = torch.atan2(seg_dir[:, 2], seg_dir[:, :2].norm(dim=-1).clamp_min(1e-9))
 
-        # 현재 위치를 세그먼트에 투영한 진행률 s, 거기서 lookahead만큼 전진
-        # (세그먼트를 넘어가면 다음 세그먼트를 고려하는 게 정석이지만, waypoint
-        # 간격이 lookahead보다 충분히 크면 세그먼트 끝에서 clamp하는 것으로 충분)
-        s = ((pos_env - cur_wp) * seg_dir).sum(-1, keepdim=True).clamp(min=0.0)
-        s = torch.minimum(s, seg_len)
-        look_s = torch.minimum(s + self._lookahead, seg_len)
-        los_point = cur_wp + look_s * seg_dir
+        # ── path-parallel frame으로 오차 분해 ──
+        # 기저: x_p = seg_dir, y_p = [-sin χ_p, cos χ_p, 0] (수평 좌측),
+        #       z_p = x_p × y_p = [-sin υ_p cos χ_p, -sin υ_p sin χ_p, cos υ_p] (상방).
+        # e>0 = 경로 좌측, h>0 = 경로 위쪽.
+        cs, sn = torch.cos(chi_p), torch.sin(chi_p)
+        cu, su = torch.cos(ups_p), torch.sin(ups_p)
+        d = pos_env - cur_wp
+        e = -sn * d[:, 0] + cs * d[:, 1]
+        h = -su * (cs * d[:, 0] + sn * d[:, 1]) + cu * d[:, 2]
 
-        # ── 월드 프레임 희망 속도벡터 ──
-        to_los = los_point - pos_env
-        v_d_world = self._speed * to_los / to_los.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        # ── LOS 조향각 ──
+        # 두 축이 독립이라 서로의 보정 크기를 잠식하지 않고, 각각 ±90°로 자연 포화한다.
+        # 이전의 "lookahead 지점 정규화" 방식과 달리 lookahead '지점'이 없으므로
+        # waypoint 근방에서 방향이 정의되지 않는 특이점도 없다.
+        chi_d = chi_p + torch.atan(-e / self._lookahead)
+        ups_d = ups_p + torch.atan(-h / self._lookahead_v)
+
+        # ── 월드 프레임 희망 속도벡터 (Z-up: +υ = 상승) ──
+        cd, sd = torch.cos(chi_d), torch.sin(chi_d)
+        cv, sv = torch.cos(ups_d), torch.sin(ups_d)
+        v_d_world = self._speed * torch.stack([cd * cv, sd * cv, sv], dim=-1)
 
         # ── body frame으로 변환 (자세와 무관 — attitude-independent LOS) ──
         v_d_b = math_utils.quat_apply(math_utils.quat_conjugate(root_quat_w), v_d_world)
 
         # ── 희망 자세 ──
         if self._heading_mode == "align":
-            q_d = _heading_from_direction(v_d_world, self.device)
+            # 논문 서술 그대로 "desired heading and pitch equal to the desired course
+            # and elevation angles". 방향벡터에서 역산(asin)하지 않고 χ_d, υ_d를 직접 쓴다.
+            #
+            # pitch = **-υ_d**. R = Rz(yaw)·Ry(pitch)이면 기수는
+            # [cosθcosψ, cosθsinψ, -sinθ]이므로 기수의 world Z 성분은 -sin(pitch)인데,
+            # Z-up에서 v_d^w의 Z 성분은 +sin(υ_d)다 → pitch = -υ_d.
+            # 원논문(NED)은 v_z = -U sin υ_d 라서 pitch = +υ_d 로 그대로 쓴다.
+            # 이 부호가 _heading_from_direction()의 pitch = -asin(dz)와 정확히 일치한다.
+            zero = torch.zeros_like(chi_d)
+            q_d = math_utils.quat_from_euler_xyz(zero, -ups_d, chi_d)
         elif self._heading_mode == "random_at_waypoint":
             q_d = self._random_q_d
         else:   # "upright"
@@ -149,12 +192,22 @@ class LOSGuidance:
 def _heading_from_direction(direction_w: torch.Tensor, device) -> torch.Tensor:
     """월드 프레임 방향벡터를 바라보는 자세(roll=0)를 계산.
 
-    yaw = atan2(dy,dx), pitch = asin(dz) (Z-up world 기준 — 위로 향하면 +pitch).
-    실제 부호 관례는 이 모듈 밖에서 test_rotation류로 검증 필요.
+    정의는 하나다: ``quat_apply(q, [1,0,0]) == direction_w``. 이건 frame
+    convention과 무관한 순수 대수 조건이라 Z-up이든 NED든 같은 식이 나온다.
+
+    yaw = atan2(dy, dx),  pitch = **-asin(dz)**.
+
+    부호에 주의. roll=0이면 회전은 ``R = Rz(yaw)·Ry(pitch)``이고
+    ``R·x̂ = [cosθcosψ, cosθsinψ, -sinθ]``이므로 기수의 world Z 성분은
+    ``-sin(pitch)``다. 이것이 ``dz``와 같아야 하므로 ``pitch = -asin(dz)``다.
+    구면좌표의 elevation(``asin(z/r)``)과 부호가 반대인 지점이며,
+    2026-08-26까지 ``+asin(dz)``로 잘못 구현되어 있었다(기수 Z가 뒤집힘).
+    검증은 ``tests/test_desired_states.py``의 물리 기반 테스트가 한다 —
+    수식을 자기 자신과 비교하면 이 오류를 영원히 못 잡는다.
     """
     d = direction_w / direction_w.norm(dim=-1, keepdim=True).clamp_min(1e-6)
     yaw = torch.atan2(d[:, 1], d[:, 0])
-    pitch = torch.asin(d[:, 2].clamp(-1.0, 1.0))
+    pitch = -torch.asin(d[:, 2].clamp(-1.0, 1.0))
     roll = torch.zeros_like(yaw)
     return math_utils.quat_from_euler_xyz(roll, pitch, yaw)
 

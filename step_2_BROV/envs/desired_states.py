@@ -95,11 +95,16 @@ def _heading_from_direction(direction_w: torch.Tensor) -> torch.Tensor:
     keeps its "no isaaclab import" property. Must stay numerically identical
     to the real guidance module's function -- see
     ``tests/test_desired_states_los_heading_parity.py``.
+
+    The defining property is ``quat_apply(q, [1,0,0]) == direction_w``, which
+    forces ``pitch = -asin(dz)``: with roll=0 the nose's world Z component is
+    ``-sin(pitch)``. Until 2026-08-26 this was ``+asin(dz)``, which pointed the
+    nose at the vertical mirror of the requested direction.
     """
 
     d = _normalize(direction_w)
     yaw = torch.atan2(d[..., 1], d[..., 0])
-    pitch = torch.asin(d[..., 2].clamp(-1.0, 1.0))
+    pitch = -torch.asin(d[..., 2].clamp(-1.0, 1.0))
     cy, sy = torch.cos(yaw * 0.5), torch.sin(yaw * 0.5)
     cp, sp = torch.cos(pitch * 0.5), torch.sin(pitch * 0.5)
     return torch.stack((cy * cp, -sy * sp, cy * sp, sy * cp), dim=-1)

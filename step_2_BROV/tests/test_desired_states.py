@@ -358,7 +358,65 @@ def _quat_from_euler_xyz_reference(
     return torch.stack((qw, qx, qy, qz), dim=-1)
 
 
+def _rotate_by_quat(quaternion: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
+    """Rotate ``(N,3)`` by ``(N,4)`` wxyz quaternions, independent of isaaclab."""
+
+    w = quaternion[:, 0:1]
+    axis = quaternion[:, 1:4]
+    return (
+        vector * (2.0 * w * w - 1.0)
+        + 2.0 * axis * (axis * vector).sum(dim=-1, keepdim=True)
+        + 2.0 * w * torch.cross(axis, vector, dim=-1)
+    )
+
+
+def test_heading_from_direction_points_the_nose_at_the_requested_direction() -> None:
+    """The function's only contract: ``quat_apply(q, x_hat) == direction``.
+
+    This is a frame-convention-free algebraic identity, which is exactly why
+    it catches what the previous test could not. That test rebuilt ``expected``
+    from the same ``pitch = asin(dz)`` the implementation used, so it agreed
+    with a sign error that mirrored every non-horizontal heading (fixed
+    2026-08-26; the correct expression is ``pitch = -asin(dz)``). A check that
+    derives its expectation from the implementation's own formula can only ever
+    confirm that the code matches itself.
+    """
+
+    torch.manual_seed(0)
+    directions = torch.randn(2048, 3)
+    directions[0] = torch.tensor([0.0, 0.0, 1.0])    # straight up
+    directions[1] = torch.tensor([0.0, 0.0, -1.0])   # straight down
+    directions[2] = torch.tensor([1.0, 0.0, 0.0])    # identity case
+    directions[3] = torch.tensor([1.0, 0.0, 1.0])    # forward and up
+    directions[4] = torch.tensor([1.0, 0.0, -1.0])   # forward and down
+    directions = directions / directions.norm(dim=-1, keepdim=True)
+
+    heading = _heading_from_direction(directions)
+    torch.testing.assert_close(heading.norm(dim=-1), torch.ones(2048), atol=1.0e-5, rtol=0.0)
+
+    forward = torch.tensor([1.0, 0.0, 0.0]).expand_as(directions)
+    nose = _rotate_by_quat(heading, forward)
+    torch.testing.assert_close(nose, directions, atol=1.0e-5, rtol=0.0)
+
+    # roll = 0 means the body's lateral axis stays in the world horizontal plane.
+    lateral = torch.tensor([0.0, 1.0, 0.0]).expand_as(directions)
+    right = _rotate_by_quat(heading, lateral)
+    torch.testing.assert_close(right[:, 2], torch.zeros(2048), atol=1.0e-5, rtol=0.0)
+
+    identity_heading = _heading_from_direction(torch.tensor([[1.0, 0.0, 0.0]]))
+    torch.testing.assert_close(
+        identity_heading, torch.tensor([[1.0, 0.0, 0.0, 0.0]]), atol=1.0e-6, rtol=0.0
+    )
+
+
 def test_heading_from_direction_matches_the_general_euler_formula_at_roll_zero() -> None:
+    """Closed-form specialization still equals the full roll/pitch/yaw formula.
+
+    Complements the physical test above: that one pins the sign, this one pins
+    the algebraic shortcut. Both are needed -- neither alone would have caught
+    the 2026-08-26 sign error.
+    """
+
     torch.manual_seed(0)
     directions = torch.randn(2048, 3)
     directions[0] = torch.tensor([0.0, 0.0, 1.0])   # pole case
@@ -366,18 +424,12 @@ def test_heading_from_direction_matches_the_general_euler_formula_at_roll_zero()
     directions[2] = torch.tensor([1.0, 0.0, 0.0])   # identity case
 
     heading = _heading_from_direction(directions)
-    torch.testing.assert_close(heading.norm(dim=-1), torch.ones(2048), atol=1.0e-5, rtol=0.0)
 
     d = directions / directions.norm(dim=-1, keepdim=True)
     yaw = torch.atan2(d[:, 1], d[:, 0])
-    pitch = torch.asin(d[:, 2].clamp(-1.0, 1.0))
+    pitch = -torch.asin(d[:, 2].clamp(-1.0, 1.0))
     expected = _quat_from_euler_xyz_reference(torch.zeros_like(yaw), pitch, yaw)
     torch.testing.assert_close(heading, expected, atol=1.0e-6, rtol=0.0)
-
-    identity_heading = _heading_from_direction(torch.tensor([[1.0, 0.0, 0.0]]))
-    torch.testing.assert_close(
-        identity_heading, torch.tensor([[1.0, 0.0, 0.0, 0.0]]), atol=1.0e-6, rtol=0.0
-    )
 
 
 def test_deploy_v6_zero_coupling_probability_matches_deploy_v3() -> None:
