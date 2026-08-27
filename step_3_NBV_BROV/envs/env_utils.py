@@ -101,6 +101,22 @@ class EnvUtilsMixin:
 
         return R
 
+    def _camera_position_w(self) -> torch.Tensor:
+        """카메라 광학중심의 월드 좌표 (E,3).
+
+        quality 계산(Beer-Lambert 거리 감쇠)이 쓰는 거리는 **로봇 root가 아니라
+        카메라 위치** 기준이어야 한다 — 오프셋 0.16 m가 psi_min=1.0 m 대비 16%라
+        무시할 수 없다. `_build_cam_pose()`가 내부에서 쓰는 것과 동일한 유도식이며,
+        센서의 `data.pos_w`는 스폰 pose에 고정돼 갱신되지 않으므로 쓰지 않는다
+        (같은 함수의 2026-08-26 버그 수정 주석 참조).
+        """
+        from isaaclab.utils.math import quat_apply
+
+        return self._robot.data.root_pos_w + quat_apply(
+            self._robot.data.root_quat_w,
+            self._camera_offset_pos.unsqueeze(0).expand(self.num_envs, -1),
+        )
+
     def _build_cam_pose(self) -> torch.Tensor:
         """카메라 extrinsic (world → OpenCV camera frame, 4x4).
 

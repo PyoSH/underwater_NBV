@@ -157,7 +157,6 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         self._total_surf_voxels = torch.ones(self.num_envs, device=self.device)
         self._surf_vol = torch.zeros(self.num_envs, Nx, Ny, Nz, dtype=torch.bool, device=self.device)
 
-        self._prev_coverage = torch.zeros(self.num_envs, device=self.device)
         self.curr_coverage = torch.zeros(self.num_envs, device=self.device)
         # 에피소드 종료 시점의 coverage (리셋 전 값) — 학습 스크립트 로깅용.
         # `_reset_idx()` 주석 참조.
@@ -166,6 +165,30 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         # 진단 지표 (보상에는 미기여, `_get_rewards()`가 매 스텝 갱신)
         self.last_dist_moved = torch.zeros(self.num_envs, device=self.device)
         self.last_reward_terms: dict[str, torch.Tensor] = {}
+
+        # ── Quality-weighted coverage (env_cfg.use_quality_coverage 참조) ──
+        self._quality_vol = torch.zeros(self.num_envs, Nx, Ny, Nz, device=self.device)
+        # 보상 delta의 기준 — binary/quality 중 실제로 쓰는 쪽의 정규화값을 담는다.
+        self._prev_coverage_norm = torch.zeros(self.num_envs, device=self.device)
+        self.curr_coverage_q = torch.zeros(self.num_envs, device=self.device)
+        self.terminal_coverage_q = torch.zeros(self.num_envs, device=self.device)
+        # μ/Q_sat은 카메라 실제 감쇠계수에서 유도한다 — `_sync_quality_water()`.
+        # 여기서는 형태만 잡아두고 첫 리셋에서 실제 값으로 덮인다.
+        self._quality_mu = torch.full((self.num_envs,), 0.1, device=self.device)
+        self._quality_Q_sat = torch.ones(self.num_envs, device=self.device)
+        # GT surface voxel의 품질 분포 진단 (step_1 diag/gt_* 대응).
+        # binary coverage로는 안 보이는 "봤지만 멀어서 흐릿함"을 드러낸다.
+        self._diag_gt_never = torch.zeros(self.num_envs, device=self.device)
+        self._diag_gt_partial = torch.zeros(self.num_envs, device=self.device)
+        self._diag_gt_full = torch.zeros(self.num_envs, device=self.device)
+        # voxel 중심 오프셋 (원점 기준 격자, 리셋 무관 상수)
+        gx, gy, gz = torch.meshgrid(
+            torch.arange(Nx, device=self.device),
+            torch.arange(Ny, device=self.device),
+            torch.arange(Nz, device=self.device),
+            indexing="ij",
+        )
+        self._voxel_offset = torch.stack([gx, gy, gz], dim=-1).float() * cfg.tsdf.voxel_size
 
         self._mass_scale = torch.ones(self.num_envs, 1, device=self.device)
 
@@ -338,8 +361,11 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
             # step_1과 동일: critic scalar만 coverage를 추가로 받아 4-dim
             # (actor는 3-dim 유지 — 커버리지 스칼라를 직접 주면 voxel에서
             #  읽어내야 할 정보를 우회로로 흘리게 됨)
+            # coverage는 **보상·종료가 실제로 쓰는 쪽**(quality 모드면 정규화
+            # coverage_q)을 줘야 한다 — 여기에 binary를 주면 critic이 리턴을
+            # 좌우하는 양과 다른 양을 보게 돼 value 예측이 불필요하게 어려워진다.
             "critic_scalar": torch.cat(
-                [scalar_obs, self.curr_coverage.unsqueeze(-1)], dim=-1
+                [scalar_obs, self._coverage_for_reward().unsqueeze(-1)], dim=-1
             ),
             "vox_actor": vox_actor,
             # step_1은 최근 2프레임만 semantic 입력으로 씀 — 전체 버퍼(6프레임)를
@@ -358,10 +384,18 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         ch2 occupied : weight > 0, tsdf ≤ 0 (표면/물체)
         """
         observed = self._weight_vol > 0                      # (E, Nx, Ny, Nz)
+        if self.cfg.use_quality_coverage:
+            # ch2를 이진 occupied가 아니라 **연속 관측 품질**로 준다 — 정책이
+            # "봤다/못 봤다"뿐 아니라 "얼마나 가까이서 봤나"를 구분할 수 있어야
+            # 거리를 줄이는 행동을 학습할 수 있다(step_1 ch2와 동일).
+            q_sat = self._quality_Q_sat.view(-1, 1, 1, 1)
+            ch2 = (self._quality_vol / q_sat).clamp(0.0, 1.0)
+        else:
+            ch2 = (observed & (self._tsdf_vol <= 0)).float()
         return torch.stack([
             (~observed).float(),                             # ch0: unknown
             (observed & (self._tsdf_vol > 0)).float(),       # ch1: free
-            (observed & (self._tsdf_vol <= 0)).float(),      # ch2: occupied
+            ch2,                                             # ch2: 품질 또는 occupied
         ], dim=1)
 
     def _current_coverage_terminal(self) -> float:
@@ -380,13 +414,61 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
             * (cfg.curriculum_coverage_terminal_end - cfg.curriculum_coverage_terminal_start)
         )
 
+    def _sync_quality_water(self, env_ids: torch.Tensor) -> None:
+        """μ와 Q_sat을 카메라의 실제 감쇠계수에서 유도한다.
+
+        μ = atten_coeff의 채널 평균, Q_sat = exp(-μ·psi_min) = 허용된 최근접
+        거리에서의 품질 = 달성 가능한 coverage_q 상한. 둘을 항상 함께 유도해야
+        `coverage_q / Q_sat`이 "상한 대비 비율"이라는 의미를 유지한다.
+
+        `_atten_coeff_np`는 (N,3) numpy로 카메라 생성 시 cfg에서 초기화되므로
+        첫 render 이전에도 안전하다(`_atten_coeff_t`는 None일 수 있음).
+        """
+        ids = env_ids.tolist()
+        mu_np = self._camera._atten_coeff_np[ids].mean(axis=1)
+        mu = torch.from_numpy(mu_np).to(self.device).float()
+        self._quality_mu[env_ids] = mu
+        self._quality_Q_sat[env_ids] = torch.exp(-mu * self.cfg.psi_min)
+
+    def _update_quality_diagnostics(self, env_ids: Sequence[int]) -> None:
+        """GT surface voxel의 품질 분포를 never/partial/full로 집계한다.
+
+        binary coverage로는 "봤다"로 뭉뚱그려지는 것을 "얼마나 잘 봤나"로 쪼갠다.
+        step_1에서 binary 0.857 vs quality 0.483의 괴리를 드러낸 지표가 이것이다.
+
+        step_1은 env마다 도는 Python 루프였는데 여기서는 벡터화했다 — 리셋 경로의
+        per-env 루프가 처리량을 5.7배 깎아먹은 전례(`_triangulate`)가 있어서
+        같은 실수를 반복하지 않는다.
+        """
+        idx = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+        gt = self._surf_vol[idx]                                    # (n,Nx,Ny,Nz)
+        q_soft = (
+            self._quality_vol[idx] / self._quality_Q_sat[idx].view(-1, 1, 1, 1)
+        ).clamp(0.0, 1.0)
+        n_gt = gt.sum(dim=(1, 2, 3)).float().clamp(min=1.0)
+        dims = (1, 2, 3)
+        self._diag_gt_never[idx] = ((q_soft == 0.0) & gt).sum(dim=dims).float() / n_gt
+        self._diag_gt_partial[idx] = (
+            (q_soft > 0.0) & (q_soft < 1.0) & gt
+        ).sum(dim=dims).float() / n_gt
+        self._diag_gt_full[idx] = ((q_soft >= 1.0) & gt).sum(dim=dims).float() / n_gt
+
     # ── 보상 ─────────────────────────────────────────────────────────────────
     def _get_rewards(self) -> torch.Tensor:
         self._integrate_depth()
 
+        # binary는 quality 모드에서도 항상 계산한다 — 로그/비교용이고, 2026-08-26
+        # 9.3시간 baseline과 같은 축에서 볼 수 있어야 한다.
         self.curr_coverage = self._compute_curr_coverage()
-        delta_coverage = self.curr_coverage - self._prev_coverage
-        self._prev_coverage = self.curr_coverage.clone()
+
+        if self.cfg.use_quality_coverage:
+            self._compute_quality()                       # _integrate_depth 이후
+            self.curr_coverage_q = self._compute_coverage_q()
+
+        # 보상·종료·커리큘럼이 공통으로 쓰는 정규화 coverage
+        coverage = self._coverage_for_reward()
+        delta_coverage = coverage - self._prev_coverage_norm
+        self._prev_coverage_norm = coverage.clone()
 
         # 이동 비용은 **로봇 몸체**가 얼마나 움직였는지로 잰다.
         #
@@ -410,7 +492,7 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         self.last_dist_moved = dist_moved
 
         cfg = self.cfg
-        goal_reached = (self.curr_coverage >= self._current_coverage_terminal()).float()
+        goal_reached = (coverage >= self._current_coverage_terminal()).float()
         success_reward = goal_reached * cfg.coverage_bonus
 
         reward_coverage = cfg.k_c * delta_coverage
@@ -432,7 +514,9 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
 
     # ── 종료 ─────────────────────────────────────────────────────────────────
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        coverage_reached = self.curr_coverage >= self._current_coverage_terminal()
+        # `_get_rewards()`가 먼저 돌아 coverage/quality를 갱신해 둔 상태다
+        # (DirectRLEnv.step: _get_rewards → _get_dones → _reset_idx).
+        coverage_reached = self._coverage_for_reward() >= self._current_coverage_terminal()
         pos_env = self._robot.data.root_pos_w - self.scene.env_origins
         out_of_bounds = (pos_env.abs() > self.cfg.max_bound).any(dim=-1)
         terminated = coverage_reached | out_of_bounds
@@ -441,6 +525,12 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
 
     # ── 리셋 ─────────────────────────────────────────────────────────────────
     def _reset_idx(self, env_ids: Sequence[int]) -> None:
+        # GT surface 품질 분포 진단은 **_voxelize_gt_mesh()가 _surf_vol을 새
+        # 에피소드 것으로 갈아끼우기 전에** 해야 한다. step_1은 이 순서를 틀려
+        # never=0.791인데 coverage_q=0.464인 모순된 로그를 냈다(§11 버그 이력).
+        if self.cfg.use_quality_coverage:
+            self._update_quality_diagnostics(env_ids)
+
         super()._reset_idx(env_ids)
 
         cfg = self.cfg
@@ -494,8 +584,11 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         # step_1도 같은 이유로 `_terminal_coverage_q`를 따로 뒀다(그 부분을 초기
         # 이식에서 빠뜨려 학습 로그에 cov=0.000이 찍히던 것을 2026-08-26 수정).
         self.terminal_coverage[env_ids_t] = self.curr_coverage[env_ids_t]
-        self._prev_coverage[env_ids_t] = 0.0
+        self.terminal_coverage_q[env_ids_t] = self._coverage_for_reward()[env_ids_t]
         self.curr_coverage[env_ids_t] = 0.0
+        self._quality_vol[env_ids_t] = 0.0
+        self.curr_coverage_q[env_ids_t] = 0.0
+        self._prev_coverage_norm[env_ids_t] = 0.0
         self._prev_robot_pos[env_ids_t] = spawn_pos
         self._actions[env_ids_t] = 0.0
 
@@ -541,6 +634,12 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
 
         if cfg.jerlov_dr_enabled:
             self._randomize_water_params(env_ids_t)
+
+        # μ/Q_sat 동기화는 수질 랜덤화 **이후**여야 새 값이 반영된다.
+        # DR 여부와 무관하게 항상 호출한다 — step_1은 DR이 꺼지면 μ가 초기값
+        # 0.1에, Q_sat이 cfg의 0.80에 각각 머물러 서로 어긋났다(§13 알려진 불일치).
+        if cfg.use_quality_coverage:
+            self._sync_quality_water(env_ids_t)
 
         self._voxelize_gt_mesh(env_ids)
 

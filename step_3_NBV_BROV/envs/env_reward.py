@@ -120,3 +120,52 @@ class EnvRewardMixin:
         observed = (self._weight_vol > 0) & self._surf_vol   # GT surface만 카운트
         count = observed.sum(dim=(1, 2, 3)).float()
         return (count / self._total_surf_voxels).clamp(0.0, 1.0)
+
+    # ── Quality-weighted coverage (step_1 env_GenNBV_quality.py 이식) ─────────
+
+    def _compute_quality(self) -> None:
+        """관측된 voxel의 품질을 Beer-Lambert 감쇠로 갱신한다.
+
+        `_integrate_depth()` 이후에 호출해야 한다(TSDF/weight가 최신이어야 함).
+
+        `surface_mask = weight > 0` — TSDF 분류(`tsdf <= 0`)를 **조건에 넣지
+        않는다**. step_1에서 이 조건을 넣었더니 GT surface voxel의 37%가
+        "관측됐지만 TSDF는 free space로 분류"돼 품질 누적이 차단됐고,
+        binary 0.857 vs quality 0.483이라는 괴리가 생겼다(step_1 CLAUDE.md §10,
+        "해석 B"로 수정 완료). 여기서 재는 것은 재구성 확정도가 아니라
+        **관측 품질**이므로 weight>0이면 누적하는 것이 맞다.
+
+        누적은 합이 아니라 **max**다 — 같은 voxel을 반복 방문해도 품질이 무한히
+        쌓이지 않고 "가장 가까이서 본 순간"만 남는다(step_1 2026-05-26 변경).
+        """
+        centers = (
+            self._vol_origin[:, None, None, None, :]      # (E,1,1,1,3)
+            + self._voxel_offset[None]                    # (1,Nx,Ny,Nz,3)
+        )
+        cam = self._camera_position_w()[:, None, None, None, :]
+        dist = torch.norm(centers - cam, dim=-1)          # (E,Nx,Ny,Nz)
+
+        mu = self._quality_mu.view(-1, 1, 1, 1)
+        quality_new = torch.exp(-mu * dist)
+
+        observed = self._weight_vol > 0
+        self._quality_vol = torch.maximum(
+            self._quality_vol, quality_new * observed.float()
+        )
+
+    def _compute_coverage_q(self) -> torch.Tensor:
+        """GT surface voxel에 대한 품질 가중 coverage (raw, 상한 = Q_sat)."""
+        count = (self._quality_vol * self._surf_vol.float()).sum(dim=(1, 2, 3))
+        return count / self._total_surf_voxels
+
+    def _coverage_for_reward(self) -> torch.Tensor:
+        """보상·종료·커리큘럼이 공통으로 쓰는 coverage (항상 0~1 정규화).
+
+        quality 모드에서는 `coverage_q / Q_sat`을 돌려준다 — 이 정규화 덕분에
+        `coverage_terminal`이 step_1과 같은 "달성 가능 상한 대비 비율" 의미를
+        유지하고, binary 기준으로 실측 보정해 둔 k_c/c_step/coverage_bonus가
+        스케일 변경 없이 그대로 유효하다.
+        """
+        if not self.cfg.use_quality_coverage:
+            return self.curr_coverage
+        return (self.curr_coverage_q / self._quality_Q_sat).clamp(0.0, 1.0)

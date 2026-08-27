@@ -24,6 +24,7 @@ python.sh train.py --headless --num_envs 4 --total_steps 2000 --smoke   # 스모
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 import time
@@ -157,6 +158,7 @@ def main() -> int:
     ep_len = torch.zeros(E, dtype=torch.long, device=device)
     done_returns: list[float] = []
     done_covs: list[float] = []
+    done_covs_bin: list[float] = []
     done_lens: list[float] = []
     done_term: list[float] = []   # 1=커버리지 달성 종료, 0=시간초과
 
@@ -190,7 +192,13 @@ def main() -> int:
                 # `curr_coverage`가 아니라 `terminal_coverage`를 읽어야 한다 —
                 # step()이 반환될 시점엔 done env의 curr_coverage가 이미 0으로
                 # 리셋돼 있다(envs/env.py `_reset_idx()` 주석 참조).
-                done_covs.append(env.terminal_coverage[eid].item())
+                # cov는 학습이 실제로 최적화하는 지표(quality 모드면 정규화
+                # coverage_q)를 쓴다. binary는 2026-08-26 baseline과 같은 축에서
+                # 보기 위해 별도로 남긴다.
+                done_covs.append(env.terminal_coverage_q[eid].item()
+                                 if env.cfg.use_quality_coverage
+                                 else env.terminal_coverage[eid].item())
+                done_covs_bin.append(env.terminal_coverage[eid].item())
                 done_lens.append(float(ep_len[eid].item()))
                 # terminated=커버리지 목표 달성, truncated=시간초과 — 커리큘럼이
                 # 조여지는지 보려면 이 둘을 반드시 구분해야 한다.
@@ -247,11 +255,31 @@ def main() -> int:
             }
             for k, v in term_abs.items():
                 log[f"reward_share/{k}"] = v / tot          # 보상 항목별 기여 비중
+            if env.cfg.use_quality_coverage:
+                # GT surface 품질 분포 — binary coverage로는 안 보이는
+                # "봤지만 멀어서 흐릿함"을 드러낸다(step_1 diag/gt_* 대응).
+                log["diag/gt_never"]   = env._diag_gt_never.mean().item()
+                log["diag/gt_partial"] = env._diag_gt_partial.mean().item()
+                log["diag/gt_full"]    = env._diag_gt_full.mean().item()
+                log["diag/quality_mu"] = env._quality_mu.mean().item()
+                log["diag/quality_Q_sat"] = env._quality_Q_sat.mean().item()
+            # 정책이 한 지점에 주차하거나 클램프 한계에 붙는 축퇴 행동 감지용
+            log["env0/theta_deg"] = math.degrees(env._sph_theta[0].item())
+            log["env0/phi_deg"]   = math.degrees(env._sph_phi[0].item())
+            log["env0/psi"]       = env._sph_psi[0].item()
+            log["env0/vox_unknown_ratio"] = (
+                (obs["vox_actor"][0, 0] > 0.5).float().mean().item()
+            )
             if done_returns:
                 log["episode/mean_return"]   = float(np.mean(done_returns[-20:]))
                 log["episode/mean_coverage"] = float(np.mean(done_covs[-20:]))
+                log["episode/mean_coverage_binary"] = float(np.mean(done_covs_bin[-20:]))
                 log["episode/mean_length"]   = float(np.mean(done_lens[-20:]))
                 log["episode/success_rate"]  = float(np.mean(done_term[-20:]))
+                # 평균만 보면 "일부 에피소드는 물체를 아예 못 찾는" 이봉 구조를
+                # 놓친다 — 9.3시간 런 분석에서 미결로 남았던 질문.
+                if wandb is not None:
+                    log["episode/coverage_hist"] = wandb.Histogram(done_covs[-200:])
             try:
                 wandb.log(log, step=global_step)
             except Exception as exc:                                  # noqa: BLE001

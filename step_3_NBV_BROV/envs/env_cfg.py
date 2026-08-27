@@ -170,6 +170,37 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     curriculum_coverage_terminal_start: float = 0.45
     curriculum_coverage_terminal_end: float = 0.65
     curriculum_total_steps: int = 0
+
+    # ── Quality-weighted coverage (2026-08-27 이식) ──────────────────────────
+    # step_1의 연구 기여인 **거리 기반 관측 품질**(Beer-Lambert)을 step_3에 이식.
+    # 초기 step_3는 step_1의 **부모** 클래스 `env_GenNBV.py`(binary)만 이식하고
+    # 서브클래스 `env_GenNBV_quality.py`의 오버라이드를 빠뜨려서, "5 m 밖에서
+    # 스친 voxel"과 "1 m 앞에서 정면으로 본 voxel"이 동일하게 계산됐다 =
+    # 가까이 갈 유인이 목적함수에 없었다. (`_get_vox_actor()`를 빠뜨렸던 것과
+    # 같은 유형의 누락.)
+    #
+    #   q(v) = exp(-μ·d)    d = 카메라 ↔ voxel 중심 거리
+    #   Q_vol = max(Q_vol, q)            (반복 방문 시 최근접 품질만 기록)
+    #   coverage_q = Σ(Q_vol × surf_vol) / total_surf_voxels
+    #
+    # False로 두면 기존 binary coverage로 돌아간다 — 2026-08-26 9.3시간 런이
+    # binary 기준 baseline이라 A/B 비교가 가능하도록 남겨둔다.
+    use_quality_coverage: bool = True
+
+    # μ와 Q_sat은 **설정하지 않는다** — 카메라의 실제 `atten_coeff` 채널 평균에서
+    # 유도한다(step_1 `env_GenNBV_quality.py::_reset_idx`와 동일 메커니즘).
+    # 렌더러가 실제로 적용하는 감쇠와 품질 모델이 어긋나면 coverage_q가 이미지에
+    # 없는 것을 재는 지표가 되기 때문. step_3 `scene_cfg.py`의
+    # atten_coeff=(0.05,0.05,0.20) → μ=0.10 → Q_sat=exp(-0.10×psi_min)=0.905.
+    #
+    # 주의: step_1은 DR이 꺼져 있으면 μ가 초기값 0.1에 머무는데 Q_sat은 cfg의
+    # 0.80을 그대로 써서 둘이 불일치했다(step_1 CLAUDE.md §13 "Q_sat 설계 불일치").
+    # step_3는 DR 여부와 무관하게 항상 둘을 함께 유도해 이 불일치를 없앤다.
+    #
+    # 종료·커리큘럼·보상은 모두 **정규화값 `coverage_q / Q_sat` (0~1)** 을 쓴다.
+    # 그래야 ⓐ `coverage_terminal=0.65`가 step_1과 같은 "달성 가능 상한의 65%"
+    # 의미를 유지하고 ⓑ 위에서 실측으로 맞춰둔 k_c/c_step/coverage_bonus 보정이
+    # binary와 같은 스케일에서 그대로 유효하다.
     lambda_q: float = 0.1
     k_still: float = 0.05
     stall_thr: float = 1e-4

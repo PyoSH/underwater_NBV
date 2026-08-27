@@ -111,3 +111,6 @@ Loading user config located at: '/isaac-sim/kit/data/Kit/Isaac-Sim/5.1/user.conf
 [train] curriculum_total_steps = 15000 (자동 설정)
 [train] envs=16 rollout=32 → 롤아웃당 512 env-step, 총 29 롤아웃
 2026-08-26T07:07:25Z [64,071ms] [Warning] [carb] Client gpu.foundation.plugin has acquired [gpu::unstable::IMemoryBudgetManagerFactory v0.1] 100 times. Consider accessing this interface with carb::getCachedInterface() (Performance warning)
+[000] rew=+4.9095 ret=+29.117 cov=0.511 pl=+0.0057 vl=254.598 ent=+2.758 kl=0.0755 ev=+0.000 early_stop=True | success=58% dist=0.682 logstd=-0.50 (334s)
+[001] rew=+5.0313 ret=+30.018 cov=0.507 pl=-0.0009 vl=116.786 ent=+2.762 kl=0.0654 ev=-0.096 early_stop=True | success=60% dist=0.614 logstd=-0.50 (681s)
+[002] rew=+5.3840 ret=+29.036 cov=0.507 pl=-0.0002 vl=36.618 ent=+2.765 kl=0.0531 ev=+0.108 early_stop=True | success=36% dist=0.694 logstd=-0.50 (1035s)
