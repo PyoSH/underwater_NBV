@@ -132,7 +132,13 @@ def main() -> int:
                         action_dim=A, device=device)
 
     # 커리큘럼 총 스텝을 알려준다(0이면 비활성) — env_cfg.curriculum_* 참조
-    if env_cfg.curriculum_enabled and env_cfg.curriculum_total_steps <= 0:
+    if env_cfg.curriculum_enabled and env_cfg.curriculum_adaptive:
+        # 적응형은 총 스텝 수를 몰라도 된다 — 성공률만 보고 올린다.
+        print(f"[train] 커리큘럼: 적응형 (게이트 성공률 "
+              f"{env_cfg.curriculum_success_gate}, 시작 "
+              f"{env_cfg.curriculum_coverage_terminal_start} → 상한 "
+              f"{env_cfg.curriculum_coverage_terminal_end})")
+    elif env_cfg.curriculum_enabled and env_cfg.curriculum_total_steps <= 0:
         env.cfg.curriculum_total_steps = args.total_steps
         print(f"[train] curriculum_total_steps = {args.total_steps} (자동 설정)")
 
@@ -251,6 +257,9 @@ def main() -> int:
                 "diag/dist_moved":     env.last_dist_moved.mean().item(),
                 # 커리큘럼이 실제로 조여지고 있는지 — cov와 함께 봐야 의미가 있다
                 "curriculum/coverage_terminal": float(env._current_coverage_terminal()),
+                # 적응형 커리큘럼이 무엇을 보고 올리는지 — 임계값이 정체하면
+                # 이 값이 게이트(기본 0.7) 아래에 머물고 있다는 뜻이다.
+                "curriculum/success_ema": float(env.curriculum_success_ema),
                 "perf/env_steps_per_sec": global_step / max(time.time() - t0, 1e-6),
             }
             for k, v in term_abs.items():

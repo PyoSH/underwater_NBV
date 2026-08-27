@@ -171,6 +171,26 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     curriculum_coverage_terminal_end: float = 0.65
     curriculum_total_steps: int = 0
 
+    # ── 적응형 커리큘럼 (2026-08-27) ────────────────────────────────────────
+    # 스텝 기반 선형 상향은 정책 성능과 무관하게 진행되므로 정책을 앞지를 수
+    # 있고, 9.3시간 런에서 실제로 3.3배 앞질렀다(임계값 +0.199 vs coverage
+    # +0.061). 최근 성공률이 게이트를 넘을 때만 올리면 정의상 앞지를 수 없다.
+    #
+    # 게이트 0.7 근거: 성공률이 이 정도면 "현재 난이도를 익혔다"고 보기 충분하고,
+    # 동시에 학습 신호(성공/실패 대비)가 남아 있는 수준. 1.0에 가깝게 두면
+    # 난이도가 거의 안 오르고, 0.5면 절반만 성공해도 올려 앞지르기가 재발한다.
+    #
+    # rate 0.002 = "num_envs개 에피소드가 끝날 때마다의 상승폭"(비례 환산은
+    # `_update_curriculum()` 주석 참조). 150K 스텝 / 에피소드 8결정 / 64 env면
+    # 약 293 배치이므로, 계속 성공한다는 가정에서 최대 +0.59까지 오를 수 있다 —
+    # start 0.45에서 end 0.65까지 도달하고도 충분한 여유.
+    #
+    # False면 기존 스텝 기반 선형 상향(A/B 비교용).
+    curriculum_adaptive: bool = True
+    curriculum_success_gate: float = 0.7
+    curriculum_rate: float = 0.002
+    curriculum_success_ema_alpha: float = 0.05
+
     # ── Quality-weighted coverage (2026-08-27 이식) ──────────────────────────
     # step_1의 연구 기여인 **거리 기반 관측 품질**(Beer-Lambert)을 step_3에 이식.
     # 초기 step_3는 step_1의 **부모** 클래스 `env_GenNBV.py`(binary)만 이식하고

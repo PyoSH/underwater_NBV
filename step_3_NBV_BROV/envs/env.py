@@ -158,6 +158,15 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         self._surf_vol = torch.zeros(self.num_envs, Nx, Ny, Nz, dtype=torch.bool, device=self.device)
 
         self.curr_coverage = torch.zeros(self.num_envs, device=self.device)
+        # ── 적응형 커리큘럼 상태 ──
+        # 임계값은 시작값에서 출발해 성공률이 게이트를 넘을 때만 오른다.
+        self._curriculum_level = cfg.curriculum_coverage_terminal_start
+        self.curriculum_success_ema = 0.0
+        # `_get_dones()`가 매 스텝 갱신. 첫 `_reset_idx()`는 `_get_dones()` 이전에
+        # 불릴 수 있으므로(초기 reset) 여기서 False로 초기화해 둔다.
+        self._last_coverage_reached = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
         # 에피소드 종료 시점의 coverage (리셋 전 값) — 학습 스크립트 로깅용.
         # `_reset_idx()` 주석 참조.
         self.terminal_coverage = torch.zeros(self.num_envs, device=self.device)
@@ -399,13 +408,26 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         ], dim=1)
 
     def _current_coverage_terminal(self) -> float:
-        """커리큘럼: coverage 성공 임계값을 start→end로 선형 상향.
+        """커리큘럼: coverage 성공 임계값.
 
-        `curriculum_total_steps<=0`이거나 비활성이면 고정값(`coverage_terminal`)을
-        그대로 반환한다 — `vel_env.py::_current_action_envelope()`와 동일 관례.
+        **적응형(기본)**: 최근 성공률이 `curriculum_success_gate`를 넘을 때만
+        임계값을 올린다. 스텝 기반 선형 상향은 정책 성능과 무관하게 진행돼
+        구조적으로 정책을 앞지를 수 있고, 실제로 그랬다 — 2026-08-26 9.3시간
+        런에서 임계값은 0.450→0.649(+0.199) 올라갔는데 coverage는 0.499→0.560
+        (+0.061)에 그쳐 **3.3배 앞질렀고**, 후반에는 도달 불가능한 목표가 됐다.
+        성공률로 게이팅하면 정의상 앞지를 수 없고, 종료값이 맞는지 추측할
+        필요도 없어진다.
+
+        `curriculum_adaptive=False`면 기존 스텝 기반 선형 상향으로 되돌아간다
+        (A/B 비교용). 둘 다 비활성이면 고정값 — `vel_env.py::
+        _current_action_envelope()`와 동일 관례.
         """
         cfg = self.cfg
-        if not cfg.curriculum_enabled or cfg.curriculum_total_steps <= 0:
+        if not cfg.curriculum_enabled:
+            return cfg.coverage_terminal
+        if cfg.curriculum_adaptive:
+            return self._curriculum_level
+        if cfg.curriculum_total_steps <= 0:
             return cfg.coverage_terminal
         progress = min(1.0, self.common_step_counter / cfg.curriculum_total_steps)
         return (
@@ -413,6 +435,30 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
             + progress
             * (cfg.curriculum_coverage_terminal_end - cfg.curriculum_coverage_terminal_start)
         )
+
+    def _update_curriculum(self, env_ids: torch.Tensor) -> None:
+        """방금 끝난 에피소드들의 성공 여부로 난이도를 조절한다.
+
+        상승폭을 `len(env_ids)/num_envs`로 비례시키는 이유: `_reset_idx()`는 매
+        스텝 "그때 끝난 env들"에 대해 불리므로 호출 횟수가 에피소드 길이와
+        env 수에 따라 크게 달라진다. 호출당 고정폭으로 올리면 난이도 상승 속도가
+        그 부수적 요인에 좌우된다. 비례시키면 `curriculum_rate`가 "num_envs개
+        에피소드가 끝날 때마다의 상승폭"이라는 안정된 의미를 갖는다.
+
+        임계값은 **단조 증가**만 한다(내려가지 않음) — 난이도가 오르내리면
+        보상 분포가 비정상(non-stationary)이 돼 critic이 쫓아가기 어렵다.
+        """
+        cfg = self.cfg
+        succ = self._last_coverage_reached[env_ids].float().mean().item()
+        a = cfg.curriculum_success_ema_alpha
+        self.curriculum_success_ema = (1.0 - a) * self.curriculum_success_ema + a * succ
+
+        if self.curriculum_success_ema >= cfg.curriculum_success_gate:
+            frac = len(env_ids) / self.num_envs
+            self._curriculum_level = min(
+                cfg.curriculum_coverage_terminal_end,
+                self._curriculum_level + cfg.curriculum_rate * frac,
+            )
 
     def _sync_quality_water(self, env_ids: torch.Tensor) -> None:
         """μ와 Q_sat을 카메라의 실제 감쇠계수에서 유도한다.
@@ -519,6 +565,10 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         coverage_reached = self._coverage_for_reward() >= self._current_coverage_terminal()
         pos_env = self._robot.data.root_pos_w - self.scene.env_origins
         out_of_bounds = (pos_env.abs() > self.cfg.max_bound).any(dim=-1)
+        # 커리큘럼은 **커버리지 달성만** 성공으로 봐야 한다 — `terminated`에는
+        # 경계 이탈이 섞여 있어서 그대로 쓰면 밖으로 나가버린 에피소드가 성공으로
+        # 집계되고, 난이도가 잘못 올라간다.
+        self._last_coverage_reached = coverage_reached
         terminated = coverage_reached | out_of_bounds
         truncated = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, truncated
@@ -530,6 +580,17 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         # never=0.791인데 coverage_q=0.464인 모순된 로그를 냈다(§11 버그 이력).
         if self.cfg.use_quality_coverage:
             self._update_quality_diagnostics(env_ids)
+
+        # 커리큘럼도 super() 이전에 — `_last_coverage_reached`는 방금 끝난
+        # 에피소드의 결과이고, 초기 reset(아직 에피소드가 없음)에서는 건너뛴다.
+        if (
+            self.cfg.curriculum_enabled
+            and self.cfg.curriculum_adaptive
+            and self.common_step_counter > 0
+        ):
+            self._update_curriculum(
+                torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+            )
 
         super()._reset_idx(env_ids)
 
