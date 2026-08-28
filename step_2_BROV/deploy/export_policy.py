@@ -130,6 +130,11 @@ def main() -> None:
         "action_contract": env_cfg.action_contract,
         "command_profile": env_cfg.command_profile,
         "reward_profile": env_cfg.reward_profile,
+        # 보상 가중치는 **학습 manifest에서** 읽는다. env_cfg는 profile 기본값으로
+        # 새로 만든 객체라 --rew_w_action 같은 CLI 덮어쓰기를 모른다. 여기서
+        # env_cfg.rew_w_action을 쓰면 w_a=0.017로 학습된 checkpoint가 0.3으로
+        # 기록되어 artifact 출처가 거짓이 된다.
+        "rew_w_action": training_manifest.get("rew_w_action", env_cfg.rew_w_action),
         "seed": env_cfg.seed,
         "input_dim": env_cfg.observation_space,
         "output_dim": env_cfg.action_space,
