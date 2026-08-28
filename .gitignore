@@ -34,3 +34,6 @@ step_2_BROV/_wa*.json
 step_2_BROV/_fig4_*
 step_2_BROV/_zv_probe.*
 step_2_BROV/_*.sh
+# 정책 export는 빌드 산출물이다 — 배포본은 brov_ros2/artifacts/policies/ 가 정본
+step_2_BROV/deploy/exported/
+step_2_BROV/deploy/exported_mk2_*/
