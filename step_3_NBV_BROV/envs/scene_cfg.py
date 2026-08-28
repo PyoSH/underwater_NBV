@@ -121,7 +121,21 @@ class NBVBROVSceneCfg(InteractiveSceneCfg):
             convention="world",
         ),
         backscatter_value=(0.05, 0.31, 0.24),
-        atten_coeff=(0.05, 0.05, 0.20),
+        # Jerlov IB (외해 최청정) — `utils_NBV/jerlov_presets.py`의 표준값.
+        #
+        # 2026-08-28 변경. 이전 값 (0.05,0.05,0.20)은 채널평균 μ=0.100으로
+        # **자연 해수 중 가장 맑은 IB보다도 2.3배 맑아** 물리적으로 비현실적이었고,
+        # 그보다 심각하게는 quality coverage가 제 역할을 못 하게 만들었다:
+        # 평가 실측(eval_out/run01)에서 2.88 m → 1.92 m 접근 시 voxel당 품질
+        # 이득은 +10%인데 멀리서 얻는 관측 범위 이득이 +20%라, **후퇴가 순이득**
+        # 이었다. 깨끗한 정책끼리 비교해도 같다 — orbit(2.22 m)이 random(1.92 m)
+        # 보다 멀리 있으면서 cov_q가 더 높았다(0.568 vs 0.518).
+        # 품질이 범위를 이기려면 μ > 0.190이 필요하고, IB의 μ=0.233이 이를 넘는다.
+        #
+        # 주의: 이 값은 렌더링 감쇠와 quality 모델이 **함께** 참조한다
+        # (`env.py::_sync_quality_water()`가 여기서 μ를 유도). 한쪽만 바꾸면
+        # coverage_q가 이미지에 없는 것을 재게 되므로 반드시 여기만 수정할 것.
+        atten_coeff=(0.325835, 0.196346, 0.177762),
         backscatter_coeff=(0.05, 0.05, 0.05),
     )
 

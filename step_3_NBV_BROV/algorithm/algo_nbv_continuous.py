@@ -74,6 +74,31 @@ _STATE_DIM  = 256
 _LOG_STD_MIN, _LOG_STD_MAX = -5.0, 2.0
 _TANH_EPS = 1e-6
 
+# 정책 평균 mu의 소프트 상한 (2026-08-28 추가).
+#
+# 왜 필요한가: std는 위에서 클램프되는데 `mu = self.mlp(...)`는 아무 제약이
+# 없었다. 2026-08-27 런에서 mu가 **±256까지 발산**해(관측 approx_kl 87,477에서
+# 역산) tanh가 완전히 포화됐고, 평가에서 액션의 **89%가 |a|>0.99**로 확인됐다.
+# 그 상태에서는 ratio=exp(-87,477)=0으로 언더플로되고, clamp가 범위 밖이라
+# 기울기가 정확히 0이 되어 actor가 학습 신호를 전혀 못 받는다.
+#
+# 3.0인 이유: tanh(3)=0.995라 액션 공간 [-1,1]의 끝까지 표현할 수 있으면서,
+# 이보다 큰 값은 표현력을 늘리지 못하고 log-prob만 폭발시킨다. 하드 클램프
+# 대신 소프트(mu = M·tanh(raw/M))를 쓰는 이유는 하드 클램프가 경계에서
+# 기울기를 0으로 만들어 한 번 붙으면 빠져나올 수 없기 때문이다.
+_MU_MAX = 3.0
+
+# log-ratio를 exp 하기 전 클램프할 범위. exp(20)≈4.9e8, exp(-20)≈2e-9로
+# 충분히 넓으면서 inf/0 언더플로를 막는다. 위 _MU_MAX가 근본 원인을 없애지만,
+# 학습 초기 큰 갱신에서도 수치가 죽지 않도록 두는 안전장치다.
+_LOG_RATIO_CLAMP = 20.0
+
+# 미니배치 단위 KL 조기종료의 여유 배수. 단일 미니배치(32 샘플) KL은 에포크
+# 평균보다 시끄러우므로 target_kl을 그대로 쓰면 정상 변동에도 매번 걸린다.
+# 3.0이면 target_kl=0.12에서 0.36에 트립 — 발산(관측 1,756 이상)은 즉시 잡고
+# 정상 변동(0.05~0.2)은 통과시킨다.
+_MB_KL_SLACK = 3.0
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 인코더 3종 — step_1에서 무수정 이식
@@ -154,7 +179,10 @@ class Actor(nn.Module):
         self.log_std = nn.Parameter(torch.full((action_dim,), float(log_std_init)))
 
     def _dist(self, vox, img, scalar) -> Normal:
-        mu  = self.mlp(self.embed(vox, img, scalar))
+        raw = self.mlp(self.embed(vox, img, scalar))
+        # 소프트 유계화 — `_MU_MAX` 주석의 발산 사고 참조. 하드 클램프가 아니라
+        # tanh를 쓰는 이유는 경계에서도 기울기가 살아 있어야 복귀가 가능해서다.
+        mu  = _MU_MAX * torch.tanh(raw / _MU_MAX)
         std = self.log_std.clamp(_LOG_STD_MIN, _LOG_STD_MAX).exp().expand_as(mu)
         return Normal(mu, std)
 
@@ -313,8 +341,29 @@ def ppo_update(actor: Actor, critic: Critic,
             )
 
             # abs(log-ratio): policy가 더 확신하는 방향도 감지 (signed KL은 음수 가능)
-            approx_kl_mb = (data["logprobs"][mb] - new_logp).abs().mean().item()
-            ratio  = (new_logp - data["logprobs"][mb]).exp()
+            log_ratio = new_logp - data["logprobs"][mb]
+            approx_kl_mb = log_ratio.abs().mean().item()
+
+            # 미니배치 단위 조기 종료 (2026-08-28 추가).
+            #
+            # 기존에는 **에포크 끝**에서만 검사했다. 롤아웃 2048 / minibatch 32면
+            # 미니배치가 64개라, 발산이 에포크 안에서 일어나면 64회 갱신을 다
+            # 하고 나서야 알아챈다. 2026-08-27 런이 정확히 그렇게 무너졌다
+            # (KL 0.09 → 1,756 → 319,209). 초과 즉시 멈추면 이 창이 닫힌다.
+            #
+            # 갱신 **이전**에 검사한다 — 이 시점의 KL은 지금까지의 누적 이탈량이고,
+            # 이미 과도하면 여기에 갱신을 더 얹을 이유가 없다.
+            #
+            # 여유 배수 `_MB_KL_SLACK`: 단일 미니배치 KL은 에포크 평균보다
+            # 자연히 시끄러우므로 target_kl을 그대로 적용하면 정상 변동에도 걸린다.
+            if approx_kl_mb > cfg.target_kl * _MB_KL_SLACK:
+                early_stop = True
+                break
+
+            # exp 전에 클램프 — `_LOG_RATIO_CLAMP` 주석 참조. 클램프가 없으면
+            # log_ratio가 커질 때 ratio가 0/inf로 죽고, 그러면 아래 clamp()가
+            # 범위 밖이라 기울기까지 0이 되어 학습이 멈춘다.
+            ratio  = log_ratio.clamp(-_LOG_RATIO_CLAMP, _LOG_RATIO_CLAMP).exp()
             mb_adv = adv[mb]
 
             pg = torch.max(
@@ -352,6 +401,8 @@ def ppo_update(actor: Actor, critic: Critic,
             acc["n"]           += B
             epoch_kl           += approx_kl_mb          * B
             epoch_n            += B
+        if early_stop:
+            break
 
         if epoch_n > 0 and (epoch_kl / epoch_n) > cfg.target_kl:
             early_stop = True
