@@ -128,8 +128,20 @@ class LOSGuidance:
         # 앞으로 나아갈수록 오히려 멀어지기만 해서 영원히 도달 판정이 안 남
         # (실제로 이 버그로 wp_idx가 안 넘어가서 lookahead 지점에 고착 → 목표속도
         # 발산까지 이어진 것을 로그로 확인함).
-        _, next_wp = self._current_and_next(self._wp_idx)
-        reached = torch.norm(next_wp - pos_env, dim=-1) < self._reach
+        cur_wp, next_wp = self._current_and_next(self._wp_idx)
+        # 전환 조건 둘. **근접만으로는 부족하다.**
+        #   ① 근접   ‖next_wp - pos‖ < reach
+        #   ② 통과   along-track 진행률 s 가 세그먼트 길이를 넘음
+        # BF LOS는 **무한 직선**을 따라 조향하므로, 끝점을 지나도 같은 방향을
+        # 계속 가리킨다. ①만 보면 한 번 지나친 뒤 영원히 나아간다 -- 실제
+        # SITL에서 0.20 m 하강 구간을 지나쳐 8.5 m까지 가라앉았다. 구
+        # lookahead-point 법칙은 look_s를 세그먼트 끝에 clamp해서 끝점을 지나면
+        # to_los가 뒤를 가리켜 스스로 되돌아왔는데, 그 성질이 BF에는 없다.
+        _seg = next_wp - cur_wp
+        _seg_len = _seg.norm(dim=-1)
+        _seg_dir = _seg / _seg_len.clamp_min(1e-6).unsqueeze(-1)
+        _s_along = ((pos_env - cur_wp) * _seg_dir).sum(-1)
+        reached = (torch.norm(next_wp - pos_env, dim=-1) < self._reach) | (_s_along >= _seg_len)
         self._wp_idx = torch.where(reached, (self._wp_idx + 1) % self.num_wp, self._wp_idx)
         cur_wp, next_wp = self._current_and_next(self._wp_idx)   # 갱신된 인덱스로 재조회
 

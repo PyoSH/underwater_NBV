@@ -117,8 +117,20 @@ class LOSGuidance:
         ``advance_waypoint=False``는 제어 시작 전 shadow observation을 만들 때 사용한다.
         이때 LOS 목표는 계산하되 waypoint index와 mission_complete는 변경하지 않는다.
         """
-        _, next_wp = self._current_and_next(self._wp_idx)
-        reached = torch.norm(next_wp - pos_env, dim=-1) < self._reach
+        cur_wp, next_wp = self._current_and_next(self._wp_idx)
+        # 전환 조건 둘. **근접만으로는 부족하다.**
+        #   ① 근접   ‖next_wp - pos‖ < reach
+        #   ② 통과   along-track 진행률 s 가 세그먼트 길이를 넘음
+        # BF LOS는 **무한 직선**을 따라 조향하므로, 끝점을 지나도 같은 방향을
+        # 계속 가리킨다. ①만 보면 한 번 지나친 뒤 영원히 나아간다 -- 실제
+        # SITL에서 0.20 m 하강 구간을 지나쳐 8.5 m까지 가라앉았다. 구
+        # lookahead-point 법칙은 look_s를 세그먼트 끝에 clamp해서 끝점을 지나면
+        # to_los가 뒤를 가리켜 스스로 되돌아왔는데, 그 성질이 BF에는 없다.
+        _seg = next_wp - cur_wp
+        _seg_len = _seg.norm(dim=-1)
+        _seg_dir = _seg / _seg_len.clamp_min(1e-6).unsqueeze(-1)
+        _s_along = ((pos_env - cur_wp) * _seg_dir).sum(-1)
+        reached = (torch.norm(next_wp - pos_env, dim=-1) < self._reach) | (_s_along >= _seg_len)
 
         if advance_waypoint:
             if self._loop:

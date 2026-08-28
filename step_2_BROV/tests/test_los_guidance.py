@@ -53,7 +53,10 @@ def _bf_reference(p, cur, nxt, dh=1.0, dv=1.0):
 
 
 @pytest.mark.parametrize("seg", [0, 1, 2])
-@pytest.mark.parametrize("pos", [[0.5, -0.8, 5.6], [2.0, 1.3, 3.9], [7.0, 2.0, 6.5]])
+# 전부 해당 세그먼트 **안쪽** 위치여야 한다. 밖이면 along-track 통과 판정으로
+# waypoint가 넘어가서, 폐형 참조가 계산한 세그먼트와 달라진다(그 전환 자체는
+# test_waypoint_advances_when_the_vehicle_passes_the_segment_end 가 검사한다).
+@pytest.mark.parametrize("pos", [[0.5, -0.8, 5.6], [2.0, 1.3, 3.9], [3.0, 2.0, 6.5]])
 def test_matches_the_closed_form_breivik_fossen_law(seg, pos):
     los = _los()
     los._wp_idx[:] = seg
@@ -130,3 +133,24 @@ def test_course_depends_on_cross_track_only_not_on_along_track_progress():
     los._wp_idx[:] = 0
     b, _ = los.compute(torch.tensor([[4.5, 0.7, 4.6]]), _Q_ID)
     assert torch.allclose(a, b, atol=1e-6)
+
+
+def test_waypoint_advances_when_the_vehicle_passes_the_segment_end():
+    """근접 판정을 놓쳐도 **통과**로 전환한다.
+
+    BF는 무한 직선을 따라 조향하므로 끝점을 지나도 같은 방향을 계속 가리킨다.
+    근접만 보면 한 번 지나친 뒤 영원히 나아간다 — 실제 SITL에서 0.20 m 하강
+    구간을 지나쳐 8.5 m까지 가라앉았다. 구 lookahead-point 법칙은 look_s를
+    세그먼트 끝에 clamp해서 스스로 되돌아왔는데, BF에는 없는 성질이다.
+    """
+    los = _los()
+    los._wp_idx[:] = 0                       # 세그먼트 [0,0,5] -> [5,0,5]
+    los.compute(torch.tensor([[9.0, 0.0, 5.0]]), _Q_ID)   # 훨씬 지나침, reach 밖
+    assert int(los._wp_idx[0]) == 1
+
+
+def test_waypoint_does_not_advance_mid_segment():
+    los = _los()
+    los._wp_idx[:] = 0
+    los.compute(torch.tensor([[2.0, 0.0, 5.0]]), _Q_ID)
+    assert int(los._wp_idx[0]) == 0
