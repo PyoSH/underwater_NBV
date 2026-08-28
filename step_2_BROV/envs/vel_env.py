@@ -111,7 +111,12 @@ class BROVVelEnv(DirectRLEnv):
             added_mass        = hydro_coef["added_mass"],
             linear_damping    = hydro_coef["linear_damping"],
             quadratic_damping = hydro_coef["quadratic_damping"],
+            # M_total = M_RB + M_A 를 만들기 위해 필요하다. Hydrodynamics가
+            # added mass를 암묵적으로 풀기 때문 — compute() docstring 참조.
+            rigid_mass        = yaml_params["expect"]["mass"],
+            rigid_inertia     = yaml_params["expect"]["inertia"],
         )
+        self._rigid_mass = float(yaml_params["expect"]["mass"])
 
         # 할당행렬 B(6,8) → pseudo-inverse(8,6). YAML 위치/방향에서 매번 계산
         # (하드코딩 금지 — coBM/hydro_coef와 동일한 단일 정본 원칙).
@@ -320,10 +325,20 @@ class BROVVelEnv(DirectRLEnv):
 
         f_thrust, t_thrust = self._thruster.compute(pwm)
         self._wrench_achieved_zup.copy_(torch.cat((f_thrust, t_thrust), dim=-1))
+        # Hydrodynamics가 ν̇ 를 풀려면 **이 모듈 밖에서 몸체에 작용하는 전부**가
+        # 필요하다 — 추력과 중력. 빠뜨리면 added mass가 그만큼 어긋난다.
+        # 중력은 PhysX가 따로 적용하므로 여기서는 ν̇ 를 푸는 데만 쓴다.
+        g_world = torch.zeros_like(f_thrust)
+        g_world[:, 2] = -self._rigid_mass * 9.81
+        g_body = math_utils.quat_apply(
+            math_utils.quat_conjugate(self._robot.data.root_quat_w), g_world
+        )
+        other_wrench_b = torch.cat((f_thrust + g_body, t_thrust), dim=-1)
         f_hydro, t_hydro = self._hydro.compute(
             self._robot.data.root_quat_w,
             self._robot.data.root_lin_vel_b,
             self._robot.data.root_ang_vel_b,
+            other_wrench_b,
         )
 
         total_forces  = (f_thrust + f_hydro).unsqueeze(1)

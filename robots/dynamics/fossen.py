@@ -50,9 +50,12 @@ class Hydrodynamics:
     _GRAVITY       : float = 9.81
     _VOLUME        : float = 0.0134      # [m³] fallback 기본값
     _COB_VECTOR    : list  = [0.0, 0.0, -0.01]  # [m] SNAME frame, fallback only
-    _ACC_ALPHA     : float = 0.3         # 가속도 저역필터 계수
 
     # fallback 계수 (인자 없이 직접 생성할 때만 사용 — von Benzon et al. 2022 Table A1)
+    # 강체 질량/관성 fallback (brov2_heavy.yaml expect 절). M_total = M_RB + M_A 용.
+    _RIGID_MASS        = 14.635
+    _RIGID_INERTIA     = [0.289, 0.329, 0.337]
+
     _ADDED_MASS        = [6.36,  7.12,  18.68, 0.189, 0.135, 0.222]
     _LINEAR_DAMPING    = [13.70, 0.00,  33.00, 0.00,  0.80,  0.00 ]
     _QUADRATIC_DAMPING = [141.0, 217.0, 190.0, 1.19,  0.47,  1.50 ]
@@ -68,6 +71,8 @@ class Hydrodynamics:
         added_mass        : list | tuple | None = None,
         linear_damping    : list | tuple | None = None,
         quadratic_damping : list | tuple | None = None,
+        rigid_mass        : float | None = None,
+        rigid_inertia     : list | tuple | None = None,
     ):
         self.num_envs = num_envs
         self.dt       = dt
@@ -115,9 +120,14 @@ class Hydrodynamics:
         self._Dl = _diag(linear_damping    or self._LINEAR_DAMPING)
         self._Dq = _diag(quadratic_damping or self._QUADRATIC_DAMPING)
 
-        # 가속도 추정 버퍼 (NED body frame)
-        self._prev_vel_ned = torch.zeros(num_envs, 6, device=device)
-        self._prev_acc_ned = torch.zeros(num_envs, 6, device=device)
+        # ── M_total = M_RB + M_A — added mass를 암묵적으로 풀기 위한 것 ──
+        # compute()가 ν̇ = M_total⁻¹·F 를 풀고 −M_A·ν̇ 를 외력으로 돌려준다.
+        # 자세한 이유는 compute() docstring 참조.
+        m = float(rigid_mass    if rigid_mass    is not None else self._RIGID_MASS)
+        I = list(rigid_inertia  if rigid_inertia is not None else self._RIGID_INERTIA)
+        if m <= 0.0 or any(v <= 0.0 for v in I) or len(I) != 3:
+            raise ValueError("rigid_mass는 양수, rigid_inertia는 양수 3개여야 함")
+        self._M_total = self._Ma + _diag([m, m, m] + I)
 
     def randomize(
         self,
@@ -140,9 +150,12 @@ class Hydrodynamics:
         if cob_offset is not None:
             self._r_cob_ned[env_ids] = self._nominal_r_cob_ned[env_ids] + cob_offset
         if added_mass_rot is not None:
-            self._Ma[env_ids, 3, 3] = added_mass_rot[:, 0]
-            self._Ma[env_ids, 4, 4] = added_mass_rot[:, 1]
-            self._Ma[env_ids, 5, 5] = added_mass_rot[:, 2]
+            for k in range(3):
+                # M_total = M_RB + M_A 이므로 M_A를 흔들면 M_total도 따라가야 한다.
+                # 안 그러면 암묵 해법이 흔들리기 전 질량으로 ν̇ 를 푼다.
+                delta = added_mass_rot[:, k] - self._Ma[env_ids, 3 + k, 3 + k]
+                self._Ma[env_ids, 3 + k, 3 + k] = added_mass_rot[:, k]
+                self._M_total[env_ids, 3 + k, 3 + k] += delta
 
     # ------------------------------------------------------------------
     # Public API
@@ -153,9 +166,39 @@ class Hydrodynamics:
         root_quat_w : torch.Tensor,   # (N, 4) [w,x,y,z]
         lin_vel_b   : torch.Tensor,   # (N, 3) Z-up body
         ang_vel_b   : torch.Tensor,   # (N, 3) Z-up body
+        other_wrench_b: torch.Tensor, # (N, 6) Z-up body — 이 모듈 밖에서 몸체에
+                                      #        작용하는 모든 것(추력 + 중력)
     ) -> tuple:
         """
         유체역학 합력/합토크 계산.
+
+        added mass를 **암묵적으로** 푼다
+        ------------------------------
+        Fossen 방정식에서 M_A는 좌변의 질량행렬에 속한다:
+
+            (M_RB + M_A)·ν̇ + C(ν)ν + D(ν)ν = τ_thrust + g(η) + F_grav
+
+        2026-08-28까지는 이를 우변으로 옮겨 −M_A·ν̇ 를 외력으로 넣고 ν̇ 를
+        **직전 스텝의 속도차**로 추정했다. 그 되먹임은 M_A ≳ M_RB 에서 발산하므로
+        가속도에 저역필터(α=0.3, ~5.7 Hz)를 걸어 막고 있었다. 필터는 물리적
+        근거가 없고 added mass를 주파수 의존으로 만든다 — 측정하니 0.5 Hz 이하
+        1% 미만이지만 5 Hz에서 −21%, 10 Hz에서 −43%로, 10 Hz에서는 유효질량이
+        18.74 kg(added mass가 거의 사라진 값)이 된다.
+
+        지금은 ν̇ 를 추정하지 않고 **푼다**:
+
+            ν̇        = (M_RB + M_A)⁻¹ · [τ_other + g(η) − C(ν)ν − D(ν)ν]
+            τ_am     = −M_A · ν̇
+
+        PhysX가 M_RB·ν̇_physx = τ_other + (이 함수의 반환값) 을 적분하므로,
+        반환값에 τ_am 이 들어가면 ν̇_physx = (M_RB+M_A)⁻¹·F 가 정확히 나온다.
+        가속도 되먹임이 없으니 불안정할 수 없고 필터도 필요 없다. 전 대역에서
+        해석해와 0.5% 이내로 일치한다.
+
+        ``other_wrench_b`` 는 **이 모듈 밖에서 몸체에 작용하는 전부**여야 한다 —
+        추력과 중력. 빠뜨리면 ν̇ 가 틀리고 added mass가 그만큼 어긋난다.
+        (중력은 PhysX가 따로 적용하므로 반환값에 넣지 않는다. 여기서는 ν̇ 를
+        푸는 데만 쓴다.)
 
         Returns
         -------
@@ -165,15 +208,17 @@ class Hydrodynamics:
         # ── 입력 변환: Z-up body → NED body ──────────────────────────
         vel_zup = torch.cat([lin_vel_b, ang_vel_b], dim=-1)   # (N, 6)
         vel_ned = vel_zup * self._t6                           # (N, 6)
-
-        # 가속도 추정 (NED body frame)
-        acc_ned = self._update_acc(vel_ned)
+        other_ned = other_wrench_b * self._t6                  # (N, 6)
 
         # ── Fossen 계산 (전부 NED body frame) ─────────────────────────
         g_ned    = self._buoyancy(root_quat_w)   # (N, 6)
         fd_ned   = self._damping(vel_ned)         # (N, 6)
-        fam_ned  = self._added_mass(acc_ned)      # (N, 6)
         fcor_ned = self._coriolis(vel_ned)        # (N, 6)
+
+        # ── added mass: ν̇ 를 풀어서 구한다 ───────────────────────────
+        rhs      = other_ned + g_ned - fd_ned - fcor_ned          # (N, 6)
+        acc_ned  = torch.linalg.solve(self._M_total, rhs.unsqueeze(-1)).squeeze(-1)
+        fam_ned  = self._added_mass(acc_ned)      # (N, 6)
 
         # ── NED body frame 합산 ────────────────────────────────────────
         total_ned = g_ned - (fd_ned + fam_ned + fcor_ned)   # (N, 6)
@@ -184,8 +229,8 @@ class Hydrodynamics:
         return total_zup[:, :3], total_zup[:, 3:]
 
     def reset(self, env_ids: torch.Tensor) -> None:
-        self._prev_vel_ned[env_ids] = 0.0
-        self._prev_acc_ned[env_ids] = 0.0
+        # 가속도 되먹임이 없어져 남길 상태가 없다.
+        return
 
     # ------------------------------------------------------------------
     # Private: Fossen 각 항 계산 (모두 NED body frame, 6-벡터 반환)
@@ -238,15 +283,19 @@ class Hydrodynamics:
         Mav_l = Mav[:, :3]   # A₁₁·v_lin
         Mav_a = Mav[:, 3:]   # A₂₂·v_ang
 
-        f_cor = -torch.cross(v_ang, Mav_l, dim=-1)
+        # 힘 항은 −(A₁₁ν₁) × ν₂ 다. 2026-08-28까지 −(ν₂ × A₁₁ν₁), 즉 **부호가
+        # 반대**였다. 두 가지로 확인했다:
+        #   ① 스큐대칭  ν·(C_A ν) = 0 이어야 하는데 30.07이 나왔다(에너지 생성).
+        #      힘 항만 뒤집으면 1.4e-06으로 떨어진다.
+        #   ② 물리 유도  전진 u·우선회 r 에서 부가질량 운동량 p = A₁₁ν₁ 를 회전
+        #      시키는 힘은 ω × p 이고, 반작용으로 물이 기체를 미는 힘은 −(ω × p)
+        #      즉 **선회 바깥**이다(원심 반작용). 적용값이 −C_A·ν 이므로
+        #      C_A·ν|force = +(ω × p) 여야 한다. 구 구현은 −(ω × p)라 기체를
+        #      선회 **안쪽으로 당겼다**.
+        # 크기는 선회율에 비례한다 — 순항 0.5 m/s에서 sway 예산의 0.4%(0.05 rad/s)
+        # ~30%(4.05 rad/s, trial (a) 실측 최대). 직진에서는 무시할 만하다.
+        f_cor = -torch.cross(Mav_l, v_ang, dim=-1)
         t_cor = -(torch.cross(Mav_l, v_lin, dim=-1) + torch.cross(Mav_a, v_ang, dim=-1))
 
         return torch.cat([f_cor, t_cor], dim=-1)   # (N, 6)
 
-    def _update_acc(self, vel_ned: torch.Tensor) -> torch.Tensor:
-        """저역 필터 기반 NED body frame 가속도 추정."""
-        raw = (vel_ned - self._prev_vel_ned) / self.dt
-        acc = (1. - self._ACC_ALPHA) * self._prev_acc_ned + self._ACC_ALPHA * raw
-        self._prev_vel_ned = vel_ned.detach().clone()
-        self._prev_acc_ned = acc.detach().clone()
-        return acc
