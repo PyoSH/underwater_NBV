@@ -8,7 +8,7 @@ BlueROV2 Heavy(8-thruster)를 IsaacLab으로 시뮬레이션하는 RL 환경. �
 2. **Sim2Swim 재현 단계 (부분 구현, Stage 3 교정 전)** — `BROVVelEnv` + `LOSGuidance`: "Sim2Swim: Zero-Shot Velocity Control for Agile AUV Maneuvering in 3 Minutes"(arXiv:2512.08656, SINTEF Ocean)의 계층형 구조(고전 유도 + RL 저수준 속도 컨트롤러)를 구현했다. 다만 현재 checkpoint는 논문의 Eq. 9를 velocity command로 오독한 MDP에서 학습됐으므로 논문 충실 재현 artifact가 아니다. 상세 감사와 재학습 사양은 `STAGE3_PAPER_IMPLEMENTATION_AUDIT.md`를 따른다.
 
 **향후 계획**:
-- step_1_NBV(수중 인지)과 step_2_BROV(수중 물리)를 통합하는 **step_3** — `LOSGuidance`를 커버리지/NBV 기반 유도 모듈로 교체하고, 학습된 Sim2Swim 저수준 정책은 그대로(frozen) 재사용하는 구조를 염두에 둠. 이 때문에 물리 엔진(Fossen 코어+BROV2 액추에이터)을 `robots/dynamics/`로 승격해 step_2/step_3이 공유하도록 리팩토링하고(2026-07), step_2_BROV 내부도 `envs/`/`guidance/`/`physics_tests/`/`legacy/` 역할별 서브디렉토리로 재배치함(2026-07).
+- step_1_NBV(수중 인지)과 step_2_BROV(수중 물리)를 통합하는 **step_3** — `LOSGuidance`를 커버리지/NBV 기반 유도 모듈로 교체하고, 학습된 Sim2Swim 저수준 정책은 그대로(frozen) 재사용하는 구조를 염두에 둠. 이 때문에 물리 엔진(Fossen 코어+BROV2 액추에이터)을 `robots/dynamics/`로 승격해 step_2/step_3이 공유하도록 리팩토링하고(2026-07), step_2_BROV 내부도 `envs/`/`guidance/`/`physics_tests/` 역할별 서브디렉토리로 재배치함(2026-07). `legacy/` 아카이브는 2026-08-28에 제거함(git 히스토리에 남아 있음).
 - **부족구동(underactuated) 어뢰형 AUV** 지원 — MarineGym의 iAUV(주추진기1+핀4, cruciform rudder) 구현을 참고 아키텍처로 확정. 자세한 로드맵은 메모리 참조.
 
 ---
@@ -27,7 +27,6 @@ step_2_BROV/
 │   └── vel_env_cfg.py, vel_env.py     #   BROVVelEnv  — Sim2Swim 저수준 6DOF 속도/자세 컨트롤러, wrench 6-dim 액션
 ├── guidance/los_guidance.py           # LOSGuidance — 3D LOS 유도(고전 제어). BROVVelEnv.attach_guidance()로 연결
 ├── physics_tests/bottom_up.py         # 물리 검증 테스트 함수 5종 (neutral_buoyancy/straight_line/rotation/six_dof/thruster_model)
-├── legacy/brov_env.py                 # [레거시] MIT CSAIL origin, 실행 불가 — 참조 전용
 ├── agents/rsl_rl_ppo_cfg.py           # BROVVelPPORunnerCfg — RSL-RL PPO 설정(rsl-rl-lib>=5.0.0 신 스키마)
 │
 ├── train.py                # BROVVelEnv RSL-RL 학습 런처
@@ -221,8 +220,7 @@ python validate_physics.py --test thruster_model
 3. **mass 도메인 랜덤화 미구현**: 위 도메인 랜덤화 표 참조.
 4. **Isaac/runtime 계약 불일치**: quaternion hemisphere, integral dt/clamp/reset/stale 규칙과 Z-up/FLU→SNAME/FRD action 변환을 golden test로 통일해야 한다.
 5. **디버그 시각화 코드 중복**: `envs/traj_env.py`/`envs/vel_env.py`에 스러스터 추력 화살표 로직이 각각 구현됨 — 통합 여지.
-6. **`legacy/brov_env.py` 실행 불가**: relative import 파손, 레거시 참조용.
-7. **기존 full checkpoint는 reference가 아님**: `model_299.pt`는 512 env × 300 iteration으로 학습됐지만 위 desired-state 오류를 포함한다. actor tensor가 배포 TorchScript와 동일하다는 사실은 확인했으나 논문 재현 policy로 승인하지 않는다.
+6. **기존 full checkpoint는 reference가 아님**: `model_299.pt`는 512 env × 300 iteration으로 학습됐지만 위 desired-state 오류를 포함한다. actor tensor가 배포 TorchScript와 동일하다는 사실은 확인했으나 논문 재현 policy로 승인하지 않는다.
 
 ---
 
