@@ -48,6 +48,13 @@ parser.add_argument("--num_steps_per_env", type=int, default=None,
 parser.add_argument("--save_interval", type=int, default=None,
                      help="checkpoint 저장 iteration 간격 override")
 parser.add_argument("--seed", type=int, default=42)
+parser.add_argument(
+    "--rew_w_action", type=float, default=None,
+    help="논문 Table 1의 w_a (Eq.8 행동항 가중, 기본 0.3)를 덮어쓴다. "
+         "이 값은 정상상태 추종률을 직접 결정한다 — 행동항은 정상상태에서도 "
+         "비용이 0이 되지 않는 반면 속도항은 오차 0 근방에서 기울기가 0이라, "
+         "둘의 균형점이 정책이 수렴할 속도가 된다. "
+         "manifest에 기록되므로 checkpoint에서 역추적할 수 있다.")
 parser.add_argument("--experiment_name", type=str, default=None)
 parser.add_argument(
     "--profile",
@@ -148,6 +155,7 @@ def _write_manifest(
         "action_contract": env_cfg.action_contract,
         "command_profile": env_cfg.command_profile,
         "reward_profile": env_cfg.reward_profile,
+        "rew_w_action": env_cfg.rew_w_action,
         "policy_dt_s": env_cfg.sim.dt * env_cfg.decimation,
         "episode_length_s": env_cfg.episode_length_s,
         "num_envs": env_cfg.scene.num_envs,
@@ -193,6 +201,7 @@ def _validate_resume_contract(
         "action_contract": env_cfg.action_contract,
         "command_profile": env_cfg.command_profile,
         "reward_profile": env_cfg.reward_profile,
+        "rew_w_action": env_cfg.rew_w_action,
         "policy_dt_s": env_cfg.sim.dt * env_cfg.decimation,
         "seed": agent_cfg.seed,
     }
@@ -212,6 +221,8 @@ def main() -> None:
     # RSL-RL and the Isaac environment must share the effective seed.  Keeping
     # a concrete default also makes the value written to the manifest true.
     env_cfg.seed = args.seed
+    if args.rew_w_action is not None:
+        env_cfg.rew_w_action = args.rew_w_action
 
     agent_cfg = BROVVelPPORunnerCfg()
     if args.max_iterations is not None:
