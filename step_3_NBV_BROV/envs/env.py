@@ -110,6 +110,9 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
             linear_damping=hydro_coef["linear_damping"],
             quadratic_damping=hydro_coef["quadratic_damping"],
         )
+        # `_apply_action()`이 중력 wrench를 만들 때 쓴다 — `Hydrodynamics.compute()`가
+        # ν̇ 를 풀려면 추력과 중력이 모두 필요하다(step_2 `vel_env.py`와 동일 관례).
+        self._rigid_mass = float(yaml_params["expect"]["mass"])
         B = build_allocation_matrix(self._thruster._pos, self._thruster._dir)
         self._B_pinv = torch.linalg.pinv(B.to(self.device))
         self._zup_to_sname_sign = torch.tensor(_ZUP_TO_SNAME_SIGN, device=self.device)
@@ -298,10 +301,26 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         pwm = self._thruster.inverse_thrust(f_limited)
 
         f_thrust, t_thrust = self._thruster.compute(pwm)
+
+        # `Hydrodynamics.compute()`는 ν̇ 를 **풀기** 위해 이 모듈 밖에서 몸체에
+        # 작용하는 전부(추력 + 중력)를 받아야 한다(2026-08-28 fossen.py 개정).
+        # 빠뜨리면 ν̇ 가 틀리고 added mass가 그만큼 어긋난다. 중력은 PhysX가 따로
+        # 적용하므로 여기서는 ν̇ 를 푸는 데만 쓰이고 반환값에는 포함되지 않는다.
+        #
+        # step_2 `vel_env.py`는 공칭 질량 상수를 쓰지만, step_3는 질량 DR이
+        # 있으므로 실제 스케일된 질량을 쓴다(`dr_enable_mass=False`면 scale=1.0).
+        g_world = torch.zeros_like(f_thrust)
+        g_world[:, 2] = -self._rigid_mass * self._mass_scale.squeeze(-1) * 9.81
+        g_body = math_utils.quat_apply(
+            math_utils.quat_conjugate(self._robot.data.root_quat_w), g_world
+        )
+        other_wrench_b = torch.cat((f_thrust + g_body, t_thrust), dim=-1)
+
         f_hydro, t_hydro = self._hydro.compute(
             self._robot.data.root_quat_w,
             self._robot.data.root_lin_vel_b,
             self._robot.data.root_ang_vel_b,
+            other_wrench_b,
         )
 
         total_forces = (f_thrust + f_hydro).unsqueeze(1)
