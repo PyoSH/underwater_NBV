@@ -233,6 +233,9 @@ def main() -> int:
             f"pl={stats['policy_loss']:+.4f} vl={stats['value_loss']:.3f} "
             f"ent={stats['entropy']:+.3f} kl={stats['approx_kl']:.4f} "
             f"ev={ev:+.3f} early_stop={stats['early_stop']} "
+            # n_updates=0이면 그 롤아웃은 갱신 0회로 버려진 것이다. 이게
+            # 안 보여서 2026-08-29 검증에서 롤아웃 4개가 조용히 낭비됐다.
+            f"nupd={stats['n_updates']} "
             f"| success={term_abs['success']/tot*100:.0f}% "
             f"dist={env.last_dist_moved.mean().item():.3f} "
             f"logstd={actor.log_std.mean().item():+.2f} "
@@ -251,6 +254,7 @@ def main() -> int:
                 "train/approx_kl":     stats["approx_kl"],
                 # 매 롤아웃 True면 샘플 재사용이 1에폭뿐이라는 뜻 → target_kl 상향 검토
                 "train/early_stop":    float(stats["early_stop"]),
+                "train/n_updates":     stats["n_updates"],
                 "train/explained_var": ev,
                 "train/log_std":       actor.log_std.mean().item(),
                 "train/lr":            opt_a.param_groups[0]["lr"],

@@ -93,11 +93,19 @@ _MU_MAX = 3.0
 # 학습 초기 큰 갱신에서도 수치가 죽지 않도록 두는 안전장치다.
 _LOG_RATIO_CLAMP = 20.0
 
-# 미니배치 단위 KL 조기종료의 여유 배수. 단일 미니배치(32 샘플) KL은 에포크
-# 평균보다 시끄러우므로 target_kl을 그대로 쓰면 정상 변동에도 매번 걸린다.
-# 3.0이면 target_kl=0.12에서 0.36에 트립 — 발산(관측 1,756 이상)은 즉시 잡고
-# 정상 변동(0.05~0.2)은 통과시킨다.
-_MB_KL_SLACK = 3.0
+# 미니배치 단위 KL 가드의 임계값 = max(target_kl × _MB_KL_SLACK, _MB_KL_FLOOR).
+#
+# 이 가드의 역할은 **발산 감지 하나뿐**이다. 정상적인 trust-region 제한은
+# 에포크 평균 검사(target_kl)가 담당한다. 둘을 혼동해 임계값을 좁게 잡으면
+# 안 된다 — 2026-08-29 검증에서 배수 3.0(트립 0.36)으로 뒀다가, abs() 기반
+# KL이 정상 상태에서도 0.22~0.31에 이르는 탓에 미니배치 단위로는 routinely
+# 초과했고, 첫 미니배치에서 걸린 롤아웃 4개(005/009/010/011)가 갱신 0회로
+# 통째로 버려졌다.
+#
+# 발산은 1,756 이상으로 튀므로 임계값이 1.2든 0.36이든 똑같이 즉시 잡힌다.
+# 넉넉하게 잡을수록 정상 변동을 안 건드리므로 손해가 없다.
+_MB_KL_SLACK = 10.0
+_MB_KL_FLOOR = 1.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -321,8 +329,11 @@ def ppo_update(actor: Actor, critic: Critic,
     adv  = (adv - adv.mean()) / (adv.std() + 1e-8)
 
     TE         = adv.shape[0]
-    acc        = dict(policy_loss=0., value_loss=0., entropy=0., approx_kl=0., n=0)
+    acc        = dict(policy_loss=0., value_loss=0., entropy=0., n=0)
+    kl_sum, kl_n = 0.0, 0      # 측정 — 갱신 여부와 무관하게 누적
+    n_updates  = 0             # 실제로 적용된 gradient step 수
     early_stop = False
+    stop_reason = ""
 
     for _epoch in range(cfg.ppo_epochs):
         perm     = torch.randperm(TE, device=adv.device)
@@ -344,6 +355,13 @@ def ppo_update(actor: Actor, critic: Critic,
             log_ratio = new_logp - data["logprobs"][mb]
             approx_kl_mb = log_ratio.abs().mean().item()
 
+            # KL은 **측정값**이므로 갱신 여부와 무관하게 항상 기록한다.
+            # 갱신 결과 통계(acc)와 함께 묶어두면, 첫 미니배치에서 중단됐을 때
+            # n=0이 되어 보고값이 전부 0.0000으로 나오고 — 실제로 그렇게 됐다 —
+            # 롤아웃이 통째로 버려진 사실이 로그에서 보이지 않는다.
+            kl_sum += approx_kl_mb * mb.numel()
+            kl_n   += mb.numel()
+
             # 미니배치 단위 조기 종료 (2026-08-28 추가).
             #
             # 기존에는 **에포크 끝**에서만 검사했다. 롤아웃 2048 / minibatch 32면
@@ -356,8 +374,9 @@ def ppo_update(actor: Actor, critic: Critic,
             #
             # 여유 배수 `_MB_KL_SLACK`: 단일 미니배치 KL은 에포크 평균보다
             # 자연히 시끄러우므로 target_kl을 그대로 적용하면 정상 변동에도 걸린다.
-            if approx_kl_mb > cfg.target_kl * _MB_KL_SLACK:
+            if approx_kl_mb > max(cfg.target_kl * _MB_KL_SLACK, _MB_KL_FLOOR):
                 early_stop = True
+                stop_reason = f"mb_kl={approx_kl_mb:.3f}@e{_epoch}"
                 break
 
             # exp 전에 클램프 — `_LOG_RATIO_CLAMP` 주석 참조. 클램프가 없으면
@@ -397,8 +416,8 @@ def ppo_update(actor: Actor, critic: Critic,
             acc["policy_loss"] += pg.item()             * B
             acc["value_loss"]  += vl.item()             * B
             acc["entropy"]     += entropy.mean().item() * B
-            acc["approx_kl"]   += approx_kl_mb          * B
             acc["n"]           += B
+            n_updates          += 1
             epoch_kl           += approx_kl_mb          * B
             epoch_n            += B
         if early_stop:
@@ -406,7 +425,14 @@ def ppo_update(actor: Actor, critic: Critic,
 
         if epoch_n > 0 and (epoch_kl / epoch_n) > cfg.target_kl:
             early_stop = True
+            stop_reason = stop_reason or f"epoch_kl={epoch_kl/epoch_n:.3f}@e{_epoch}"
             break
 
     n = max(acc.pop("n"), 1)
-    return {k: v / n for k, v in acc.items()} | {"early_stop": early_stop}
+    return {k: v / n for k, v in acc.items()} | {
+        "approx_kl":  kl_sum / max(kl_n, 1),
+        "early_stop": early_stop,
+        # n_updates=0이면 그 롤아웃은 통째로 버려진 것 — 반드시 보이게 한다
+        "n_updates":  n_updates,
+        "stop_reason": stop_reason,
+    }
