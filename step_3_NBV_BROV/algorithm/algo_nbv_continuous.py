@@ -398,7 +398,19 @@ def ppo_update(actor: Actor, critic: Critic,
 
             v = critic(data["vox"][mb], data["img"][mb],
                        data["obs_scalar_critic"][mb])
-            v_clipped = data["returns"][mb] + (v - data["old_values"][mb]).clamp(
+            # PPO value clipping — 기준점은 `returns`가 아니라 **`old_values`**다.
+            #
+            # step_1 `algo_UW_NBV.py`에서 `returns + clamp(...)`로 이식돼 있었고
+            # step_3도 그대로 물려받았는데, 그러면 두 번째 항이
+            # `mean(clamp(·)²) ≤ clip_eps² = 0.04`로 고정되어 실제 MSE(40~65)가
+            # 항상 max에 선택된다 = **클리핑이 완전히 무력화**된다.
+            #
+            # 2026-08-31 검증에서 이 결함이 드러났다. KL 가드를 완화해 롤아웃당
+            # 갱신이 64→384회로 늘자 critic이 제동 없이 과갱신되어 explained
+            # variance가 +0.46 → **-2.49**로 붕괴했고, advantage가 무의미해져
+            # coverage가 0.44 근처에서 정체했다. 갱신이 적던 이전 런에서는
+            # 같은 결함이 있어도 critic이 크게 움직이지 않아 드러나지 않았다.
+            v_clipped = data["old_values"][mb] + (v - data["old_values"][mb]).clamp(
                 -cfg.clip_eps, cfg.clip_eps
             )
             vl = torch.max(
