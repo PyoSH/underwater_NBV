@@ -232,7 +232,9 @@ def main() -> int:
             f"cov={np.mean(done_covs[-20:]) if done_covs else float('nan'):.3f} "
             f"pl={stats['policy_loss']:+.4f} vl={stats['value_loss']:.3f} "
             f"ent={stats['entropy']:+.3f} kl={stats['approx_kl']:.4f} "
-            f"ev={ev:+.3f} early_stop={stats['early_stop']} "
+            f"ev={ev:+.3f} vclip={stats['value_clip_frac']:.2f} "
+            f"rstd={flat['returns'].std().item():.1f} "
+            f"early_stop={stats['early_stop']} "
             # n_updates=0이면 그 롤아웃은 갱신 0회로 버려진 것이다. 이게
             # 안 보여서 2026-08-29 검증에서 롤아웃 4개가 조용히 낭비됐다.
             f"nupd={stats['n_updates']} "
@@ -256,6 +258,15 @@ def main() -> int:
                 "train/early_stop":    float(stats["early_stop"]),
                 "train/n_updates":     stats["n_updates"],
                 "train/explained_var": ev,
+                # value clipping이 실제로 제동을 거는 비율. 0에 가까우면
+                # 기준점 수정이 무효라는 뜻이다.
+                "train/value_clip_frac": stats["value_clip_frac"],
+                # 리턴 분포 이동 여부 — ev 하락의 대안 가설(적응형 커리큘럼이
+                # 난이도를 올려 리턴 분포가 이동하면 critic이 멀쩡해도 ev가
+                # 떨어진다)을 value clipping 가설과 구분하기 위한 계측.
+                "train/return_mean": flat["returns"].mean().item(),
+                "train/return_std":  flat["returns"].std().item(),
+                "train/value_mean":  flat["old_values"].mean().item(),
                 "train/log_std":       actor.log_std.mean().item(),
                 "train/lr":            opt_a.param_groups[0]["lr"],
                 "diag/dist_moved":     env.last_dist_moved.mean().item(),

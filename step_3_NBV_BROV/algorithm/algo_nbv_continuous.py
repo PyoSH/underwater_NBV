@@ -332,6 +332,9 @@ def ppo_update(actor: Actor, critic: Critic,
     acc        = dict(policy_loss=0., value_loss=0., entropy=0., n=0)
     kl_sum, kl_n = 0.0, 0      # 측정 — 갱신 여부와 무관하게 누적
     n_updates  = 0             # 실제로 적용된 gradient step 수
+    # value clipping이 실제로 제동을 걸었는지 — 기준점 버그를 고친 뒤에도
+    # 정말 작동하는지 **측정**해야 한다. 고쳤으니 되겠지로 넘기지 않는다.
+    n_clip_sel = 0
     early_stop = False
     stop_reason = ""
 
@@ -413,10 +416,11 @@ def ppo_update(actor: Actor, critic: Critic,
             v_clipped = data["old_values"][mb] + (v - data["old_values"][mb]).clamp(
                 -cfg.clip_eps, cfg.clip_eps
             )
-            vl = torch.max(
-                F.mse_loss(v,         data["returns"][mb]),
-                F.mse_loss(v_clipped, data["returns"][mb]),
-            )
+            vl_plain   = F.mse_loss(v,         data["returns"][mb])
+            vl_clipped = F.mse_loss(v_clipped, data["returns"][mb])
+            vl = torch.max(vl_plain, vl_clipped)
+            if vl_clipped.item() > vl_plain.item():
+                n_clip_sel += 1
 
             critic_loss = cfg.vf_coef * vl
             optimizer_critic.zero_grad()
@@ -447,4 +451,6 @@ def ppo_update(actor: Actor, critic: Critic,
         # n_updates=0이면 그 롤아웃은 통째로 버려진 것 — 반드시 보이게 한다
         "n_updates":  n_updates,
         "stop_reason": stop_reason,
+        # 0에 가까우면 클리핑이 여전히 무력하다는 뜻 = 기준점 수정이 무효
+        "value_clip_frac": n_clip_sel / max(n_updates, 1),
     }
