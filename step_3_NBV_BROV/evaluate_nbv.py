@@ -51,6 +51,12 @@ parser.add_argument("--num_episodes", type=int, default=48,
                     help="정책당 평가 에피소드 수")
 parser.add_argument("--seed", type=int, default=1234)
 parser.add_argument("--out_dir", type=str, default="eval_out")
+parser.add_argument("--max_decisions", type=int, default=0,
+                    help="에피소드 최대 결정 수 (0=env_cfg 기본값 10). 상한 측정용")
+parser.add_argument("--ceiling", action="store_true",
+                    help="상한 측정 모드: coverage 종료를 비활성화(임계값 1.1)해서\n"
+                         "에피소드가 끝까지 가도록 하고, 결정별 coverage 포화\n"
+                         "곡선을 얻는다. 학습으로 얻을 여지가 있는지 판단하는 근거")
 parser.add_argument("--stochastic", action="store_true",
                     help="체크포인트 정책을 greedy(tanh(mu)) 대신 샘플링으로 실행")
 AppLauncher.add_app_launcher_args(parser)
@@ -240,6 +246,13 @@ def main() -> int:
     # 평가는 고정 난이도에서 — 커리큘럼이 돌면 정책 간 종료 기준이 달라져
     # 비교 자체가 성립하지 않는다.
     cfg.curriculum_enabled = False
+
+    if args.max_decisions > 0:
+        cfg.episode_length_s = args.max_decisions * (cfg.sim.dt * cfg.decimation)
+    if args.ceiling:
+        # 도달 불가 임계값 — coverage 달성으로 조기 종료되면 포화 곡선이 끊긴다
+        cfg.coverage_terminal = 1.1
+        print("[eval] 상한 측정 모드: coverage 종료 비활성화")
 
     env = NBVBROVEnv(cfg)
     out_dir = Path(args.out_dir)
