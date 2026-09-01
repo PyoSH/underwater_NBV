@@ -77,7 +77,29 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     # 단 주의: 5초 시점에도 자세오차가 완전히 0은 아니므로(Stage 1 실측
     # ~6-10°) "도달"은 근사다 — step_1의 완벽한 순간이동과 달리 실기에
     # 가까운 조건이며, PID 게인을 더 조이면 줄어든다.
-    episode_length_s: float = 50.0
+    # 125.0 = 25결정 (2026-09-01 상한 측정으로 확정, 이전 50.0 = 10결정).
+    #
+    # 10결정은 **과제를 판별 불가능하게 만드는 길이**였다. 40결정 포화 곡선
+    # 실측(eval_out/ceiling)에서 지각 없는 orbit과 완전 무작위 random이
+    # 결정 9까지 구분되지 않는다:
+    #
+    #   결정      1      5      9     13     17     21     25     29     37
+    #   orbit  0.206  0.366  0.455  0.485  0.491  0.495  0.497  0.498  0.498
+    #   random 0.205  0.357  0.461  0.520  0.582  0.631  0.661  0.685  0.737
+    #
+    # 분리는 결정 13부터 시작된다. 10결정 학습에서 모든 정책이 0.50~0.57에
+    # 몰리고 아무것도 아무것도 이기지 못한 것, coverage_terminal=0.65가 도달
+    # 불가였던 것, 적응형 커리큘럼이 0.511에서 멈춘 것이 전부 이것 때문이다.
+    #
+    # 25결정을 고른 이유: orbit 0.497 vs random 0.661로 격차가 0.164까지 벌어져
+    # 판별력이 충분하고, 150K env-step 기준 에피소드 수가 6,000으로 여전히
+    # 넉넉하다(10결정일 때 15,000). 더 길수록 격차는 커지지만 에피소드 수가
+    # 반비례로 줄어든다.
+    #
+    # quality가 max 누적이라 각 voxel은 **한 번만** 가까이서 보면 값이 남는다 —
+    # 결정 수가 늘수록 접근 기회가 늘어 gt_full이 크게 오르는 구조다
+    # (40결정 random에서 gt_full 0.422 vs orbit 0.024).
+    episode_length_s: float = 125.0
 
     # ── RL 공간 ──
     visual: VisualConfig = VisualConfig()
@@ -167,8 +189,14 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     # (step_1이 "wandb 분포에서 max window mean ≈ 0.507 → 0.52"처럼 데이터로
     #  임계값을 정했던 방식을 따른 것.)
     curriculum_enabled: bool = True
-    curriculum_coverage_terminal_start: float = 0.45
-    curriculum_coverage_terminal_end: float = 0.65
+    # 2026-09-01 재조정 — 25결정 지평의 실측 베이스라인에 맞춤.
+    # start 0.55: 결정 13 근처에서 어떤 정책이든 도달하는 수준(0.49~0.52)
+    #   바로 위라, 초반에 성공 보상을 받아보면서도 공짜는 아니다.
+    # end 0.80: 결정 25에서 random이 0.661이므로 상한이 그보다 충분히 위에
+    #   있어야 "random을 넘어라"는 압박이 걸린다. 이전 0.65는 random에도
+    #   못 미쳐 커리큘럼이 정책을 압박할 수 없었다.
+    curriculum_coverage_terminal_start: float = 0.55
+    curriculum_coverage_terminal_end: float = 0.80
     curriculum_total_steps: int = 0
 
     # ── 적응형 커리큘럼 (2026-08-27) ────────────────────────────────────────
@@ -188,7 +216,12 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     # False면 기존 스텝 기반 선형 상향(A/B 비교용).
     curriculum_adaptive: bool = True
     curriculum_success_gate: float = 0.7
-    curriculum_rate: float = 0.002
+    # 0.005 — 에피소드가 25결정으로 길어지면서 총 에피소드가 15,000 → 6,000,
+    # num_envs 배치가 234 → 94로 줄었다. 기존 0.002면 최대 상승이 0.188뿐이라
+    # start 0.45에서 0.637까지밖에 못 올라가 **random의 0.661에도 못 미친다**.
+    # 0.005면 0.469까지 오를 수 있어 상한 0.80에 도달 가능하다. 성공률
+    # 게이트가 걸려 있으므로 빠른 상승률 자체는 위험하지 않다(자기 제한).
+    curriculum_rate: float = 0.005
     curriculum_success_ema_alpha: float = 0.05
 
     # ── Quality-weighted coverage (2026-08-27 이식) ──────────────────────────
