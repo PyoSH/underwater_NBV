@@ -329,6 +329,20 @@ def ppo_update(actor: Actor, critic: Critic,
     adv  = (adv - adv.mean()) / (adv.std() + 1e-8)
 
     TE         = adv.shape[0]
+
+    # value clipping 폭을 **리턴 스케일에 맞춘다** (2026-09-01).
+    #
+    # 정책 clip_eps(0.2)는 ratio 단위라 무차원이지만, value clip은 **리턴
+    # 단위**다. 같은 상수를 쓰는 것은 단위 불일치였다 — 리턴 표준편차가 8.4인데
+    # 0.2로 묶으면 롤아웃 하나에서 오차의 2.4%(에포크 1회 기준)밖에 못 좁힌다.
+    # 실측: 기준점 버그를 고친 직후 vclip이 0.83~0.99(=대부분의 갱신이 차단)
+    # 였고 value loss 평균이 49.8 → 76.9로 악화됐다.
+    #
+    # 배치의 리턴 표준편차에 비례시키면 자기 조정되므로 별도 튜닝이 필요 없다.
+    # 하한은 리턴이 거의 상수인 퇴화 상황에서 clip이 0이 되어 모든 갱신이
+    # 막히는 것을 방지한다.
+    ret_std    = data["returns"].std().item()
+    value_clip = cfg.clip_eps * max(ret_std, 1e-3)
     acc        = dict(policy_loss=0., value_loss=0., entropy=0., n=0)
     kl_sum, kl_n = 0.0, 0      # 측정 — 갱신 여부와 무관하게 누적
     n_updates  = 0             # 실제로 적용된 gradient step 수
@@ -414,7 +428,7 @@ def ppo_update(actor: Actor, critic: Critic,
             # coverage가 0.44 근처에서 정체했다. 갱신이 적던 이전 런에서는
             # 같은 결함이 있어도 critic이 크게 움직이지 않아 드러나지 않았다.
             v_clipped = data["old_values"][mb] + (v - data["old_values"][mb]).clamp(
-                -cfg.clip_eps, cfg.clip_eps
+                -value_clip, value_clip
             )
             vl_plain   = F.mse_loss(v,         data["returns"][mb])
             vl_clipped = F.mse_loss(v_clipped, data["returns"][mb])
@@ -453,4 +467,5 @@ def ppo_update(actor: Actor, critic: Critic,
         "stop_reason": stop_reason,
         # 0에 가까우면 클리핑이 여전히 무력하다는 뜻 = 기준점 수정이 무효
         "value_clip_frac": n_clip_sel / max(n_updates, 1),
+        "value_clip":      value_clip,
     }

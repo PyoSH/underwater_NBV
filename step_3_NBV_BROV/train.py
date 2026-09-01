@@ -261,6 +261,7 @@ def main() -> int:
                 # value clipping이 실제로 제동을 거는 비율. 0에 가까우면
                 # 기준점 수정이 무효라는 뜻이다.
                 "train/value_clip_frac": stats["value_clip_frac"],
+                "train/value_clip":      stats["value_clip"],
                 # 리턴 분포 이동 여부 — ev 하락의 대안 가설(적응형 커리큘럼이
                 # 난이도를 올려 리턴 분포가 이동하면 critic이 멀쩡해도 ev가
                 # 떨어진다)을 value clipping 가설과 구분하기 위한 계측.
