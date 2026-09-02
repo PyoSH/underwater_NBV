@@ -93,7 +93,10 @@ def main() -> int:
         ext = ext * conv
         worst = ext * args.scale_max * math.sqrt(3)
         over = worst > vol_m
-        n_bad_traverse += (len(plain) == 0)
+        # `_load_mesh()`는 2026-09-02부터 TraverseInstanceProxies를 쓴다.
+        # 따라서 결함 판정 기준은 "기본 순회로 못 찾음"이 아니라
+        # **"프록시 순회로도 못 찾음"**이다.
+        n_bad_traverse += (len(proxy) == 0)
         n_oversize += over
         name = os.path.basename(usd_path)[:38]
         print(f"{name:<40}{len(plain):>9}{len(proxy):>8}{n_tri:>11,}"
@@ -102,11 +105,11 @@ def main() -> int:
     print("-" * 86)
     print(f"\n[판정]")
     if n_bad_traverse:
-        print(f"  ✗ 기본 `Usd.PrimRange`로 Mesh를 못 찾는 자산 {n_bad_traverse}개.")
-        print(f"     `env_utils.py::_load_mesh()`가 이 방식이라 GT 복셀화가 실패한다.")
-        print(f"     → `Usd.PrimRange(root, Usd.TraverseInstanceProxies())`로 고쳐야 한다.")
+        print(f"  ✗ 프록시 순회로도 Mesh를 못 찾는 자산 {n_bad_traverse}개 — GT 복셀화 실패.")
     else:
-        print(f"  ✓ 모든 자산에서 기본 순회로 Mesh를 찾는다 — `_load_mesh()` 수정 불필요.")
+        print(f"  ✓ 모든 자산에서 Mesh를 찾는다 (`_load_mesh()`의 프록시 순회 기준).")
+        print(f"     참고: 기본 `Usd.PrimRange`만으로는 여전히 못 찾는다 — 변환기가")
+        print(f"     메쉬를 instanceable로 분리하기 때문이며, 그래서 프록시 순회가 필수다.")
     if n_oversize:
         print(f"  ✗ 최대 스케일+회전 시 볼륨({vol_m:.1f} m)을 넘는 자산 {n_oversize}개.")
         print(f"     → 변환 시 `--target_size`를 낮추거나 `_randomize_rock_pose()`의")

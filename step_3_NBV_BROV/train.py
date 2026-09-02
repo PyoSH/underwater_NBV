@@ -70,6 +70,11 @@ parser.add_argument("--wandb_entity",  type=str, default=os.environ.get("WANDB_E
                     help="wandb entity. 미지정 시 로그인 계정 기본값을 쓴다 "
                          "(계정명에 대시가 붙는 경우가 있으니 주의)")
 parser.add_argument("--no_wandb", action="store_true", help="wandb 로깅 비활성화")
+parser.add_argument("--mesh_pool", type=str, default=None,
+                    help="메쉬 풀 manifest 경로(Stage 4). 주면 env마다 다른 대상 "
+                         "물체를 스폰한다. 미지정 시 env_cfg 기본값(단일 rock)")
+parser.add_argument("--mesh_pool_limit", type=int, default=0,
+                    help="메쉬 풀에서 앞 N개만 사용 (0=전부). 소규모 시험용")
 
 AppLauncher.add_app_launcher_args(parser)
 if "--enable_cameras" not in sys.argv:
@@ -105,6 +110,9 @@ def main() -> int:
     # env_cfg는 envs/env_cfg.py가 정본 — 여기서 보상/물리 가중치를 덮어쓰지 않는다.
     env_cfg = NBVBROVEnvCfg()
     env_cfg.scene.num_envs = args.num_envs
+    if args.mesh_pool:
+        env_cfg.mesh_pool_manifest = args.mesh_pool
+        env_cfg.mesh_pool_limit = args.mesh_pool_limit
 
     env = NBVBROVEnv(cfg=env_cfg)
     device = env.device

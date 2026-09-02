@@ -80,8 +80,14 @@ def load_mesh_pool(
 
     print(f"[mesh_pool] {len(entries)}개 중 {len(kept)}개 사용"
           f"{' (납작 필터 on)' if filter_flat else ' (납작 필터 off)'}")
-    for name, why in dropped:
+    # 제외 목록은 앞 5개만. 1,030개 풀에서는 239개가 걸려 로그를 뒤덮는다.
+    for name, why in dropped[:5]:
         print(f"[mesh_pool]   제외: {name[:46]:<46} {why}")
+    if len(dropped) > 5:
+        from collections import Counter
+        reasons = Counter(w.split()[0] for _, w in dropped)
+        summary = ", ".join(f"{k} {v}개" for k, v in reasons.items())
+        print(f"[mesh_pool]   ... 외 {len(dropped)-5}개 제외 ({summary})")
     if not kept:
         raise RuntimeError("조건을 만족하는 메쉬가 없다 — 필터를 완화하거나 "
                            "변환을 다시 확인할 것")
