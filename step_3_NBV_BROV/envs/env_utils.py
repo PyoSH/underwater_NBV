@@ -307,9 +307,49 @@ class EnvUtilsMixin:
         return tris
 
     def _randomize_rock_pose(self, env_ids: Sequence[int]) -> None:
+        """대상 물체의 자세(회전)와 크기를 리셋마다 랜덤화한다.
+
+        `Add*Op()`을 쓰지 않고 **기존 op을 찾아 재사용**한다 (2026-09-02 수정).
+        이유가 두 가지다.
+
+        1. **정밀도 충돌** — USD 참조로 스폰된 `Object` 프림은 자산 루트
+           (`/model`)의 `xformOp:scale`을 물려받는데 그 타입이 `double3`다.
+           `ClearXformOpOrder()`는 op **순서**만 지우고 속성 자체는 남기므로,
+           기본 정밀도가 Float인 `AddScaleOp()`은 같은 이름의 `float3` 속성을
+           만들려다 충돌해 예외를 던진다 (다중 메쉬 스모크가 여기서 죽었다).
+           단일 rock 자산에서는 스케일 op이 없어 우연히 통과했을 뿐이다.
+
+        2. **기준 스케일 보존** — 스케일을 매번 곱하면 리셋마다 누적되므로,
+           프림이 원래 갖고 있던 값을 env별로 한 번만 캐싱해 기준으로 삼는다.
+           GSO 자산은 정규화 배율이 자식 프림(`/model/geometry`)에 붙어 있어
+           여기서 덮어써도 파괴되지 않지만, 루트에 붙는 자산이 섞여도 안전하도록
+           곱셈으로 처리한다.
+        """
         from pxr import UsdGeom, Gf
 
         stage = omni.usd.get_context().get_stage()
+        if not hasattr(self, "_object_base_scale"):
+            self._object_base_scale: dict[int, tuple[float, float, float]] = {}
+
+        def resolve_op(xformable, attr_name, op_type, default_precision):
+            """같은 이름의 속성이 이미 있으면 그 정밀도로 재사용, 없으면 생성.
+
+            (`UsdGeom.XformOp.GetOpName`의 정적 오버로드는 Python에 노출돼
+            있지 않아 속성 이름을 직접 넘긴다.)
+            """
+            attr = xformable.GetPrim().GetAttribute(attr_name)
+            if attr:
+                return UsdGeom.XformOp(attr)
+            return xformable.AddXformOp(op_type, default_precision)
+
+        def set_vec3(op, x, y, z):
+            prec = op.GetPrecision()
+            if prec == UsdGeom.XformOp.PrecisionDouble:
+                op.Set(Gf.Vec3d(x, y, z))
+            elif prec == UsdGeom.XformOp.PrecisionHalf:
+                op.Set(Gf.Vec3h(x, y, z))
+            else:
+                op.Set(Gf.Vec3f(x, y, z))
 
         for env_id in env_ids:
             prim = stage.GetPrimAtPath(f"/World/envs/env_{env_id}/Object")
@@ -317,14 +357,33 @@ class EnvUtilsMixin:
                 continue
 
             xformable = UsdGeom.Xformable(prim)
-            xformable.ClearXformOpOrder()
+            t_op = resolve_op(xformable, "xformOp:translate",
+                              UsdGeom.XformOp.TypeTranslate,
+                              UsdGeom.XformOp.PrecisionDouble)
+            r_op = resolve_op(xformable, "xformOp:rotateXYZ",
+                              UsdGeom.XformOp.TypeRotateXYZ,
+                              UsdGeom.XformOp.PrecisionDouble)
+            s_op = resolve_op(xformable, "xformOp:scale",
+                              UsdGeom.XformOp.TypeScale,
+                              UsdGeom.XformOp.PrecisionDouble)
 
-            xformable.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, -3.0))
+            base = self._object_base_scale.get(int(env_id))
+            if base is None:
+                v = s_op.Get()
+                base = (1.0, 1.0, 1.0) if v is None else (float(v[0]), float(v[1]), float(v[2]))
+                self._object_base_scale[int(env_id)] = base
+
+            set_vec3(t_op, 0.0, 0.0, -3.0)
 
             yaw = float(np.random.uniform(0.0, 360.0))
             pitch = float(np.random.uniform(-30.0, 30.0))
             roll = float(np.random.uniform(-30.0, 30.0))
-            xformable.AddRotateXYZOp().Set(Gf.Vec3f(roll, pitch, yaw))
+            set_vec3(r_op, roll, pitch, yaw)
 
-            scale = float(np.random.uniform(0.8, 1.5))
-            xformable.AddScaleOp().Set(Gf.Vec3f(scale, scale, scale))
+            s = float(np.random.uniform(0.8, 1.5))
+            set_vec3(s_op, base[0] * s, base[1] * s, base[2] * s)
+
+            # 참조에서 딸려온 `xformOp:orient`(초기 45° z-회전)를 순서에서 빼
+            # 회전을 rotateXYZ 하나로만 정의한다 — 원래 의도와 동일하되,
+            # op 순서를 매 리셋 명시적으로 고정해 자산별 편차를 없앤다.
+            xformable.SetXformOpOrder([t_op, r_op, s_op])

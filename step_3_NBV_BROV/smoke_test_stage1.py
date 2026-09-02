@@ -16,6 +16,12 @@ parser.add_argument(
          "hold/observe), unlike a sustained non-stop target rotation",
 )
 parser.add_argument("--nudge_steps", type=int, default=1)
+parser.add_argument("--mesh_pool", type=str, default=None,
+                    help="GSO manifest.json 경로 — 주면 env마다 다른 대상 물체 "
+                         "(Stage 4 다중 메쉬 경로 검증)")
+parser.add_argument("--mesh_pool_limit", type=int, default=0)
+parser.add_argument("--n_resets", type=int, default=2,
+                    help="리셋을 반복해 스케일 랜덤화가 누적되지 않는지 확인")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 # step_1_NBV/train/train_GenNBV_quality.py와 동일 관례: 진짜 headless kit은
@@ -32,6 +38,43 @@ from envs.env import NBVBROVEnv
 cfg = NBVBROVEnvCfg()
 cfg.scene.num_envs = args.num_envs
 cfg.debug_vis = False
+if args.mesh_pool:
+    cfg.mesh_pool_manifest = args.mesh_pool
+    cfg.mesh_pool_limit = args.mesh_pool_limit
+
+
+def report_objects(env, tag: str) -> None:
+    """env마다 어떤 물체가, 어떤 크기로 서 있는지 보고한다.
+
+    다중 메쉬 경로에서 조용히 실패할 수 있는 세 가지를 한 번에 잡는다:
+    (a) env끼리 같은 자산이 스폰됨, (b) instance proxy를 못 뚫어 GT 복셀이 0,
+    (c) 스케일 랜덤화가 리셋마다 누적돼 물체가 TSDF 볼륨을 넘침.
+    """
+    from pxr import Usd, UsdGeom
+    import omni.usd
+    import numpy as np
+
+    stage = omni.usd.get_context().get_stage()
+    vol_m = min(env.cfg.tsdf.vol_dim) * env.cfg.tsdf.voxel_size
+    print(f"[smoke] --- {tag} (TSDF 볼륨 {vol_m:.2f} m) ---")
+    for i in range(env.num_envs):
+        prim = stage.GetPrimAtPath(f"/World/envs/env_{i}/Object")
+        s_op = prim.GetAttribute("xformOp:scale").Get()
+        mesh = next((p for p in Usd.PrimRange(prim, Usd.TraverseInstanceProxies())
+                     if p.IsA(UsdGeom.Mesh)), None)
+        asset = "?"
+        for ref in prim.GetMetadata("references").prependedItems if prim.GetMetadata("references") else []:
+            asset = ref.assetPath.split("/")[-1]
+        ext = None
+        if mesh is not None:
+            pts = np.array(UsdGeom.Mesh(mesh).GetPointsAttr().Get(), dtype=np.float32)
+            m = np.array(UsdGeom.XformCache().GetLocalToWorldTransform(mesh)).reshape(4, 4).T
+            w = (np.hstack([pts, np.ones((len(pts), 1), np.float32)]) @ m.T)[:, :3]
+            ext = (w.max(0) - w.min(0))
+        over = " OVER!" if ext is not None and ext.max() > vol_m else ""
+        print(f"[smoke]  env{i}: {asset[:34]:<34} scale={tuple(round(float(c),3) for c in s_op)} "
+              f"extent={np.round(ext,3) if ext is not None else None} "
+              f"GT_surf_voxels={int(env._total_surf_voxels[i])}{over}")
 
 # 예외 발생 시에도 반드시 env.close()가 실행되도록 try/finally로 감싼다 —
 # 감싸지 않으면 uncaught exception 이후 SimulationApp 정리가 안 돼 프로세스가
@@ -46,6 +89,10 @@ try:
     obs, _ = env.reset()
     print(f"[smoke] reset OK — policy obs shape={obs['policy'].shape}, extra_info shape={obs['extra_info'].shape}")
     print(f"[smoke] curr_coverage after reset: {env.curr_coverage.tolist()}")
+    report_objects(env, "reset 1")
+    for k in range(1, args.n_resets):
+        env.reset()
+        report_objects(env, f"reset {k+1}")
 
     action_row = torch.tensor(args.action, device=env.device)
     zero_row = torch.zeros_like(action_row)
