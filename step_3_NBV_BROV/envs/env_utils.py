@@ -225,8 +225,18 @@ class EnvUtilsMixin:
         prim_path = f"/World/envs/env_{env_id}/Object"
         root_prim = stage.GetPrimAtPath(prim_path)
 
+        # **instance proxy까지 순회해야 한다** (2026-09-02 수정).
+        #
+        # Isaac 메쉬 변환기는 지오메트리를 `Props/instanceable_meshes.usd`로
+        # 분리하고 원본 프림을 instanceable로 표시하는데, 기본 `Usd.PrimRange`는
+        # instance proxy 안으로 들어가지 않는다. GSO 자산 14개를 검사하니
+        # **전부 기본 순회로 Mesh를 0개** 찾았다(tools/check_mesh_pool_compat.py).
+        # 그대로 두면 Stage 4에서 GT 복셀화가 통째로 실패한다.
+        #
+        # instanceable이 아닌 자산(기존 rock.usd)에는 영향이 없다 — 이 술어는
+        # 일반 프림 순회에 instance proxy를 **추가로** 포함시킬 뿐이다.
         mesh_prim = None
-        for prim in Usd.PrimRange(root_prim):
+        for prim in Usd.PrimRange(root_prim, Usd.TraverseInstanceProxies()):
             if prim.IsA(UsdGeom.Mesh):
                 mesh_prim = UsdGeom.Mesh(prim)
                 break
