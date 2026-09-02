@@ -125,6 +125,20 @@ class OceanSceneCfg(InteractiveSceneCfg):
             rot=(1.0, 0.0, 0.0, 0.0),   # [w, x, y, z]
             convention="world",
         ),
+        # ⚠ 알려진 결함 (2026-09-02 발견, **값은 의도적으로 유지**)
+        # atten_coeff와 backscatter_coeff가 서로 **전치**돼 있다. OceanSim은
+        # UW_param을 [value(0:3), back_coeff(3:6), atten_coeff(6:9)] 순으로
+        # 넘기므로(UW_Camera.py:101-103, colorpicker ui_builder.py의 슬라이더
+        # 라벨/YAML 저장부 모두 일치) 아래는 두 값이 뒤바뀐 상태다:
+        #   OceanSim 의도: atten=(0.05,0.05,0.05), back_coeff=(0.05,0.05,0.20)
+        # 그 결과 **청색이 가장 강하게 감쇠**되어 거리가 멀수록 이미지가
+        # 적황색으로 변한다 — 실제 수중(적색이 먼저 흡수, 청색이 가장 멀리)과
+        # 정반대다.
+        #
+        # 고치지 않는 이유: step_1의 학습·평가가 전부 이 조건에서 이뤄졌고,
+        # 값을 바꾸면 기존 체크포인트·결과와 비교가 불가능해진다. 재학습할
+        # 때 step_3처럼 Jerlov 프리셋 세 값을 한 세트로 쓸 것
+        # (step_3_NBV_BROV/envs/scene_cfg.py의 _WATER 참조).
         backscatter_value  =(0.05, 0.31, 0.24),
         atten_coeff        =(0.05, 0.05, 0.20),
         backscatter_coeff  =(0.05, 0.05, 0.05),

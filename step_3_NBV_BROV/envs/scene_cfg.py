@@ -32,6 +32,10 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+# Jerlov 수질 프리셋은 step_1의 표를 정본으로 쓴다 — 값을 복사해 오면 세
+# 파라미터가 따로 놀 수 있고, 실제로 그렇게 두 번 틀렸다(아래 WATER 주석).
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "step_1_NBV"))
+from utils_NBV.jerlov_presets import JERLOV_PRESETS
 from robots.assets.brov_rigid import BROV_RIGID_CFG
 from sensors.UWCamera.UW_Camera_cfg import UWCameraCfg
 from sensors.ImagingSonar.ImagingSonarCfg import ImagingSonarCfg
@@ -39,6 +43,32 @@ from sensors.ImagingSonar.ImagingSonarCfg import ImagingSonarCfg
 OCEANSIM_DIR = "/isaac-sim/extsUser/OceanSim"
 ASSET_DIR = os.path.join(OCEANSIM_DIR, "oceansim_asset")
 ROCK_USD = os.path.join(ASSET_DIR, "collected_rock/rock.usd")
+
+# ── 수질 (2026-09-02 정정) ────────────────────────────────────────────────────
+# **세 파라미터를 반드시 한 세트로** 쓴다. 여기서 두 번 틀렸다:
+#
+# 1) step_1 이식 시 `atten_coeff`와 `backscatter_coeff`가 **전치**됐다.
+#    OceanSim은 UW_param 배열을 [value(0:3), back_coeff(3:6), atten_coeff(6:9)]
+#    순으로 넘기는데(UW_Camera.py:101-103, colorpicker ui_builder.py의 슬라이더
+#    라벨과 YAML 저장부가 모두 일치), 이름 필드로 풀면서 순서를 뒤집어
+#    atten=(0.05,0.05,0.20) / back=(0.05,0.05,0.05)이 됐다. OceanSim 의도는
+#    그 반대다. 그 결과 **청색이 가장 강하게 감쇠**되어 거리가 멀수록 이미지가
+#    적황색으로 변했다 — 실제 수중(적색이 먼저 흡수, 청색이 가장 멀리)과
+#    정반대다. step_1의 모든 학습·평가가 이 조건이었다.
+#
+# 2) 2026-08-28에 `atten_coeff`만 Jerlov IB로 바꾸고 나머지 둘을 그대로 뒀다.
+#    감쇠 방향은 우연히 바로잡혔지만 후방산란이 정본 대비 3~4배 약해져
+#    "IB만큼 감쇠하는데 거의 맑은 물처럼 흐림이 없는" 비물리적 조합이 됐다.
+#
+# 그래서 개별 값을 쓰지 않고 프리셋 dict를 통째로 펼친다. 한쪽만 고치는 실수를
+# 구조적으로 막는다.
+#
+# 주의: `atten_coeff`는 렌더링과 quality 모델이 **함께** 참조한다
+# (`env.py::_sync_quality_water()`가 여기서 μ를 유도). 반면 backscatter는
+# 렌더 이미지에만 영향을 주고 coverage/TSDF 계산에는 관여하지 않는다
+# (TSDF는 GT depth를 쓰므로) — 즉 이번 정정은 **actor의 시각 입력 분포**를
+# 바꾸지 신뢰 지표를 바꾸지 않는다.
+_WATER = JERLOV_PRESETS["IB"]   # 외해 최청정. μ=0.233 (채널평균)
 
 # rock 45° Z 회전 쿼터니언 [w, x, y, z] (step_1_NBV/env/sceneCfg.py와 동일)
 _ROT_45Z = (math.cos(math.radians(22.5)), 0.0, 0.0, math.sin(math.radians(22.5)))
@@ -137,23 +167,10 @@ class NBVBROVSceneCfg(InteractiveSceneCfg):
             rot=(1.0, 0.0, 0.0, 0.0),
             convention="world",
         ),
-        backscatter_value=(0.05, 0.31, 0.24),
-        # Jerlov IB (외해 최청정) — `utils_NBV/jerlov_presets.py`의 표준값.
-        #
-        # 2026-08-28 변경. 이전 값 (0.05,0.05,0.20)은 채널평균 μ=0.100으로
-        # **자연 해수 중 가장 맑은 IB보다도 2.3배 맑아** 물리적으로 비현실적이었고,
-        # 그보다 심각하게는 quality coverage가 제 역할을 못 하게 만들었다:
-        # 평가 실측(eval_out/run01)에서 2.88 m → 1.92 m 접근 시 voxel당 품질
-        # 이득은 +10%인데 멀리서 얻는 관측 범위 이득이 +20%라, **후퇴가 순이득**
-        # 이었다. 깨끗한 정책끼리 비교해도 같다 — orbit(2.22 m)이 random(1.92 m)
-        # 보다 멀리 있으면서 cov_q가 더 높았다(0.568 vs 0.518).
-        # 품질이 범위를 이기려면 μ > 0.190이 필요하고, IB의 μ=0.233이 이를 넘는다.
-        #
-        # 주의: 이 값은 렌더링 감쇠와 quality 모델이 **함께** 참조한다
-        # (`env.py::_sync_quality_water()`가 여기서 μ를 유도). 한쪽만 바꾸면
-        # coverage_q가 이미지에 없는 것을 재게 되므로 반드시 여기만 수정할 것.
-        atten_coeff=(0.325835, 0.196346, 0.177762),
-        backscatter_coeff=(0.05, 0.05, 0.05),
+        # 세 값 모두 동일 프리셋에서 — 개별 수정 금지(위 _WATER 주석 참조)
+        backscatter_value=_WATER["backscatter_value"],
+        atten_coeff=_WATER["atten_coeff"],
+        backscatter_coeff=_WATER["backscatter_coeff"],
     )
 
     # 이미징 소나 (step_1_NBV/env/sceneCfg.py의 Oculus M750d 설정 그대로 재사용,

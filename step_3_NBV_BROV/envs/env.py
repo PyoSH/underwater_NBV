@@ -736,7 +736,12 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
 
     def _randomize_water_params(self, env_ids) -> None:
         import numpy as np
-        from utils_NBV.jerlov_presets import JERLOV_PRESETS
+
+        # `scene_cfg.py`가 같은 표를 import하며 경로를 이미 넣지만, 이 함수만
+        # 따로 호출되는 경우(진단 스크립트 등)에도 동작하도록 여기서도 보장한다.
+        # 이전에는 경로 없이 import해서, `jerlov_dr_enabled=True`로 켜는 순간
+        # ImportError로 죽는 잠복 결함이었다(기본값이 False라 드러나지 않았다).
+        from envs.scene_cfg import JERLOV_PRESETS
 
         for eid in env_ids:
             eid_int = int(eid)
