@@ -51,9 +51,14 @@ parser.add_argument("--out", type=str, required=True, help="USD 출력 디렉토
 parser.add_argument("--count", type=int, default=20, help="이름 정렬 기준 앞에서 N개")
 parser.add_argument("--names", type=str, default=None,
                     help="쉼표 구분 zip 이름(확장자 제외). 주면 --count 무시")
-parser.add_argument("--target_size", type=float, default=1.2,
-                    help="정규화 후 최대 변 길이 [m]. TSDF 볼륨 2 m 큐브 안에 "
-                         "회전해도 들어가야 하므로 여유를 둔다")
+parser.add_argument("--target_size", type=float, default=0.75,
+                    help="정규화 후 최대 변 길이 [m].\n"
+                         "0.75 근거: TSDF 볼륨이 2.0 m 큐브인데 리셋마다 "
+                         "`_randomize_rock_pose()`가 0.8~1.5배 스케일과 임의 회전을 "
+                         "얹는다. 최악(최대 스케일 + 대각선 회전)에서 "
+                         "target x 1.5 x sqrt(3) <= 2.0 이려면 target <= 0.77 이다. "
+                         "이전 기본값 1.2는 최악 3.12 m로 볼륨을 넘겨, 넘친 GT 표면이 "
+                         "in_bounds 필터에 조용히 걸려 coverage 분모가 틀어졌다.")
 parser.add_argument("--stage_dir", type=str, default="/tmp/gso_stage")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
@@ -172,9 +177,14 @@ def main() -> int:
         ok, n_tex = verify_usd_texture(usd_path)
         # 정규화 결과 검산: 스케일 적용 후 실제 크기
         norm_ext = ext * s
-        print(f"[gso] {i+1:>2}/{len(zips)} {name[:38]:<38} "
-              f"원본 {max_ext:.3f}m → ×{s:.2f} → {norm_ext.max():.2f}m  "
-              f"텍스처 {'OK' if ok else '없음!'}({n_tex})")
+        if not ok or (i % 50 == 0) or len(zips) <= 25:
+            print(f"[gso] {i+1:>4}/{len(zips)} {name[:38]:<38} "
+                  f"원본 {max_ext:.3f}m → ×{s:.2f} → {norm_ext.max():.2f}m  "
+                  f"텍스처 {'OK' if ok else '없음!'}({n_tex})", flush=True)
+        # 변환이 끝나면 스테이징을 지운다. 1,046개를 돌리면 누적 압축해제분이
+        # 10 GB를 넘어 컨테이너 /tmp를 채운다.
+        shutil.rmtree(work, ignore_errors=True)
+
         manifest.append(dict(
             name=name, usd=str(usd_path), scale=s,
             orig_extent=[float(v) for v in ext],
