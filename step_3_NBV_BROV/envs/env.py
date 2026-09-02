@@ -81,6 +81,17 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
             cfg.scene.camera.enable_viewport = True
             cfg.scene.camera.viewport_env_id = cfg.camera_viewport_env_id
 
+        # Stage 4 다중 대상 물체 — 씬 생성 **이전**에 스포너를 교체해야 한다.
+        # `use_mesh_pool()`이 replicate_physics=False도 함께 설정한다.
+        if cfg.mesh_pool_manifest:
+            from envs.mesh_pool import load_mesh_pool
+            cfg.scene.use_mesh_pool(load_mesh_pool(
+                cfg.mesh_pool_manifest,
+                filter_flat=cfg.mesh_pool_filter_flat,
+                min_aspect=cfg.mesh_pool_min_aspect,
+                limit=cfg.mesh_pool_limit,
+            ))
+
         # 소나 비활성화도 씬 생성 전에 결정해야 한다(센서가 여기서 스폰됨).
         # 관측에 안 쓰이면서 카메라의 32배 픽셀을 렌더링하므로 기본 off —
         # `env_cfg.enable_sonar` 주석 참조.

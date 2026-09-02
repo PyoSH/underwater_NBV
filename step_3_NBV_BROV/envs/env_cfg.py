@@ -125,6 +125,20 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     tsdf: TSDFCfg = TSDFCfg()
     mesh_root: str = join("isaac-sim", "extsUser", "OceanSim", "oceansim_asset", "collected_rock")
 
+    # ── Stage 4: 다중 대상 물체 ─────────────────────────────────────────────
+    # 빈 문자열이면 기존 단일 rock.usd. 경로를 주면 그 manifest에서 조건을
+    # 만족하는 USD들을 골라 env마다 다른 물체를 스폰한다.
+    # 수중 분야에 물체 형상 데이터셋이 없어(장면 단위/소나 점군/2D) 지상
+    # 데이터셋(GSO)을 쓴다 — step_1의 원형 GenNBV가 Houses3K 학습 →
+    # OmniObject3D/Objaverse 교차평가로 확립한 프로토콜과 같은 구성이다.
+    mesh_pool_manifest: str = ""
+    # 납작한 형상 제외(기본 on). NBV는 "어느 시점이 새 표면을 보여주는가"를
+    # 푸는 문제라, 평면에 가까운 물체는 앞뒤 두 시점이면 다 보여 문제가
+    # 성립하지 않는다. 그런 물체가 섞이면 정책이 "아무 데나 두 번"을 배운다.
+    mesh_pool_filter_flat: bool = True
+    mesh_pool_min_aspect: float = 0.25
+    mesh_pool_limit: int = 0        # >0이면 앞에서 그만큼만 (소규모 시험용)
+
     # ── 보상 가중치 (2026-08-26 재보정 — step_1 실제 학습 이력 조사 반영) ──
     #
     # ⚠ 초기 이식 오류 정정: 처음에는 `step_1_NBV/env/envCfg.py`의 **기본값**을

@@ -97,11 +97,28 @@ class NBVBROVSceneCfg(InteractiveSceneCfg):
         init_state=AssetBaseCfg.InitialStateCfg(pos=(-_WALL_LENGTH / 2, 0.0, _FLOOR_DEPTH + _WALL_HEIGHT / 2)),
     )
 
+    # 대상 물체. `mesh_pool`이 비어 있으면 기존 단일 rock, 아니면 env마다 다른
+    # USD를 스폰한다(Stage 4). 다중 메쉬는 `replicate_physics=False`를 요구하며
+    # — IsaacLab 문서가 "separate assets in the environments"의 공식 경로로
+    # 명시한다 — 비용은 **startup time에만** 붙고 런타임 처리량에는 영향이 없다.
+    #
+    # `random_choice=False`로 두는 이유: env↔메쉬 대응이 매 실행 고정돼야
+    # 평가에서 정책 간 비교가 같은 조건에서 이뤄진다. 무작위면 실행마다 배치가
+    # 달라져 비교가 흔들린다.
     rock: AssetBaseCfg = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Object",
         spawn=sim_utils.UsdFileCfg(usd_path=ROCK_USD),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -3.0), rot=_ROT_45Z),
     )
+
+    def use_mesh_pool(self, usd_paths: list[str]) -> None:
+        """대상 물체를 다중 USD 풀로 교체한다. 씬 생성 **이전**에 호출할 것."""
+        if not usd_paths:
+            return
+        self.rock.spawn = sim_utils.MultiUsdFileCfg(
+            usd_path=list(usd_paths), random_choice=False,
+        )
+        self.replicate_physics = False
 
     # ── 카메라/소나/조명: 로봇 동체 자식 프림으로 고정 부착 ──
     # convention="world" + 항등원 회전 = 카메라가 부모(Robot) body frame의 +X를
