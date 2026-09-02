@@ -58,7 +58,7 @@ parser.add_argument(
 parser.add_argument("--experiment_name", type=str, default=None)
 parser.add_argument(
     "--profile",
-    choices=["legacy_exact", "paper_ref_v1", "deploy_v2", "deploy_v3", "deploy_v4", "deploy_v5", "deploy_v5_pitch_fmax_diag", "deploy_v6", "deploy_v6b"],
+    choices=["legacy_exact", "paper_ref_v1", "paper_delay_v1", "paper_delay_hist_v1", "deploy_v2", "deploy_v3", "deploy_v4", "deploy_v5", "deploy_v5_pitch_fmax_diag", "deploy_v6", "deploy_v6b"],
     default="deploy_v2",
     help="MDP/observation/action contract; new training defaults to deploy_v2",
 )
@@ -120,6 +120,7 @@ def _write_manifest(
         "envs/vel_env.py": os.path.join(root, "envs/vel_env.py"),
         "envs/vel_env_cfg.py": os.path.join(root, "envs/vel_env_cfg.py"),
         "envs/observation_contract.py": os.path.join(root, "envs/observation_contract.py"),
+        "envs/action_delay.py": os.path.join(root, "envs/action_delay.py"),
         "envs/desired_states.py": os.path.join(root, "envs/desired_states.py"),
         "action_frame_contract.py": os.path.join(root, "action_frame_contract.py"),
         "robots/dynamics/brov2/thruster.py": os.path.join(
@@ -158,6 +159,14 @@ def _write_manifest(
         "rew_w_action": env_cfg.rew_w_action,
         "policy_dt_s": env_cfg.sim.dt * env_cfg.decimation,
         "episode_length_s": env_cfg.episode_length_s,
+        # DELAY_TRAINING_PLAN.md: 지연/신선도/이력은 프로파일 이름만으로
+        # 복원되지 않는 학습 조건이고 배포측 관측 계약(이력 버퍼 유무)을
+        # 직접 결정하므로 manifest 에 값 자체를 남긴다.
+        "observation_space": env_cfg.observation_space,
+        "action_delay_enabled": env_cfg.enable_action_delay,
+        "action_delay_ms_range": list(env_cfg.action_delay_ms_range),
+        "obs_stale_probability": env_cfg.obs_stale_probability,
+        "action_history_length": env_cfg.action_history_length,
         "num_envs": env_cfg.scene.num_envs,
         "seed": agent_cfg.seed,
         "num_steps_per_env": agent_cfg.num_steps_per_env,

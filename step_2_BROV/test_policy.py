@@ -50,7 +50,7 @@ parser = argparse.ArgumentParser(description="BROV2 속도 컨트롤러 + LOS �
 parser.add_argument("--checkpoint", type=str, required=True, help="RSL-RL model_*.pt 체크포인트 경로")
 parser.add_argument(
     "--profile",
-    choices=["legacy_exact", "paper_ref_v1", "deploy_v2", "deploy_v3", "deploy_v4", "deploy_v5", "deploy_v6", "deploy_v6b"],
+    choices=["legacy_exact", "paper_ref_v1", "paper_delay_v1", "paper_delay_hist_v1", "deploy_v2", "deploy_v3", "deploy_v4", "deploy_v5", "deploy_v6", "deploy_v6b"],
     required=True,
     help="checkpoint가 학습된 observation/action contract (혼용 방지용 필수)",
 )
@@ -70,6 +70,38 @@ parser.add_argument(
     "--allow_unverified_checkpoint",
     action="store_true",
     help="manifest가 없는 legacy checkpoint를 의도적으로 평가(새 artifact에는 금지)",
+)
+parser.add_argument(
+    "--action_delay_ms",
+    type=float,
+    default=None,
+    help=(
+        "--profile과 무관하게 행동 지연을 강제 지정한다 [ms]. 0이면 강제로 끄고, "
+        "양수면 그 값으로 **고정**(랜덤화 없이 min=max) — 지연 0/40/60/80 ms "
+        "gate 평가와, 지연 없이 학습된 baseline 정책에 지연을 걸어보는 "
+        "DELAY_TRAINING_PLAN.md 단계 0 인과검증에 쓴다. 미지정 시 --profile이 "
+        "정한 그대로."
+    ),
+)
+parser.add_argument(
+    "--zero_action_history",
+    action="store_true",
+    help=(
+        "28-D 관측(paper_delay_hist_v1)의 이력 성분 12개를 정책에 넣기 직전에 "
+        "0으로 덮는다. 환경은 그대로 두고 정책의 입력만 바꾸는 폐루프 ablation — "
+        "'이력이 실제로 안정화에 쓰이는가'를 Jacobian(개루프 미분)이 아니라 "
+        "거동으로 직접 검증한다."
+    ),
+)
+parser.add_argument(
+    "--obs_stale_prob",
+    type=float,
+    default=None,
+    help=(
+        "--profile과 무관하게 관측 신선도 jitter 확률을 강제 지정한다 [0,1]. "
+        "gate 평가는 재현성을 위해 0을 명시해서 끈다(학습 시에는 A/B 양쪽에 "
+        "동일하게 0.15가 걸린다). 미지정 시 --profile이 정한 그대로."
+    ),
 )
 parser.add_argument(
     "--test",
@@ -489,6 +521,23 @@ def main() -> None:
     # _build_waypoints()도 동일하게 Z=_STARTING_DEPTH를 쓰도록 맞춤.
     env_cfg.starting_depth = _STARTING_DEPTH
 
+    if args.action_delay_ms is not None:
+        # 평가에서는 랜덤 지연이 아니라 고정 지연이어야 한 값의 효과를 분리해
+        # 볼 수 있다 — min=max로 두면 ActionDelayBuffer가 매 에피소드 같은
+        # 값을 뽑는다.
+        if args.action_delay_ms <= 0.0:
+            env_cfg.enable_action_delay = False
+        else:
+            env_cfg.enable_action_delay = True
+            env_cfg.action_delay_ms_range = (args.action_delay_ms, args.action_delay_ms)
+        print(
+            f"[INFO] 행동 지연 강제 설정: enable={env_cfg.enable_action_delay}, "
+            f"range={env_cfg.action_delay_ms_range} ms (profile={args.profile})"
+        )
+    if args.obs_stale_prob is not None:
+        env_cfg.obs_stale_probability = float(args.obs_stale_prob)
+        print(f"[INFO] 관측 신선도 jitter 강제 설정: p={env_cfg.obs_stale_probability}")
+
     if args.eval_action_abs_limit is not None:
         env_cfg.enable_action_envelope_clamp = True
         env_cfg.enable_action_envelope_curriculum = False
@@ -539,8 +588,8 @@ def main() -> None:
     frames: list = []
     log = {k: [] for k in (
         "t", "pos", "quat", "euler_deg", "v_actual", "v_desired", "q_desired_euler",
-        "action", "action_mag", "force_requested", "force_limited", "reset", "wp_idx",
-        "z_v", "z_q", "omega_b", "obs",
+        "action", "action_applied", "action_mag", "force_requested", "force_limited",
+        "reset", "wp_idx", "z_v", "z_q", "omega_b", "obs",
     )}
 
     obs_dict, _ = env.reset()
@@ -553,6 +602,8 @@ def main() -> None:
         for i in range(num_steps):
             # rsl-rl-lib>=5.0.0: obs_groups 스키마라 정책이 관측 딕셔너리 전체를 받아
             # 내부에서 obs["policy"]를 꺼내 씀 — 텐서만 미리 꺼내서 넘기면 안 됨.
+            if args.zero_action_history and env.cfg.action_history_length > 0:
+                obs_dict["policy"][:, 16:] = 0.0
             actions = policy(obs_dict)
             obs_dict, reward, terminated, truncated, info = env.step(actions)
             did_reset = bool((terminated | truncated)[0])
@@ -566,6 +617,8 @@ def main() -> None:
             log["v_desired"].append(env._v_d_b[0].cpu().tolist())
             log["q_desired_euler"].append(_quat_to_euler_zyx_deg(env._q_d[0]).cpu().tolist())
             log["action"].append(env._actions[0].cpu().tolist())
+            # 지연 반영 후 실제로 플랜트에 인가된 행동 (지연 off면 action과 동일)
+            log["action_applied"].append(env._applied_actions[0].cpu().tolist())
             log["action_mag"].append(float(env._actions[0].abs().mean()))
             log["force_requested"].append(env._force_requested[0].cpu().tolist())
             log["force_limited"].append(env._force_limited[0].cpu().tolist())

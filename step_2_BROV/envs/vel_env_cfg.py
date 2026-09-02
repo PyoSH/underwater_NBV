@@ -245,6 +245,31 @@ class BROVVelEnvCfg(DirectRLEnvCfg):
     # independently, which is the gap this closes).
     deploy_v6_los_coupled_retarget_probability: float = 0.5
 
+    # ── 행동 지연 / 관측 신선도 / 행동 이력 (DELAY_TRAINING_PLAN.md, 2026-09-02) ──
+    # 실기 수조 세션이 배포 진동의 근본원인을 dead time τ=80 ms + 정책 포화
+    # (relay) 로 확정했다. 학습 환경에는 이 지연이 구조적으로 없어서(τ=0,
+    # phase margin +64° vs 실기 −24°) 정책이 실기 안정 문턱을 넘는 이득을
+    # 배웠다. 아래 세 스위치가 그 격차를 학습 환경 안으로 들여온다 —
+    # 구현은 envs/action_delay.py (순수 torch, 단위시험 있음).
+    #
+    # 주입값이 실측 80 ms 가 아니라 중심 60 ms 인 이유(이중 계상 보정): 실측
+    # 80 ms 는 명령→자이로 전체로 실기 액추에이터 응답을 포함한다. 학습
+    # 환경에는 이미 von Benzon 3차 추진기 동특성이 있고 2 Hz 에서 위상 −15°
+    # ≈ 등가지연 21 ms 를 공급하므로, 전송 몫 60 ms(= 80 − 21) 만 주입한다.
+    #
+    # 기본값은 전부 off — 기존 프로파일(paper_ref_v1/deploy_*)의 학습 결과가
+    # 1 bit 도 변하면 안 된다(회귀 확인 대상).
+    enable_action_delay   : bool  = False
+    action_delay_ms_range : tuple = (40.0, 80.0)   # 에피소드마다 uniform, 중심 60 ms
+    # 매 정책 스텝 env 별 이 확률로 직전 스텝 관측을 대신 공급(그 틱은 z_v/z_q
+    # 적분도 정지 — 배포측 stale/duplicate 표본 처리와 같은 규칙).
+    # 근거: 실기 attitude_age 분포의 15.1% 가 40~50 ms = 1 틱 묵음.
+    obs_stale_probability : float = 0.0
+    # 관측에 덧붙일 최근 실행 행동 개수. 0 이면 16-D 계약 그대로.
+    # 지연 상한 80 ms = 정책 2스텝이므로 2 개면 증강 등가 정리를 충족한다
+    # (Katsikopoulos & Engelbrecht 2003; Walsh et al. 2008).
+    action_history_length : int   = 0
+
     # ── 안전 경계 (env origin 기준, 초과 시 terminated) ─────────────────────────
     # 경로 추종이 없는 태스크라 waypoint 기반 경계 대신 널찍한 안전판만 둔다.
     max_bound: float = 20.0
@@ -277,6 +302,28 @@ def apply_training_profile(cfg: BROVVelEnvCfg, profile: str) -> BROVVelEnvCfg:
         cfg.command_profile = "paper_ref_v1"
         cfg.reward_profile = "paper_eq5_8"
         cfg.dr_enable_mass = True
+    elif profile == "paper_delay_v1":
+        # 설계 A (DELAY_TRAINING_PLAN.md §2) — 계약 유지 ablation 대조군.
+        # paper_ref_v1 과 관측/보상/명령이 전부 동일하고 행동 지연 + 관측
+        # 신선도 jitter 만 켠다. 관측이 16-D 그대로이므로 정책이 할 수 있는
+        # 적응은 이득 강하뿐이고, 그것이 이 run 의 관심사다.
+        cfg = apply_training_profile(cfg, "paper_ref_v1")
+        cfg.training_profile = profile
+        cfg.enable_action_delay = True
+        cfg.action_delay_ms_range = (40.0, 80.0)
+        cfg.obs_stale_probability = 0.15
+    elif profile == "paper_delay_hist_v1":
+        # 설계 B (DELAY_TRAINING_PLAN.md §2) — MDP 유지 본안.
+        # A 와 지연/신선도가 동일하고 관측만 28-D 로 늘린다:
+        # [기존 16] + [a_{t-1}(6)] + [a_{t-2}(6)], a 는 실행 행동(탐색 노이즈
+        # 포함, clip 이후, 지연버퍼에 들어간 바로 그 값).
+        # observation_contract 를 새 이름으로 바꿔 기존 16-D artifact 와
+        # 절대 혼용되지 않게 계약 검사로 막는다.
+        cfg = apply_training_profile(cfg, "paper_delay_v1")
+        cfg.training_profile = profile
+        cfg.observation_contract = "brov_velocity_observation_v3_hist2"
+        cfg.action_history_length = 2
+        cfg.observation_space = 16 + cfg.action_history_length * cfg.action_space
     elif profile == "deploy_v2":
         cfg.training_profile = profile
         cfg.observation_contract = "brov_velocity_observation_v2"
@@ -354,7 +401,8 @@ def apply_training_profile(cfg: BROVVelEnvCfg, profile: str) -> BROVVelEnvCfg:
     else:
         raise ValueError(
             f"unknown training profile {profile!r}; expected legacy_exact, "
-            "paper_ref_v1, deploy_v2, deploy_v3, deploy_v4, deploy_v5, "
-            "deploy_v5_pitch_fmax_diag, deploy_v6, or deploy_v6b"
+            "paper_ref_v1, paper_delay_v1, paper_delay_hist_v1, deploy_v2, "
+            "deploy_v3, deploy_v4, deploy_v5, deploy_v5_pitch_fmax_diag, "
+            "deploy_v6, or deploy_v6b"
         )
     return cfg

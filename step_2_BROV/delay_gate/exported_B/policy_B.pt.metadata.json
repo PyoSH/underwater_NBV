@@ -1,0 +1,43 @@
+{
+  "action_contract": "explicit_flu_zup_to_sname_frd_v1",
+  "action_order": [
+    "surge",
+    "sway",
+    "heave",
+    "roll",
+    "pitch",
+    "yaw"
+  ],
+  "allocation_frame": "body_frd_sname",
+  "checkpoint": "/workspace/OceanRL_test/step_2_BROV/logs/paper_delay_hist_v1_s42/model_299.pt",
+  "checkpoint_contract_verified": true,
+  "checkpoint_sha256": "53a37cbd06a2e0033b6498d483d9ba7ed39d5bf47ea100f8befe3bf0e46287b9",
+  "command_profile": "paper_ref_v1",
+  "input_dim": 28,
+  "observation_contract": "brov_velocity_observation_v3_hist2",
+  "output_dim": 6,
+  "policy": "/workspace/OceanRL_test/step_2_BROV/delay_gate/exported_B/policy_B.pt",
+  "policy_frame": "body_flu_zup",
+  "policy_sha256": "9d242ecec561d139549aed354072e49ffd859115c2546a2a80ef38de61310393",
+  "profile": "paper_delay_hist_v1",
+  "required_executable": "policy_node_mk2",
+  "rew_w_action": 0.017,
+  "reward_profile": "paper_eq5_8",
+  "runtime_action_clip": [
+    -1.0,
+    1.0
+  ],
+  "schema": "brov_torchscript_policy_v2",
+  "seed": 42,
+  "training_manifest": "/workspace/OceanRL_test/step_2_BROV/logs/paper_delay_hist_v1_s42/artifact_manifest.json",
+  "training_manifest_sha256": "5d76ee25005879ce57526e63065d583c3b8b50c61cb3e8ed783a6ebd807d653d",
+  "vehicle_model_sha256": "8bb397f4a8a0d50c11bfaf1f88143b4375b84dbd77f41fbe7c512ced1b15be12",
+  "wrench_scale": [
+    85.0,
+    85.0,
+    120.0,
+    26.0,
+    14.0,
+    22.0
+  ]
+}

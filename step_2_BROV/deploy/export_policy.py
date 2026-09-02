@@ -29,7 +29,7 @@ parser.add_argument("--out_dir", type=str, default=None, help="기본값: deploy
 parser.add_argument("--filename", type=str, default="policy.pt")
 parser.add_argument(
     "--profile",
-    choices=["legacy_exact", "paper_ref_v1", "deploy_v2", "deploy_v3", "deploy_v4", "deploy_v5", "deploy_v6", "deploy_v6b"],
+    choices=["legacy_exact", "paper_ref_v1", "paper_delay_v1", "paper_delay_hist_v1", "deploy_v2", "deploy_v3", "deploy_v4", "deploy_v5", "deploy_v6", "deploy_v6b"],
     required=True,
     help="checkpoint가 학습된 observation/action contract (혼용 방지용 필수)",
 )

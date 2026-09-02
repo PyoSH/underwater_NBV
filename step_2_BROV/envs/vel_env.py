@@ -43,6 +43,12 @@ from envs.observation_contract import (
     build_velocity_observation,
     canonicalize_quaternion,
 )
+from envs.action_delay import (
+    ActionDelayBuffer,
+    ActionDelayConfig,
+    ActionHistoryBuffer,
+    ObservationStalenessModel,
+)
 from envs.desired_states import (
     DeployV2Config,
     DeployV2Scheduler,
@@ -167,6 +173,10 @@ class BROVVelEnv(DirectRLEnv):
         # [-1,1]-clamped actor output, before any deploy_v6 envelope clamp --
         # matches real /brov/action_raw exactly (see _pre_physics_step).
         self._pre_envelope_actions = torch.zeros_like(self._actions)
+        # 이번 물리 스텝에 실제로 플랜트에 인가된 행동(지연 반영). 지연이
+        # 꺼져 있으면 self._actions 와 항상 같다 — 진단/로깅 전용이며 보상은
+        # 계속 명령 행동(self._actions)으로 계산한다.
+        self._applied_actions = torch.zeros_like(self._actions)
         self._force_requested = torch.zeros(self.num_envs, 8, device=self.device)
         self._force_limited = torch.zeros_like(self._force_requested)
         self._wrench_requested_zup = torch.zeros(self.num_envs, 6, device=self.device)
@@ -269,6 +279,51 @@ class BROVVelEnv(DirectRLEnv):
                 ),
             )
 
+        # DELAY_TRAINING_PLAN.md (2026-09-02): 행동 지연 / 관측 신선도 jitter /
+        # 행동 이력. 셋 다 cfg 스위치가 꺼져 있으면 **인스턴스 자체를 만들지
+        # 않는다** — 난수도 소비하지 않고 hot path 분기도 `is None` 하나뿐이라
+        # paper_ref_v1/deploy_* 의 기존 학습 경로가 그대로 보존된다.
+        self._action_delay = None
+        if cfg.enable_action_delay:
+            self._action_delay = ActionDelayBuffer(
+                self.num_envs,
+                cfg.action_space,
+                device=self.device,
+                seed=command_seed,
+                config=ActionDelayConfig(
+                    delay_ms_range=tuple(cfg.action_delay_ms_range),
+                    physics_dt_s=cfg.sim.dt,
+                ),
+            )
+        self._action_history = None
+        if cfg.action_history_length > 0:
+            expected_obs = 16 + cfg.action_history_length * cfg.action_space
+            if cfg.observation_space != expected_obs:
+                raise ValueError(
+                    "observation_space must be "
+                    f"{expected_obs} for action_history_length="
+                    f"{cfg.action_history_length}, got {cfg.observation_space}"
+                )
+            self._action_history = ActionHistoryBuffer(
+                self.num_envs,
+                cfg.action_history_length,
+                cfg.action_space,
+                device=self.device,
+            )
+        self._obs_staleness = None
+        if cfg.obs_stale_probability > 0.0:
+            # 묵음은 **센서 블록(16-D)** 에만 건다. 행동 이력은 센서가 아니라
+            # 컨트롤러 자신의 발신 기록이라 배포측에서도 지연되지 않으며,
+            # 이력을 묵히면 "지금 비행 중인 행동"이 관측에서 사라져 설계 B 가
+            # 복원하려는 MDP 자체가 깨진다.
+            self._obs_staleness = ObservationStalenessModel(
+                self.num_envs,
+                16,
+                cfg.obs_stale_probability,
+                device=self.device,
+                seed=command_seed + 1,
+            )
+
         # Debug drawing is deliberately lazy.  ``--headless`` only disables the
         # window; it does not make ``draw_lines(...tolist())`` free.  The previous
         # implementation updated 8 thruster arrows for every parallel environment
@@ -308,13 +363,27 @@ class BROVVelEnv(DirectRLEnv):
             self._actions = self._pre_envelope_actions.clamp(-envelope, envelope)
         else:
             self._actions = self._pre_envelope_actions
+        if self._action_history is not None:
+            # 관측에 붙는 것은 정책 평균이 아니라 **실행 행동** — 탐색 노이즈가
+            # 포함된, 지연버퍼에 들어가는 바로 그 값이어야 한다(증강 등가
+            # 정리의 `a` 가 실행 행동이다; 과거 관측에서는 노이즈를 몰라
+            # 역산이 불가능하므로 관측 스택으로 대체할 수 없다).
+            self._action_history.push(self._actions)
 
     def _apply_action(self) -> None:
         """6-dim wrench → B_pinv 할당 → 8-thruster PWM → 추력/유체역학 계산 후 외력 적용."""
         # The policy speaks FLU/Z-up.  The allocation matrix is SNAME/FRD.
         # Cache the six signed scale factors at construction so this 100 Hz
         # hot path has no validation or device-to-host synchronization.
-        tau_cmd_sname = self._actions * self._action_to_sname_multiplier
+        # 행동 지연: 물리 스텝(10 ms) 해상도 링버퍼에서 d 스텝 전 행동을
+        # 꺼내 인가한다. 정책 스텝(40 ms) 해상도로는 60 ms 를 표현할 수 없어서
+        # 이 지점(=_apply_action, 물리 스텝마다 호출)이 유일한 올바른 자리다.
+        applied_actions = (
+            self._actions if self._action_delay is None
+            else self._action_delay.step(self._actions)
+        )
+        self._applied_actions.copy_(applied_actions)
+        tau_cmd_sname = applied_actions * self._action_to_sname_multiplier
         self._wrench_requested_zup.copy_(
             tau_cmd_sname * self._sname_to_zup_sign
         )
@@ -587,6 +656,15 @@ class BROVVelEnv(DirectRLEnv):
             v_measured = self._robot.data.root_lin_vel_b
         v_e_b = v_measured - self._v_d_b
 
+        # 관측 신선도 jitter: 이번 틱에 직전 관측을 다시 공급할 env 를 먼저
+        # 뽑는다. 묵은 틱에서는 적분도 멈춰야 하므로(배포측 stale/duplicate
+        # 표본 규칙과 동일) integrate 마스크에 먼저 반영한 뒤, 관측 교체는
+        # 계산이 끝난 다음에 한다.
+        stale_mask = (
+            None if self._obs_staleness is None
+            else self._obs_staleness.draw_stale_mask()
+        )
+
         if self.cfg.observation_contract == "legacy_exact_0p5":
             self._z_v = self._z_v + v_e_b * self._policy_dt
             self._z_q = self._z_q + q_e[:, 1:] * self._policy_dt
@@ -595,6 +673,8 @@ class BROVVelEnv(DirectRLEnv):
             integrate_mask = (
                 self.episode_length_buf != self._last_integrated_episode_step
             )
+            if stale_mask is not None:
+                integrate_mask = integrate_mask & ~stale_mask
             integrate_velocity = (
                 integrate_mask if dvl_fresh_mask is None
                 else integrate_mask & dvl_fresh_mask
@@ -635,6 +715,14 @@ class BROVVelEnv(DirectRLEnv):
                 integral_attitude_limit=self.cfg.integral_attitude_limit,
             )
             self._last_integrated_episode_step.copy_(self.episode_length_buf)
+
+        if self._obs_staleness is not None:
+            obs = self._obs_staleness.apply(obs, stale_mask)
+        if self._action_history is not None:
+            # 설계 B (28-D): [기존 16] + [a_{t-1}(6)] + [a_{t-2}(6)].
+            # 이력은 센서가 아니라 컨트롤러 자신의 발신 기록이므로 위
+            # 신선도 hold 를 거치지 않는다(배포측에서도 지연되지 않는다).
+            obs = torch.cat([obs, self._action_history.as_observation()], dim=-1)
         return {"policy": obs}
 
     def _get_rewards(self) -> torch.Tensor:
@@ -737,6 +825,15 @@ class BROVVelEnv(DirectRLEnv):
         self._prev_actions[env_ids_t] = 0.0
         self._raw_actions[env_ids_t] = 0.0
         self._pre_envelope_actions[env_ids_t] = 0.0
+        self._applied_actions[env_ids_t] = 0.0
+        # 지연버퍼/이력/신선도는 전부 환경 상태 — 부분 reset 에서도 해당
+        # env 만 정확히 초기화돼야 한다(각 클래스가 env_ids 단위로 처리).
+        if self._action_delay is not None:
+            self._action_delay.reset(env_ids_t)
+        if self._action_history is not None:
+            self._action_history.reset(env_ids_t)
+        if self._obs_staleness is not None:
+            self._obs_staleness.reset(env_ids_t)
         self._force_requested[env_ids_t] = 0.0
         self._force_limited[env_ids_t] = 0.0
         self._wrench_requested_zup[env_ids_t] = 0.0
