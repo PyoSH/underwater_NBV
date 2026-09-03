@@ -162,6 +162,10 @@ class NBVBROVSceneCfg(InteractiveSceneCfg):
         height=240,
         width=320,
         spawn=sim_utils.PinholeCameraCfg(focal_length=24.0, clipping_range=(0.1, 20.0)),
+        # decimation=500이라 `update()`마다 수중 렌더를 돌리면 같은 프레임을
+        # 499번 더 계산한다. `env.py::_get_rewards()`가 결정당 1회
+        # `refresh_uw()`를 부른다 (2026-09-03: 결정당 8.31초 → 1.71초).
+        defer_uw_render=True,
         offset=UWCameraCfg.OffsetCfg(
             pos=_CAMERA_FRAME_POS,
             rot=(1.0, 0.0, 0.0, 0.0),
