@@ -37,7 +37,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "step_1_NBV"))
 from utils_NBV.jerlov_presets import JERLOV_PRESETS
 from robots.assets.brov_rigid import BROV_RIGID_CFG
-from sensors.UWCamera.UW_Camera_cfg import UWCameraCfg
+from sensors.UWCamera.UW_Camera_cfg import UWTiledCameraCfg
 from sensors.ImagingSonar.ImagingSonarCfg import ImagingSonarCfg
 
 OCEANSIM_DIR = "/isaac-sim/extsUser/OceanSim"
@@ -156,7 +156,12 @@ class NBVBROVSceneCfg(InteractiveSceneCfg):
     # 동작했던 것과 같은 컨벤션). BROV2의 +X도 선수(forward) 방향이라 별도
     # 회전 없이 그대로 맞는다 — brov2_spec.md §7이 지적한 "Camera_frame 회전
     # 미지정" 문제를 여기서 명시적으로 해결.
-    camera: UWCameraCfg = UWCameraCfg(
+    # **tiled rendering** (2026-09-03 전환). env마다 render product를 만드는
+    # 표준 `Camera`는 128 env에서 RTX 자원이 연달아 고갈됐다: descriptor set
+    # 920건 실패 → `--kit_args`로 상향하니 다음 한계인 per-view 컬링 슬롯
+    # 실패로 프로세스가 4시간 정지(그 풀은 설정으로 노출돼 있지 않다).
+    # tiled는 전체 env가 render product 1개를 공유해 env 수와 무관하다.
+    camera: UWTiledCameraCfg = UWTiledCameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/Camera",
         update_period=0,
         height=240,
@@ -166,7 +171,7 @@ class NBVBROVSceneCfg(InteractiveSceneCfg):
         # 499번 더 계산한다. `env.py::_get_rewards()`가 결정당 1회
         # `refresh_uw()`를 부른다 (2026-09-03: 결정당 8.31초 → 1.71초).
         defer_uw_render=True,
-        offset=UWCameraCfg.OffsetCfg(
+        offset=UWTiledCameraCfg.OffsetCfg(
             pos=_CAMERA_FRAME_POS,
             rot=(1.0, 0.0, 0.0, 0.0),
             convention="world",

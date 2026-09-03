@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import warp as wp
 
-from isaaclab.sensors import Camera
+from isaaclab.sensors import Camera, TiledCamera
 
 # NOTE: `omni.ui`는 여기서 import하지 않는다 — viewport 창(_make_viewport)에서만
 # 쓰이는 선택적 의존인데, 최상단에서 무조건 import하면 `omni.ui`가 없는 headless
@@ -16,13 +16,24 @@ from isaaclab.sensors import Camera
 # 정상 지원되므로, 지연 import로 바꿔 headless 학습이 가능해졌다.
 from .UWrenderer_parallel_utils import UW_render_batch
 if TYPE_CHECKING:
-    from .UW_Camera_cfg import UWCameraCfg
+    from .UW_Camera_cfg import UWCameraCfg, UWTiledCameraCfg
 
-class UWCamera(Camera):
-    cfg: UWCameraCfg
+class _UWRenderMixin:
+    """수중 감쇠 렌더 로직 — 카메라 구현체와 **무관한** 부분만 모았다.
 
-    def __init__(self, cfg: UWCameraCfg):
-        super().__init__(cfg)
+    `Camera`(env마다 render product 1개)와 `TiledCamera`(전체 env에 render
+    product 1개) 양쪽에 같은 로직을 얹기 위한 믹스인이다. 두 클래스의
+    `data.output` 계약이 동일하기 때문에(rgba (N,H,W,4) uint8,
+    distance_to_camera (N,H,W,1) f32, intrinsic_matrices (N,3,3)) 여기 있는
+    코드는 어느 쪽이든 그대로 돈다.
+
+    왜 두 벌이 필요한가 (2026-09-03): `Camera`는 env마다 view를 만들어
+    128 env에서 RTX 자원이 연달아 고갈됐다 — descriptor set 920건 실패,
+    그것을 `--kit_args`로 늘리자 다음 한계인
+    `ProjectedAreaCullingData::PerViewState gpu slot` 실패로 **프로세스가
+    4시간 정지**했다. 그 슬롯 풀은 설정으로 노출돼 있지 않아 더 밀 수 없다.
+    IsaacLab 문서가 이 상황의 정답으로 지정한 것이 tiled rendering이다.
+    """
 
     def _initialize_impl(self):
         super()._initialize_impl()
@@ -165,3 +176,30 @@ class UWCamera(Camera):
     def __del__(self):
         if hasattr(self, 'window') and self.window:
             self._window.destroy()
+
+
+class UWCamera(_UWRenderMixin, Camera):
+    """env마다 render product를 만드는 표준 경로.
+
+    step_1_NBV(decimation=1, env 수십 개)처럼 view 수가 적을 때 쓴다.
+    view 수가 100을 넘어가면 RTX 자원 한계에 걸리므로 `UWTiledCamera`를 쓸 것.
+    """
+
+    cfg: UWCameraCfg
+
+    def __init__(self, cfg: UWCameraCfg):
+        super().__init__(cfg)
+
+
+class UWTiledCamera(_UWRenderMixin, TiledCamera):
+    """전체 env를 **하나의 render product**에 타일로 그리는 경로.
+
+    view가 1개뿐이라 env 수를 늘려도 per-view 자원(descriptor set, 컬링 상태
+    슬롯)이 늘지 않는다. IsaacLab 문서: *"Tiled rendering works by using a
+    single render_product for all clones of a single camera"*.
+    """
+
+    cfg: UWTiledCameraCfg
+
+    def __init__(self, cfg: UWTiledCameraCfg):
+        super().__init__(cfg)

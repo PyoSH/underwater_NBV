@@ -1,8 +1,8 @@
 from dataclasses import dataclass, field
-from isaaclab.sensors import CameraCfg
+from isaaclab.sensors import CameraCfg, TiledCameraCfg
 from isaaclab.utils import configclass
 
-from .UW_Camera_parallel import UWCamera
+from .UW_Camera_parallel import UWCamera, UWTiledCamera
 
 @configclass
 class UWCameraCfg(CameraCfg):
@@ -31,3 +31,15 @@ class UWCameraCfg(CameraCfg):
     # 프레임이 새로 나므로 기존 동작이 옳고, 그쪽은 `refresh_uw()`를 부르지
     # 않는다. 기본을 True로 두면 step_1의 카메라가 첫 프레임에 얼어붙는다.
     defer_uw_render:    bool = False
+
+
+@configclass
+class UWTiledCameraCfg(UWCameraCfg, TiledCameraCfg):
+    """수중 감쇠 + tiled rendering.
+
+    `UWCameraCfg`의 수질/뷰포트 필드를 그대로 물려받고 렌더 경로만 tiled로
+    바꾼다. env 수가 100을 넘는 학습에서는 이쪽을 써야 한다 —
+    `_UWRenderMixin` 주석의 2026-09-03 사고 기록 참조.
+    """
+
+    class_type: type = UWTiledCamera

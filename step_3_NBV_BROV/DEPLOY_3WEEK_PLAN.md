@@ -190,6 +190,39 @@ env i에 `proto[i % N]`을 복사한다(`wrappers.py:114`). 이 배정은 **씬 
 - train 풀은 셔플 순서를 유지한다 — 알파벳순이면 앞 N개가 한 가족
   (`3D_Dollhouse_*` 등)에 몰려 다양성이 더 줄어든다
 
+### 렌더 경로 전환 — `Camera` → `TiledCamera` (2026-09-03)
+
+env 수를 올리자 **렌더러 자원 한계가 연속으로** 나왔다. `Camera`는 env마다
+render product(=view)를 만들기 때문이다.
+
+```
+128 env, 기본 설정        → descriptor set 할당 실패 920건 (씬 생성은 성공 = 조용한 손상)
++ --/rtx/descriptorSets=32768 → descriptor 에러 0, 그러나 다음 한계에서
+                                ProjectedAreaCullingData::PerViewState gpu slot 실패
+                                → 프로세스 4시간 17분 정지 (로그는 36초에 멈춤)
+                                → 그 풀은 /rtx/* 설정으로 노출돼 있지 않다 (더 밀 수 없음)
+96 env                    → 에러 0, 전 env 유효 이미지, PASS
+```
+
+IsaacLab 문서가 이 상황의 정답으로 지정한 것이 tiled rendering이다
+(*"a single render_product for **all** clones of a single camera"*). 포팅 완료:
+`_UWRenderMixin`으로 수중 렌더 로직을 분리하고 `UWCamera(Camera)` /
+`UWTiledCamera(TiledCamera)` 두 경로를 둔다(step_1_NBV는 전자 유지).
+
+검증(32 env, 같은 물체·시드·정책, 첫 배치 13결정): coverage 최대 편차
+**0.0044 (0.7%)** — 렌더 픽셀이 실제로 바뀌므로 비트 동일할 수 없고, 편차가
+작고 일관되게 한 방향이라 같은 과제임이 확인된다. 성능도 개선:
+결정당 1.67→**1.46초**, VRAM 7.59→**6.83 GB**, 카메라 버퍼 비중 1.2→0.1%.
+
+**부수 교훈**: 렌더러는 자원 할당에 실패해도 **크래시 없이 계속 간다**. 그래서
+`train.py`/`smoke_test_stage1.py`에 렌더 건전성 관문(env별 이미지 std·depth 유효
+화소)을 넣었다 — 조용히 죽은 카메라가 빈 화면을 정상 데이터로 학습에 섞는 것이
+크래시보다 나쁘다.
+
+**운영 교훈**: `python.sh` 래퍼를 Ctrl+C로 끊으면 kit 자식이 살아남는다. 이번에
+**6일 전 학습 2개가 아직 돌고 있었고** 오늘 시도 4개도 전부 남아, 메모리 여유가
+3 GB까지 떨어져 새 실행이 정지했다. 중단은 반드시 `pkill -f train.py`.
+
 **대응 순서**: ① 우선 가능한 만큼의 env로 학습하고 **홀드아웃으로 실측**한다.
 ② 홀드아웃 격차가 크면 그때 env당 메쉬 스택(K개 사전 스폰 + 리셋마다 가시성
 토글)을 만들어 K×num_envs로 늘린다. 지금 ②를 먼저 만드는 것은 측정 없는
