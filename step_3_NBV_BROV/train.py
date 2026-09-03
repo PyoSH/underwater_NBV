@@ -75,6 +75,13 @@ parser.add_argument("--mesh_pool", type=str, default=None,
                          "물체를 스폰한다. 미지정 시 env_cfg 기본값(단일 rock)")
 parser.add_argument("--mesh_pool_limit", type=int, default=0,
                     help="메쉬 풀에서 앞 N개만 사용 (0=전부). 소규모 시험용")
+parser.add_argument("--mesh_pool_offset", type=int, default=0,
+                    help="풀 선택 창을 회전시킨다. 한 실행에서 보는 물체는 "
+                         "min(num_envs, 풀)개뿐이라 풀 전체를 훑으려면 여러 번 필요")
+parser.add_argument("--mesh_pool_split", type=str, default="train",
+                    choices=("train", "holdout", "all"),
+                    help="학습은 train(700개). holdout(91개)은 배포 리허설용이라 "
+                         "학습에 쓰면 그 평가가 의미를 잃는다")
 
 AppLauncher.add_app_launcher_args(parser)
 if "--enable_cameras" not in sys.argv:
@@ -113,6 +120,8 @@ def main() -> int:
     if args.mesh_pool:
         env_cfg.mesh_pool_manifest = args.mesh_pool
         env_cfg.mesh_pool_limit = args.mesh_pool_limit
+        env_cfg.mesh_pool_split = args.mesh_pool_split
+        env_cfg.mesh_pool_offset = args.mesh_pool_offset
 
     env = NBVBROVEnv(cfg=env_cfg)
     device = env.device
@@ -180,7 +189,13 @@ def main() -> int:
     n_rollouts = max(1, args.total_steps // (T * E))
     if args.smoke:
         n_rollouts = min(n_rollouts, 3)
+    n_obj = getattr(env, "_n_mesh_objects", 1)
+    max_dec = int(env.cfg.episode_length_s / (env.cfg.sim.dt * env.cfg.decimation))
     print(f"[train] envs={E} rollout={T} → 롤아웃당 {T*E} env-step, 총 {n_rollouts} 롤아웃")
+    print(f"[train] 물체 {n_obj}종 · 에피소드 최대 {max_dec}결정 → "
+          f"예상 에피소드 {args.total_steps // max_dec:,}개 이상 "
+          f"({args.total_steps // max_dec // max(n_obj,1):,}개/물체 이상; "
+          f"조기 성공하면 늘어난다)")
 
     t0 = time.time()
     for it in range(n_rollouts):
@@ -233,6 +248,19 @@ def main() -> int:
         terms = env.last_reward_terms
         term_abs = {k: v.abs().mean().item() for k, v in terms.items()}
         tot = sum(term_abs.values()) or 1.0
+        # 실제 성공률 = 종료한 에피소드 중 terminated(coverage 목표 달성) 비율.
+        # 예전 콘솔 줄의 `success=`는 이것이 아니라 **보상 분해에서 success 항이
+        # 차지하는 비중**이었다(2026-09-03에 오독을 유발해 이름을 갈랐다).
+        # 둘 다 필요하지만 이름이 같으면 반드시 헷갈린다.
+        succ_rate = float(np.mean(done_term[-20:])) * 100 if done_term else float("nan")
+        # **에피소드 수**를 따로 센다. 예산은 step으로 잡는 것이 맞지만
+        # (비용·gradient 수가 step에 비례), 유효 표본은 에피소드다 — 한
+        # 에피소드 = (물체 × 자세·크기 × 초기 시점) 조합 1회 추첨이고,
+        # 그 안의 step들은 같은 추첨에서 나온 상관 관측이다. 정책이 좋아져
+        # 조기 종료하면 같은 step 예산이 더 많은 에피소드를 사므로, step만
+        # 봐서는 "표본을 얼마나 받았는지"를 알 수 없다.
+        n_ep = len(done_lens)
+        ep_per_obj = n_ep / max(getattr(env, "_n_mesh_objects", 1), 1)
 
         print(
             f"[{it:03d}] rew={rew_mean:+.4f} "
@@ -246,7 +274,9 @@ def main() -> int:
             # n_updates=0이면 그 롤아웃은 갱신 0회로 버려진 것이다. 이게
             # 안 보여서 2026-08-29 검증에서 롤아웃 4개가 조용히 낭비됐다.
             f"nupd={stats['n_updates']} "
-            f"| success={term_abs['success']/tot*100:.0f}% "
+            f"| ep={n_ep} ({ep_per_obj:.0f}/물체) "
+            f"succ={succ_rate:.0f}% "
+            f"succ_share={term_abs['success']/tot*100:.0f}% "
             f"dist={env.last_dist_moved.mean().item():.3f} "
             f"logstd={actor.log_std.mean().item():+.2f} "
             f"({time.time()-t0:.0f}s)"
@@ -295,7 +325,9 @@ def main() -> int:
                 log["diag/gt_partial"] = env._diag_gt_partial.mean().item()
                 log["diag/gt_full"]    = env._diag_gt_full.mean().item()
                 log["diag/quality_mu"] = env._quality_mu.mean().item()
-                log["diag/quality_Q_sat"] = env._quality_Q_sat.mean().item()
+                # q*는 voxel별이라 볼륨 평균을 남긴다 — 수질(μ)이 바뀌면
+                # 같이 움직여야 정규화가 살아있다는 확인이 된다.
+                log["diag/q_star_mean"] = env._q_star.mean().item()
             # 정책이 한 지점에 주차하거나 클램프 한계에 붙는 축퇴 행동 감지용
             log["env0/theta_deg"] = math.degrees(env._sph_theta[0].item())
             log["env0/phi_deg"]   = math.degrees(env._sph_phi[0].item())
@@ -309,6 +341,9 @@ def main() -> int:
                 log["episode/mean_coverage_binary"] = float(np.mean(done_covs_bin[-20:]))
                 log["episode/mean_length"]   = float(np.mean(done_lens[-20:]))
                 log["episode/success_rate"]  = float(np.mean(done_term[-20:]))
+                log["episode/count"]         = n_ep
+                log["episode/per_object"]    = ep_per_obj
+                log["episode/n_objects"]     = getattr(env, "_n_mesh_objects", 1)
                 # 평균만 보면 "일부 에피소드는 물체를 아예 못 찾는" 이봉 구조를
                 # 놓친다 — 9.3시간 런 분석에서 미결로 남았던 질문.
                 if wandb is not None:

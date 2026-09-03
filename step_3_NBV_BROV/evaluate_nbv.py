@@ -43,9 +43,10 @@ from pathlib import Path
 from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="step_3 NBV 정책 평가")
-parser.add_argument("--policies", type=str, default="random,hold,orbit",
-                    help="쉼표 구분. 체크포인트 경로 또는 random/hold/orbit "
-                         "(hold=액션 0, orbit=최대 속도 방위각 공전)")
+parser.add_argument("--policies", type=str, default="random,hold,orbit,approach",
+                    help="쉼표 구분. 체크포인트 경로 또는 random/hold/orbit/approach "
+                         "(hold=액션 0, orbit=최대 속도 방위각 공전, "
+                         "approach=psi 하한까지 접근 후 고착 — 정규화 누수 회귀 테스트)")
 parser.add_argument("--num_envs", type=int, default=16)
 parser.add_argument("--num_episodes", type=int, default=48,
                     help="정책당 평가 에피소드 수")
@@ -57,6 +58,15 @@ parser.add_argument("--ceiling", action="store_true",
                     help="상한 측정 모드: coverage 종료를 비활성화(임계값 1.1)해서\n"
                          "에피소드가 끝까지 가도록 하고, 결정별 coverage 포화\n"
                          "곡선을 얻는다. 학습으로 얻을 여지가 있는지 판단하는 근거")
+parser.add_argument("--mesh_pool", type=str, default=None,
+                    help="메쉬 풀 manifest 경로. 홀드아웃 평가(= 배포 리허설)에 쓴다")
+parser.add_argument("--mesh_pool_limit", type=int, default=0)
+parser.add_argument("--mesh_pool_offset", type=int, default=0,
+                    help="풀 선택 창을 회전시킨다. 한 실행에서 보는 물체는 "
+                         "min(num_envs, 풀)개뿐이라 풀 전체를 훑으려면 여러 번 필요")
+parser.add_argument("--mesh_pool_split", type=str, default="holdout",
+                    choices=("train", "holdout", "all"),
+                    help="기본 holdout — 수조 표적은 정의상 미학습 물체다")
 parser.add_argument("--stochastic", action="store_true",
                     help="체크포인트 정책을 greedy(tanh(mu)) 대신 샘플링으로 실행")
 AppLauncher.add_app_launcher_args(parser)
@@ -73,176 +83,19 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from envs.env_cfg import NBVBROVEnvCfg
 from envs.env import NBVBROVEnv
-from algorithm.algo_nbv_continuous import Actor
 
 
-def _quat_angle(q_a: torch.Tensor, q_b: torch.Tensor) -> torch.Tensor:
-    """두 쿼터니언 사이 회전각 [rad]. 부호 모호성을 없애려 |dot|을 쓴다."""
-    dot = (q_a * q_b).sum(-1).abs().clamp(max=1.0)
-    return 2.0 * torch.acos(dot)
-
-
-class Policy:
-    """액션 생성기. 환경 난수 스트림을 오염시키지 않는 것이 핵심 계약."""
-
-    def __init__(self, name: str, env, device, seed: int, stochastic: bool):
-        self.name = name
-        self.kind = "ckpt"
-        self._device = device
-        # 환경과 분리된 Generator — 공정 비교의 전제(모듈 docstring 참조)
-        self._gen = torch.Generator(device=device).manual_seed(seed)
-        self._stochastic = stochastic
-
-        if name in ("random", "hold", "orbit"):
-            self.kind = name
-            self.actor = None
-            return
-
-        ckpt = torch.load(name, map_location=device)
-        cfg = env.cfg
-        self.actor = Actor(
-            img_ch=2, scalar_dim=3, action_dim=cfg.action_space,
-            H=cfg.visual.h, W=cfg.visual.w,
-        ).to(device)
-        self.actor.load_state_dict(ckpt["actor"])
-        self.actor.eval()
-        self.trained_iters = ckpt.get("it", -1)
-
-    @torch.no_grad()
-    def act(self, obs, n_env: int, a_dim: int) -> torch.Tensor:
-        if self.kind == "hold":
-            return torch.zeros(n_env, a_dim, device=self._device)
-        if self.kind == "orbit":
-            # 방위각만 최대 속도로 — step_1의 Manual Orbit 대응
-            a = torch.zeros(n_env, a_dim, device=self._device)
-            a[:, 0] = 1.0
-            return a
-        if self.kind == "random":
-            return torch.rand(
-                (n_env, a_dim), generator=self._gen, device=self._device
-            ) * 2.0 - 1.0
-        if self._stochastic:
-            a, _u, _lp, _e = self.actor.sample(
-                obs["vox_actor"], obs["img_semantic"], obs["extra_info"])
-            return a
-        return self.actor.greedy(
-            obs["vox_actor"], obs["img_semantic"], obs["extra_info"])
-
-
-def run_policy(env, policy: Policy, n_episodes: int, seed: int, out_dir: Path) -> dict:
-    """한 정책을 n_episodes 만큼 돌리고 에피소드/스텝 기록을 남긴다."""
-    device = env.device
-    E, A = env.num_envs, env.cfg.action_space
-
-    # 정책마다 동일 에피소드를 보장하기 위해 환경 난수를 되심는다
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    obs, _ = env.reset()
-
-    ep_rows: list[dict] = []
-    step_rows: list[dict] = []
-    ep_len = torch.zeros(E, dtype=torch.long, device=device)
-    ep_ret = torch.zeros(E, device=device)
-    decision = 0
-
-    while len(ep_rows) < n_episodes:
-        act = policy.act(obs, E, A)
-
-        # 목표는 액션 적용 직후 갱신되므로, 추종 오차를 재려면 step() **이후**의
-        # 목표(= 이번 결정의 목표)와 step() 이후의 실제 pose를 비교해야 한다.
-        obs, reward, terminated, truncated, _ = env.step(act)
-        decision += 1
-        ep_len += 1
-        ep_ret += reward
-
-        p_err = torch.norm(
-            env._robot.data.root_pos_w - env._guidance.p_target, dim=-1)
-        q_err = _quat_angle(env._robot.data.root_quat_w, env._guidance.q_target)
-        cov_now = env._coverage_for_reward()
-
-        step_rows.append(dict(
-            decision=decision,
-            pos_err_m=p_err.mean().item(),
-            pos_err_max_m=p_err.max().item(),
-            att_err_deg=math.degrees(q_err.mean().item()),
-            coverage=cov_now.mean().item(),
-            coverage_binary=env.curr_coverage.mean().item(),
-            psi=env._sph_psi.mean().item(),
-            phi_deg=math.degrees(env._sph_phi.mean().item()),
-            # 클램프 한계에 붙어 있는 env 비율 — 포화 여부의 직접 지표
-            psi_at_max=(env._sph_psi > env.cfg.psi_max - 1e-3).float().mean().item(),
-            phi_at_max=(env._sph_phi > env.cfg.phi_max - 1e-3).float().mean().item(),
-            action_abs_mean=act.abs().mean().item(),
-            # tanh 포화: |a|가 1에 붙어 있으면 mu가 발산했다는 신호
-            action_saturated=(act.abs() > 0.99).float().mean().item(),
-        ))
-
-        done = terminated | truncated
-        for eid in done.nonzero(as_tuple=True)[0].tolist():
-            if len(ep_rows) >= n_episodes:
-                break
-            covq = env.terminal_coverage_q[eid].item()
-            covb = env.terminal_coverage[eid].item()
-            ep_rows.append(dict(
-                episode=len(ep_rows),
-                outcome="success" if terminated[eid].item() else "timeout",
-                length=int(ep_len[eid].item()),
-                ep_return=ep_ret[eid].item(),
-                coverage=covq,
-                coverage_binary=covb,
-                # quality/binary 비 → 평균 관측거리 (Beer-Lambert 역산)
-                mean_obs_dist_m=(
-                    1.0 - math.log(max(covq / covb, 1e-6)) / env._quality_mu[eid].item()
-                ) if covb > 1e-6 else float("nan"),
-                gt_never=env._diag_gt_never[eid].item(),
-                gt_partial=env._diag_gt_partial[eid].item(),
-                gt_full=env._diag_gt_full[eid].item(),
-            ))
-            ep_len[eid] = 0
-            ep_ret[eid] = 0.0
-
-    tag = Path(policy.name).stem if policy.kind == "ckpt" else policy.name
-    out_dir.mkdir(parents=True, exist_ok=True)
-    _write_csv(out_dir / f"{tag}_episodes.csv", ep_rows)
-    _write_csv(out_dir / f"{tag}_steps.csv", step_rows)
-
-    def m(key, rows=ep_rows):
-        vals = [r[key] for r in rows if isinstance(r[key], float) and math.isfinite(r[key])]
-        return float(np.mean(vals)) if vals else float("nan")
-
-    return dict(
-        policy=tag,
-        episodes=len(ep_rows),
-        success_rate=float(np.mean([r["outcome"] == "success" for r in ep_rows])),
-        coverage=m("coverage"),
-        coverage_std=float(np.std([r["coverage"] for r in ep_rows])),
-        coverage_binary=m("coverage_binary"),
-        mean_obs_dist_m=m("mean_obs_dist_m"),
-        gt_never=m("gt_never"), gt_partial=m("gt_partial"), gt_full=m("gt_full"),
-        mean_length=float(np.mean([r["length"] for r in ep_rows])),
-        mean_return=m("ep_return"),
-        # 제어 성능 (step_3 고유)
-        pos_err_m=m("pos_err_m", step_rows),
-        att_err_deg=m("att_err_deg", step_rows),
-        psi_at_max=m("psi_at_max", step_rows),
-        phi_at_max=m("phi_at_max", step_rows),
-        action_saturated=m("action_saturated", step_rows),
-    )
-
-
-def _write_csv(path: Path, rows: list[dict]) -> None:
-    if not rows:
-        return
-    import csv
-    with open(path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        w.writeheader()
-        w.writerows(rows)
+from eval_core import Policy, run_policy, _max_len, _cov_at
 
 
 def main() -> int:
     cfg = NBVBROVEnvCfg()
     cfg.scene.num_envs = args.num_envs
+    if args.mesh_pool:
+        cfg.mesh_pool_manifest = args.mesh_pool
+        cfg.mesh_pool_limit = args.mesh_pool_limit
+        cfg.mesh_pool_split = args.mesh_pool_split
+        cfg.mesh_pool_offset = args.mesh_pool_offset
     # 평가는 고정 난이도에서 — 커리큘럼이 돌면 정책 간 종료 기준이 달라져
     # 비교 자체가 성립하지 않는다.
     cfg.curriculum_enabled = False
@@ -282,11 +135,20 @@ def main() -> int:
 def _report(results: list[dict], out_dir: Path, cfg) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "summary.json", "w") as f:
-        json.dump(results, f, indent=2)
+        # 궤적은 요약이 아니라 원시 데이터라 CSV 쪽에 이미 있다 — json에는
+        # 결정별 평균 곡선만 압축해 남긴다.
+        json.dump([
+            {**{k: v for k, v in r.items() if k != "cov_curves"},
+             "cov_q_by_decision": [round(_cov_at(r["cov_curves"], k, 0), 4)
+                                   for k in range(1, _max_len(r) + 1)],
+             "cov_bin_by_decision": [round(_cov_at(r["cov_curves"], k, 1), 4)
+                                     for k in range(1, _max_len(r) + 1)]}
+            for r in results
+        ], f, indent=2)
 
     print("\n" + "=" * 100)
     print(f"{'정책':>22s} {'cov_q':>7s} {'cov_bin':>8s} {'성공률':>7s} {'길이':>6s} "
-          f"{'거리(m)':>8s} {'gt_full':>8s} {'추종오차(m)':>11s} {'psi포화':>8s} {'액션포화':>9s}")
+          f"{'psi평균':>8s} {'gt_full':>8s} {'추종오차(m)':>11s} {'psi포화':>8s} {'액션포화':>9s}")
     print("-" * 100)
     for r in results:
         print(f"{r['policy']:>22s} {r['coverage']:>7.3f} {r['coverage_binary']:>8.3f} "
@@ -295,18 +157,68 @@ def _report(results: list[dict], out_dir: Path, cfg) -> None:
               f"{r['pos_err_m']:>11.3f} {r['psi_at_max']:>8.2f} {r['action_saturated']:>9.2f}")
     print("-" * 100)
 
+    # ── 같은 결정 수에서의 비교 ──────────────────────────────────────────
+    # 종료 시점 coverage끼리 비교하면 "일찍 성공한 정책"이 손해를 본다
+    # (성공하면 누적이 멈추고, 실패하는 정책은 25결정까지 계속 쌓는다).
+    # 판정의 1차 근거는 반드시 이 표여야 한다.
+    ks = [k for k in (3, 5, 7, 10, 15, 20, 25) if k <= max(_max_len(r) for r in results)]
+    if ks:
+        print("\n[동일 결정 수 비교] cov_q / cov_bin — 종료된 에피소드는 종료값으로 동결")
+        print(f"{'정책':>22s}" + "".join(f"{'@'+str(k):>16s}" for k in ks))
+        for r in results:
+            row = "".join(f"{_cov_at(r['cov_curves'], k, 0):>8.3f}"
+                          f"{_cov_at(r['cov_curves'], k, 1):>8.3f}" for k in ks)
+            print(f"{r['policy']:>22s}{row}")
+
     base = next((r for r in results if r["policy"] == "random"), None)
-    ckpts = [r for r in results if r["policy"] not in ("random", "hold", "orbit")]
+    ckpts = [r for r in results
+             if r["policy"] not in ("random", "hold", "orbit", "approach")]
+    orbit = next((r for r in results if r["policy"] == "orbit"), None)
+    appr = next((r for r in results if r["policy"] == "approach"), None)
+    if orbit and appr:
+        d = appr["coverage"] - orbit["coverage"]
+        print(f"\n[정규화 누수 점검] approach {appr['coverage']:.3f} vs orbit "
+              f"{orbit['coverage']:.3f} ({d:+.3f})")
+        print("  approach는 psi 하한에 붙어만 있는 정책이다. 이것이 orbit을 넘으면")
+        print("  '가까이 가기'가 '돌아보기'를 대체할 수 있다는 뜻 = voxel별 정규화 누수."
+              if d > 0 else
+              "  → 근접만으로는 공전을 이기지 못한다 = voxel별 정규화가 유지되고 있다.")
     if base and ckpts:
+        # 비교 지점: 학습 정책의 평균 성공 길이 — "정책이 과제를 끝냈다고
+        # 판단한 시점"이라 정책에 유리하지도 불리하지도 않은 자연스러운 기준.
         print("\n[판정] 학습 정책 vs 랜덤")
         for r in ckpts:
-            d = r["coverage"] - base["coverage"]
-            rel = d / base["coverage"] * 100 if base["coverage"] else float("nan")
-            verdict = ("랜덤보다 유의하게 우수" if d > 2 * base["coverage_std"] else
-                       "랜덤과 구분 불가 — 시점 선택을 배우지 못했다는 뜻")
-            print(f"  {r['policy']}: cov {r['coverage']:.3f} vs 랜덤 {base['coverage']:.3f} "
-                  f"({d:+.3f}, {rel:+.1f}%) → {verdict}")
-            print(f"    (랜덤 에피소드 표준편차 {base['coverage_std']:.3f} 기준)")
+            k = int(round(r.get("mean_success_length", float("nan"))
+                          if math.isfinite(r.get("mean_success_length", float("nan")))
+                          else r["mean_length"]))
+            k = max(1, k)
+            a, b = _cov_at(r["cov_curves"], k, 0), _cov_at(base["cov_curves"], k, 0)
+            d = a - b
+            rel = d / b * 100 if b else float("nan")
+            sig = d > 2 * base["coverage_std"]
+            print(f"  ① 효율 — 결정 {k}회 시점 cov_q {a:.3f} vs 랜덤 {b:.3f} "
+                  f"({d:+.3f}, {rel:+.1f}%) → "
+                  f"{'랜덤보다 유의하게 우수' if sig else '랜덤과 구분 불가'}")
+            print(f"     성공률 {r['success_rate']:.2f} vs 랜덤 {base['success_rate']:.2f}, "
+                  f"성공까지 {r.get('mean_success_length', float('nan')):.1f}결정 vs "
+                  f"{base.get('mean_success_length', float('nan')):.1f}결정")
+            print(f"     (랜덤 에피소드 표준편차 {base['coverage_std']:.3f} 기준)")
+
+            # ② 이득의 출처: 표면을 더 봤는가(시점 선택) vs 가까이 갔는가(근접)
+            ab, bb = _cov_at(r["cov_curves"], k, 1), _cov_at(base["cov_curves"], k, 1)
+            ob = _cov_at(orbit["cov_curves"], k, 1) if orbit else float("nan")
+            ratio = r["coverage"] / r["coverage_binary"] if r["coverage_binary"] else float("nan")
+            print(f"  ② 이득의 출처 — 같은 시점 cov_bin(관측 표면 비율) "
+                  f"{ab:.3f} vs 랜덤 {bb:.3f} / orbit {ob:.3f}")
+            if math.isfinite(ab) and math.isfinite(ob) and ab <= ob + 0.02:
+                print(f"     → 표면은 orbit 이상으로 보지 못했다. cov_q 이득은 "
+                      f"**근접**(품질비 {ratio:.2f}, psi 포화)에서 온 것이다.")
+                print(f"     cov_q는 Q_sat=exp(-mu*psi_min)이라는 **전역 상수**로만 "
+                      f"정규화돼 있어, psi_min보다 가까운 voxel은 1을 넘는 점수를 받고")
+                print(f"     그 초과분이 '못 본 voxel'을 상쇄한다 — voxel별 정규화(A)로 "
+                      f"막아야 하는 바로 그 경로다.")
+            else:
+                print(f"     → 표면 관측 자체가 늘었다 = 시점 선택을 배웠다는 증거.")
 
     worst = max(results, key=lambda r: r["pos_err_m"]) if results else None
     if worst:

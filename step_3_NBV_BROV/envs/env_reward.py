@@ -80,7 +80,10 @@ class EnvRewardMixin:
             (proj_v_int < H)
         )
 
-        depth_img = self._camera.data.output["distance_to_camera"]
+        # ②a: 로봇이 **믿는** depth. 오염이 꺼져 있으면 항등이다.
+        depth_img = self._corruptor.depth(
+            self._camera.data.output["distance_to_camera"]
+        )
         if depth_img.dim() == 4:
             depth_img = depth_img.squeeze(-1)
         H, W = depth_img.shape[1], depth_img.shape[2]
@@ -154,18 +157,28 @@ class EnvRewardMixin:
         )
 
     def _compute_coverage_q(self) -> torch.Tensor:
-        """GT surface voxel에 대한 품질 가중 coverage (raw, 상한 = Q_sat)."""
-        count = (self._quality_vol * self._surf_vol.float()).sum(dim=(1, 2, 3))
+        """GT surface voxel의 **voxel별 정규화** 품질 평균 — (A), 상한 1.0.
+
+            coverage_q = (1/N) Σ_v  min(Q_vol(v) / q*(v), 1)      v ∈ GT surface
+
+        정규화를 **합산 전에** voxel마다 적용하는 것이 핵심이다. 전역 상수로
+        나누고 나중에 clamp하면 1을 넘는 voxel의 초과분이 못 본 voxel을
+        상쇄해 버린다(`env.py::_update_q_star()`의 실측 근거 참조).
+        clamp를 voxel 단위로 두면 어떤 voxel도 다른 voxel의 결손을 대신
+        갚아줄 수 없다.
+        """
+        q_norm = (self._quality_vol / self._q_star).clamp(0.0, 1.0)
+        count = (q_norm * self._surf_vol.float()).sum(dim=(1, 2, 3))
         return count / self._total_surf_voxels
 
     def _coverage_for_reward(self) -> torch.Tensor:
         """보상·종료·커리큘럼이 공통으로 쓰는 coverage (항상 0~1 정규화).
 
-        quality 모드에서는 `coverage_q / Q_sat`을 돌려준다 — 이 정규화 덕분에
-        `coverage_terminal`이 step_1과 같은 "달성 가능 상한 대비 비율" 의미를
-        유지하고, binary 기준으로 실측 보정해 둔 k_c/c_step/coverage_bonus가
-        스케일 변경 없이 그대로 유효하다.
+        quality 모드의 `coverage_q`는 (A) 정규화로 이미 0~1이므로 그대로 쓴다.
+        `coverage_terminal`은 "달성 가능 상한 대비 비율"이라는 의미를 유지하고,
+        binary 기준으로 실측 보정해 둔 k_c/c_step/coverage_bonus도 스케일
+        변경 없이 그대로 유효하다.
         """
         if not self.cfg.use_quality_coverage:
             return self.curr_coverage
-        return (self.curr_coverage_q / self._quality_Q_sat).clamp(0.0, 1.0)
+        return self.curr_coverage_q

@@ -50,8 +50,40 @@ class UWCamera(Camera):
         self._backscatter_coeff_t = torch.from_numpy(self._backscatter_coeff_np.copy()).to(device)
 
     def update(self, dt: float, force_recompute: bool = False):
+        """센서 타임스탬프/플래그만 갱신한다. **수중 렌더는 여기서 하지 않는다.**
+
+        왜 (2026-09-03): `scene.update()`는 DirectRLEnv의 decimation 루프 안에서
+        **물리 서브스텝마다** 불린다(step_3는 decimation=500). 반면 실제 GPU
+        렌더는 `sim.render_interval=500`이라 결정당 1회뿐이라, 여기서 무조건
+        `_apply_uw_render()`를 부르면 **같은 프레임에 대해** annotator fetch와
+        Warp 커널을 499번 더 돌리게 된다. 2026-09-03 프로파일에서 이 경로가
+        전체 wall time의 **75.1%**(12,056호출/49.9초)를 먹고 있었다.
+
+        타이머(`update_period`) 기반으로 거르지 않는 이유: 센서 타임스탬프는
+        env마다 리셋 시점에 0으로 돌아가는데 렌더 주기는 전역 스텝 카운터라,
+        둘의 위상이 어긋나면 한 결정만큼 낡은 프레임을 융합할 수 있다. 이
+        프로젝트는 이미 "카메라 pose가 스폰 값에 고정돼 TSDF가 아무것도 융합하지
+        않은" 같은 계열의 버그를 겪었다. 그래서 **환경이 결정당 한 번 명시적으로
+        `refresh_uw()`를 부르는** 구조로 둔다 — 언제 도는지가 코드에 드러난다.
+
+        `.data`에 손대지 않는 것도 의도적이다. 그 접근 자체가
+        `_update_outdated_buffers()`(annotator fetch)를 유발하므로, 여기서
+        `uw_rgb` 존재 여부를 확인하는 것만으로도 서브스텝마다 비용이 든다.
+        대신 값싼 로컬 플래그로 최초 1회만 보장한다.
+        """
         super().update(dt, force_recompute=force_recompute)
+        if force_recompute or not getattr(self, "_uw_ready", False):
+            self._apply_uw_render()
+            self._uw_ready = True
+
+    def refresh_uw(self) -> None:
+        """수중 렌더를 지금 한 번 돌린다 — 환경이 결정당 1회 호출한다.
+
+        `env.py::_get_rewards()` 앞과 `_reset_idx()`의 이미지 버퍼 시딩 앞에서
+        불린다. 그 두 지점이 `uw_rgb`를 읽는 유일한 곳이다.
+        """
         self._apply_uw_render()
+        self._uw_ready = True
 
     def _apply_uw_render(self):
         raw_rgba = self.data.output.get("rgba")

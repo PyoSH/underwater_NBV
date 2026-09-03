@@ -85,12 +85,29 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         # `use_mesh_pool()`이 replicate_physics=False도 함께 설정한다.
         if cfg.mesh_pool_manifest:
             from envs.mesh_pool import load_mesh_pool
-            cfg.scene.use_mesh_pool(load_mesh_pool(
+            # 풀 크기를 env 수로 제한하는 것이 **기본**이다.
+            #
+            # IsaacLab의 `spawn_multi_usd_file()`은 (1) 리스트의 **모든** 자산을
+            # 템플릿 프림으로 먼저 스폰한 뒤 (2) env i에 `pool[i % N]`을 복사한다.
+            # 즉 초과분은 학습에 한 번도 등장하지 않으면서 startup에 USD 로딩
+            # 비용만 얹는다(GSO 700개 = 14 GB). 또한 이 배정은 씬 생성 시
+            # **한 번**뿐이라, 학습 중 실제로 보는 물체 수 = min(num_envs, 풀).
+            limit = cfg.mesh_pool_limit or cfg.scene.num_envs
+            _pool = load_mesh_pool(
                 cfg.mesh_pool_manifest,
                 filter_flat=cfg.mesh_pool_filter_flat,
                 min_aspect=cfg.mesh_pool_min_aspect,
-                limit=cfg.mesh_pool_limit,
-            ))
+                limit=limit,
+                offset=cfg.mesh_pool_offset,
+                split=cfg.mesh_pool_split,
+                n_holdout=cfg.mesh_pool_holdout,
+            )
+            cfg.scene.use_mesh_pool(_pool)
+            # 학습이 실제로 만나는 물체 종류 수. env i는 `pool[i % N]`을 씬
+            # 생성 시 한 번 배정받고 끝이므로 이 값이 다양성의 상한이다.
+            self._n_mesh_objects = min(len(_pool), cfg.scene.num_envs)
+        else:
+            self._n_mesh_objects = 1   # 단일 rock — 모든 env가 같은 물체
 
         # 소나 비활성화도 씬 생성 전에 결정해야 한다(센서가 여기서 스폰됨).
         # 관측에 안 쓰이면서 카메라의 32배 픽셀을 렌더링하므로 기본 off —
@@ -195,23 +212,38 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         self._prev_coverage_norm = torch.zeros(self.num_envs, device=self.device)
         self.curr_coverage_q = torch.zeros(self.num_envs, device=self.device)
         self.terminal_coverage_q = torch.zeros(self.num_envs, device=self.device)
-        # μ/Q_sat은 카메라 실제 감쇠계수에서 유도한다 — `_sync_quality_water()`.
+        # ②a 오염기. `cfg.corruption.enabled=False`면 모든 경로가 항등이라
+        # 학습 경로의 동작은 변하지 않는다.
+        from envs.depth_corruption import DepthCorruptor
+        self._corruptor = DepthCorruptor(cfg.corruption, self.num_envs, self.device)
+
+        # μ는 카메라 실제 감쇠계수에서 유도한다 — `_sync_quality_water()`.
         # 여기서는 형태만 잡아두고 첫 리셋에서 실제 값으로 덮인다.
         self._quality_mu = torch.full((self.num_envs,), 0.1, device=self.device)
-        self._quality_Q_sat = torch.ones(self.num_envs, device=self.device)
+        # **voxel별 달성 가능 최대 품질** q*(v) — (A) 정규화의 분모.
+        # 전역 스칼라 Q_sat=exp(-μ·psi_min)을 대체한다(`_update_q_star()` 참조).
+        self._q_star = torch.ones(self.num_envs, Nx, Ny, Nz, device=self.device)
         # GT surface voxel의 품질 분포 진단 (step_1 diag/gt_* 대응).
         # binary coverage로는 안 보이는 "봤지만 멀어서 흐릿함"을 드러낸다.
         self._diag_gt_never = torch.zeros(self.num_envs, device=self.device)
         self._diag_gt_partial = torch.zeros(self.num_envs, device=self.device)
         self._diag_gt_full = torch.zeros(self.num_envs, device=self.device)
-        # voxel 중심 오프셋 (원점 기준 격자, 리셋 무관 상수)
+        # voxel **중심** 오프셋 (원점 기준 격자, 리셋 무관 상수).
+        # `+ voxel_size/2`가 필요하다 — 인덱스 i의 voxel이 덮는 구간은
+        # [origin+i·vox, origin+(i+1)·vox)이므로 중심은 origin+(i+0.5)·vox다.
+        # TSDF 적분(`env_reward.py::_vox_local`)은 처음부터 이 보정을 갖고
+        # 있었는데 품질 계산 쪽만 빠져 있어 반 voxel 어긋나 있었다. voxel이
+        # 10 cm로 커지면서 편차가 5 cm가 되므로 여기서 맞춘다.
         gx, gy, gz = torch.meshgrid(
             torch.arange(Nx, device=self.device),
             torch.arange(Ny, device=self.device),
             torch.arange(Nz, device=self.device),
             indexing="ij",
         )
-        self._voxel_offset = torch.stack([gx, gy, gz], dim=-1).float() * cfg.tsdf.voxel_size
+        self._voxel_offset = (
+            torch.stack([gx, gy, gz], dim=-1).float() * cfg.tsdf.voxel_size
+            + cfg.tsdf.voxel_size / 2.0
+        )
 
         self._mass_scale = torch.ones(self.num_envs, 1, device=self.device)
 
@@ -373,7 +405,12 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         #
         # `_apply_action()`의 구면→직교 변환(offset = [ψsinφcosθ, ψsinφsinθ,
         # ψcosφ])의 정확한 역변환.
-        rel = self._robot.data.root_pos_w - self.rock_pos          # (N,3)
+        # ②a: pose 드리프트가 켜져 있으면 로봇이 **믿는** 위치를 쓴다. 융합과
+        # 같은 pose를 써야 "관측과 보상이 같은 pose를 가리킨다"는 아래 원칙이
+        # 오염 하에서도 유지된다 — 관측만 참값이면 정책은 실기에 없는 정보를
+        # 공짜로 받게 되고, ②a가 실제보다 관대한 시험이 된다.
+        rel = (self._robot.data.root_pos_w
+               + self._corruptor.pos_offset) - self.rock_pos        # (N,3)
         psi_actual = rel.norm(dim=-1).clamp_min(1e-6)
         phi_actual = torch.acos((rel[:, 2] / psi_actual).clamp(-1.0, 1.0))
         theta_actual = torch.atan2(rel[:, 1], rel[:, 0]) % (2 * math.pi)
@@ -427,8 +464,7 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
             # ch2를 이진 occupied가 아니라 **연속 관측 품질**로 준다 — 정책이
             # "봤다/못 봤다"뿐 아니라 "얼마나 가까이서 봤나"를 구분할 수 있어야
             # 거리를 줄이는 행동을 학습할 수 있다(step_1 ch2와 동일).
-            q_sat = self._quality_Q_sat.view(-1, 1, 1, 1)
-            ch2 = (self._quality_vol / q_sat).clamp(0.0, 1.0)
+            ch2 = (self._quality_vol / self._q_star).clamp(0.0, 1.0)
         else:
             ch2 = (observed & (self._tsdf_vol <= 0)).float()
         return torch.stack([
@@ -491,11 +527,11 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
             )
 
     def _sync_quality_water(self, env_ids: torch.Tensor) -> None:
-        """μ와 Q_sat을 카메라의 실제 감쇠계수에서 유도한다.
+        """μ를 카메라의 실제 감쇠계수에서 유도한다.
 
-        μ = atten_coeff의 채널 평균, Q_sat = exp(-μ·psi_min) = 허용된 최근접
-        거리에서의 품질 = 달성 가능한 coverage_q 상한. 둘을 항상 함께 유도해야
-        `coverage_q / Q_sat`이 "상한 대비 비율"이라는 의미를 유지한다.
+        μ = atten_coeff의 채널 평균. 렌더러가 실제로 쓰는 감쇠와 품질 모델의
+        감쇠가 어긋나면 "보상이 재는 것"과 "화면에 보이는 것"이 달라지므로
+        같은 출처에서 유도한다.
 
         `_atten_coeff_np`는 (N,3) numpy로 카메라 생성 시 cfg에서 초기화되므로
         첫 render 이전에도 안전하다(`_atten_coeff_t`는 None일 수 있음).
@@ -504,7 +540,54 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         mu_np = self._camera._atten_coeff_np[ids].mean(axis=1)
         mu = torch.from_numpy(mu_np).to(self.device).float()
         self._quality_mu[env_ids] = mu
-        self._quality_Q_sat[env_ids] = torch.exp(-mu * self.cfg.psi_min)
+
+    def _update_q_star(self, env_ids: torch.Tensor) -> None:
+        """voxel별 달성 가능 최대 품질 q*(v)를 갱신한다 — (A) 정규화의 분모.
+
+            q*(v) = exp(−μ · max(psi_min − r_v, d_near)),   r_v = |v − 물체중심|
+
+        왜 전역 Q_sat이 아니라 voxel별인가
+        ----------------------------------
+        기존 정규화는 `Q_sat = exp(−μ·psi_min)`이라는 **전역 상수**였다. psi는
+        물체 *중심*까지의 거리라, 카메라 쪽을 향한 표면 voxel은 psi_min보다
+        가깝고 따라서 품질비가 1을 넘는다. 합산이 clamp보다 먼저 일어나므로
+        그 초과분이 **한 번도 못 본 voxel을 상쇄**한다 — 2026-09-02 Stage 2
+        평가에서 실측으로 확인됐다(정책의 cov_q/cov_bin = 1.083, psi가 하한
+        1.02에 고착, 관측 표면량은 고정 orbit과 동일). 즉 "가까이 붙기"가
+        "돌아보기"를 대체할 수 있는 경로가 열려 있었다.
+
+        voxel마다 **그 voxel을 가장 잘 볼 수 있는 자세에서의 품질**로 나누면
+        모든 voxel의 상한이 1로 같아진다. 상한 1을 받으려면 각 voxel을 각각
+        가까이서 봐야 하고, 그러려면 물체 주위를 돌아야 한다 — 근접이
+        시점 선택을 대체할 수 없게 된다.
+
+        d_near는 하한 가드다. r_v가 psi_min에 가까운 voxel(큰 물체의 근측면)은
+        `psi_min − r_v → 0`이 되어 "거리 0에서 봐야 만점"이라는 달성 불가능한
+        분모가 되기 때문이다. DP 추종오차가 0.18 m 수준이라 그보다 가까운
+        거리는 실제로 만들 수 없다.
+
+        **수질 불변**: 정규화값이 `exp(−μ(d − d_best))`이므로 최댓값 1.0은 어떤
+        μ에서도 달성 가능하다. 임계값·커리큘럼·성공률의 눈금이 수질과 무관해진다
+        (난이도가 같아진다는 뜻은 아니다 — μ가 크면 거리 초과의 벌이 지수적으로
+        커지는데 그건 의도된 물리다).
+        """
+        cfg = self.cfg
+        centers = (
+            self._vol_origin[env_ids][:, None, None, None, :]   # (n,1,1,1,3)
+            + self._voxel_offset[None]                          # (1,Nx,Ny,Nz,3)
+        )
+        # 볼륨은 `_voxelize_gt_mesh()`가 물체 bbox 중심에 맞춰 놓으므로
+        # 물체중심 = origin + (vol_dim·voxel)/2 이다.
+        half = torch.tensor(
+            [d * cfg.tsdf.voxel_size / 2.0 for d in cfg.tsdf.vol_dim],
+            device=self.device,
+        )
+        obj_center = self._vol_origin[env_ids] + half            # (n,3)
+        r_v = torch.norm(centers - obj_center[:, None, None, None, :], dim=-1)
+
+        d_best = (cfg.psi_min - r_v).clamp(min=cfg.quality_d_near)
+        mu = self._quality_mu[env_ids].view(-1, 1, 1, 1)
+        self._q_star[env_ids] = torch.exp(-mu * d_best)
 
     def _update_quality_diagnostics(self, env_ids: Sequence[int]) -> None:
         """GT surface voxel의 품질 분포를 never/partial/full로 집계한다.
@@ -518,9 +601,7 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         """
         idx = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
         gt = self._surf_vol[idx]                                    # (n,Nx,Ny,Nz)
-        q_soft = (
-            self._quality_vol[idx] / self._quality_Q_sat[idx].view(-1, 1, 1, 1)
-        ).clamp(0.0, 1.0)
+        q_soft = (self._quality_vol[idx] / self._q_star[idx]).clamp(0.0, 1.0)
         n_gt = gt.sum(dim=(1, 2, 3)).float().clamp(min=1.0)
         dims = (1, 2, 3)
         self._diag_gt_never[idx] = ((q_soft == 0.0) & gt).sum(dim=dims).float() / n_gt
@@ -531,6 +612,15 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
 
     # ── 보상 ─────────────────────────────────────────────────────────────────
     def _get_rewards(self) -> torch.Tensor:
+        # 수중 렌더를 결정당 **여기서 한 번** 돌린다. 센서의 `update()`는
+        # 서브스텝마다 불리므로 거기서 돌리면 같은 프레임을 499번 더 계산한다
+        # (2026-09-03 프로파일: 전체의 75.1%). 이 지점은 decimation 루프가
+        # 끝난 직후, 즉 그 결정의 렌더가 끝난 뒤라 프레임이 최신이다.
+        self._camera.refresh_uw()
+
+        # pose 드리프트는 결정 단위 random walk이므로 융합 **직전**에 한 칸
+        # 전진시킨다. `_get_rewards()`는 env-step당 정확히 한 번 불린다.
+        self._corruptor.step()
         self._integrate_depth()
 
         # binary는 quality 모드에서도 항상 계산한다 — 로그/비교용이고, 2026-08-26
@@ -707,6 +797,8 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         for _ in range(5):
             sim.render()
 
+        # 최초 `env.reset()`에는 앞선 `_get_rewards()`가 없으므로 여기서 보장한다.
+        self._camera.refresh_uw()
         raw_rgb = self._camera.data.output["uw_rgb"][env_ids_t, :, :, :3]
         current_obs = torch.mean(raw_rgb.float(), dim=-1) / 255.0
         current_depth = self._camera.data.output["distance_to_camera"][env_ids_t].squeeze(-1)
@@ -726,13 +818,28 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         if cfg.jerlov_dr_enabled:
             self._randomize_water_params(env_ids_t)
 
-        # μ/Q_sat 동기화는 수질 랜덤화 **이후**여야 새 값이 반영된다.
-        # DR 여부와 무관하게 항상 호출한다 — step_1은 DR이 꺼지면 μ가 초기값
-        # 0.1에, Q_sat이 cfg의 0.80에 각각 머물러 서로 어긋났다(§13 알려진 불일치).
+        # μ 동기화는 수질 랜덤화 **이후**여야 새 값이 반영된다. DR 여부와
+        # 무관하게 항상 호출한다 — step_1은 DR이 꺼지면 μ가 초기값 0.1에 머물러
+        # 정규화 상수와 어긋났다(§13 알려진 불일치).
         if cfg.use_quality_coverage:
             self._sync_quality_water(env_ids_t)
 
         self._voxelize_gt_mesh(env_ids)
+
+        # 오염 상태(스케일·μ̂ 배율·드리프트)를 에피소드 단위로 새로 뽑는다.
+        self._corruptor.reset(env_ids_t)
+        if cfg.corruption.enabled:
+            # 로봇이 **믿는** 감쇠계수. 실제 렌더 감쇠는 그대로이므로
+            # "수질을 잘못 알고 있는 상태"가 된다.
+            self._quality_mu[env_ids_t] = (
+                self._quality_mu[env_ids_t] * self._corruptor.mu_factor[env_ids_t]
+            )
+
+        # q*는 μ(수질)와 `_vol_origin`(물체 위치)에 모두 의존하므로 **복셀화
+        # 이후**에 갱신해야 한다. 순서가 바뀌면 직전 에피소드의 물체 중심으로
+        # 정규화돼 보상이 조용히 틀어진다. μ̂ 교란도 이 앞에 와야 반영된다.
+        if cfg.use_quality_coverage:
+            self._update_q_star(env_ids_t)
 
     def _randomize_water_params(self, env_ids) -> None:
         import numpy as np

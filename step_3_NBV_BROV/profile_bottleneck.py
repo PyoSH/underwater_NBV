@@ -28,6 +28,10 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--num_envs", type=int, default=16)
+parser.add_argument("--mesh_pool", type=str, default=None,
+                    help="GSO manifest. 주지 않으면 단일 rock(163만 삼각형)이라 "
+                         "리셋 비용이 실제 학습(GSO 3k~48k)과 크게 다르다")
+parser.add_argument("--mesh_pool_split", type=str, default="train")
 parser.add_argument("--decisions", type=int, default=6,
                     help="측정할 정책 결정 수(리셋을 포함하려면 에피소드 길이 이상)")
 AppLauncher.add_app_launcher_args(parser)
@@ -118,6 +122,9 @@ def main() -> int:
     # 에피소드를 짧게 만들어 측정 구간 안에 **리셋이 반드시 포함**되게 한다
     cfg.episode_length_s = 3 * (cfg.sim.dt * cfg.decimation)
     cfg.curriculum_enabled = False
+    if args.mesh_pool:
+        cfg.mesh_pool_manifest = args.mesh_pool
+        cfg.mesh_pool_split = args.mesh_pool_split
 
     print(f"[prof] num_envs={args.num_envs} decimation={cfg.decimation} "
           f"(결정당 물리 서브스텝 {cfg.decimation}회), 에피소드=3결정")

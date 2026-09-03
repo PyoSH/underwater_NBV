@@ -29,6 +29,10 @@ def load_mesh_pool(
     min_aspect: float = 0.25,
     require_texture: bool = True,
     limit: int = 0,
+    offset: int = 0,
+    split: str = "all",
+    n_holdout: int = 91,
+    split_seed: int = 20260903,
 ) -> list[str]:
     """manifest에서 조건을 만족하는 USD 경로 목록을 돌려준다.
 
@@ -41,7 +45,18 @@ def load_mesh_pool(
         **휘도 변화(표면 무늬)**가 중요한데, 텍스처가 없으면 실루엣만 남아
         표면 관측이라는 과제가 성립하지 않는다.
     limit
-        0보다 크면 앞에서 그만큼만. 소규모 시험용.
+        0보다 크면 앞에서 그만큼만. 소규모 시험용. 분할 **이후**에 적용되므로
+        limit을 바꿔도 train/holdout 경계는 움직이지 않는다.
+    offset
+        선택 시작 위치를 이만큼 회전시킨다. `limit`이 env 수로 묶여 있어
+        한 번에 풀 전체를 볼 수 없으므로(아래 주의), offset을 옮겨가며
+        여러 번 돌리면 풀 전체를 훑을 수 있다. 홀드아웃 91개를 16 env로
+        평가하려면 offset 0,16,32,48,64,80으로 6회.
+    split
+        `"train"` / `"holdout"` / `"all"`. 수조 표적은 정의상 학습에 없던
+        물체이므로, 홀드아웃 평가가 곧 배포 리허설이다. 분할은 고정 시드
+        셔플로 결정론적이다 — 실행마다 경계가 달라지면 "홀드아웃"이라는 말이
+        의미를 잃는다.
 
     Raises
     ------
@@ -75,11 +90,47 @@ def load_mesh_pool(
             continue
         kept.append(str(usd))
 
+    n_filtered = len(kept)
+
+    # ── train / holdout 분할 ────────────────────────────────────────────
+    # manifest 순서는 알파벳순이라 그대로 자르면 홀드아웃이 특정 접두사에
+    # 몰린다(예: 이름이 z로 시작하는 물체들). 고정 시드로 섞고 나서 자른다.
+    if split not in ("all", "train", "holdout"):
+        raise ValueError(f"split은 all/train/holdout 중 하나여야 한다: {split!r}")
+    if split != "all":
+        import random
+        order = list(kept)
+        random.Random(split_seed).shuffle(order)
+        if n_holdout >= len(order):
+            raise ValueError(
+                f"n_holdout({n_holdout})이 사용 가능한 메쉬 수({len(order)}) 이상이다"
+            )
+        # holdout은 읽기 좋게 정렬, train은 **셔플된 순서를 유지**한다.
+        # 이유: IsaacLab의 `MultiUsdFileCfg`는 씬 생성 시 env i에 pool[i % N]을
+        # 배정하고 이후 바뀌지 않는다. 즉 실제로 학습에 등장하는 물체는
+        # **min(num_envs, 풀 크기)개**다. 알파벳순으로 두면 앞쪽 N개가
+        # "3D_Dollhouse_*"처럼 한 가족에 몰려 다양성이 크게 줄어든다.
+        # 셔플 순서를 유지하면 앞에서 N개를 잘라도 계열이 고르게 섞인다.
+        hold = sorted(order[-n_holdout:]) if n_holdout > 0 else []
+        train = order[:len(order) - n_holdout]
+        kept = train if split == "train" else hold
+        print(f"[mesh_pool]   분할 {split}: {len(kept)}개 "
+              f"(학습 {len(train)} / 홀드아웃 {len(hold)}, seed={split_seed})")
+
+    # ⚠ 주의: IsaacLab은 씬 생성 시 env i에 `pool[i % N]`을 **한 번** 배정하고
+    # 이후 바꾸지 않는다(`wrappers.py:114`). 즉 한 실행에서 실제로 등장하는
+    # 물체는 min(num_envs, len(kept))개다. offset은 그 창을 옮기는 손잡이다.
+    if offset:
+        offset %= len(kept)
+        kept = kept[offset:] + kept[:offset]
     if limit > 0:
         kept = kept[:limit]
 
-    print(f"[mesh_pool] {len(entries)}개 중 {len(kept)}개 사용"
-          f"{' (납작 필터 on)' if filter_flat else ' (납작 필터 off)'}")
+    print(f"[mesh_pool] {len(entries)}개 중 필터 통과 {n_filtered}개"
+          f"{' (납작 필터 on)' if filter_flat else ' (납작 필터 off)'}"
+          f" → 최종 {len(kept)}개 사용 [{split}"
+          f"{f', offset {offset}' if offset else ''}"
+          f"{f', limit {limit}' if limit > 0 else ''}]")
     # 제외 목록은 앞 5개만. 1,030개 풀에서는 239개가 걸려 로그를 뒤덮는다.
     for name, why in dropped[:5]:
         print(f"[mesh_pool]   제외: {name[:46]:<46} {why}")

@@ -15,6 +15,8 @@ import os
 import sys
 from os.path import join
 
+from envs.depth_corruption import DepthCorruptionCfg
+
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
@@ -33,9 +35,21 @@ class VisualConfig:
 
 @configclass
 class TSDFCfg:
-    vol_dim: tuple = (40, 40, 40)
-    voxel_size: float = 0.05
-    trunc_margin: float = 0.05   # voxel_size와 동일 유지 필수 (step_1 known issue)
+    # 2026-09-03 기하 재설정 (DEPLOY_3WEEK_PLAN.md §2): voxel 5 cm → **10 cm**.
+    # 물리 볼륨은 2.0 m로 유지한다(20×0.10 = 40×0.05) — 최대 스케일 1.5배로
+    # 회전한 GSO 물체의 최악 대각선이 1.95 m라 이보다 줄일 수 없다.
+    #
+    # 왜 굵히는가: 배포 시 depth는 GT가 아니라 TRIDENT+DVL 앵커의 추정치이고,
+    # 그 AbsRel 0.13이 대표거리 1.7 m에서 σ≈0.22 m다. 5 cm voxel은 depth가
+    # 실제로 구분하지 못하는 해상도를 재는 것이라 sim에서만 좋은 숫자가 된다.
+    # 10 cm면 σ가 약 2 voxel이고 물체(0.6~1.13 m)가 6~11 voxel — 산출물 등급은
+    # "거친 형상 파악"이며, 3주 시한에서 정직한 목표다.
+    #
+    # `GeometricEncoder`는 `AdaptiveAvgPool3d(4)`를 쓰므로 vol_dim이 바뀌어도
+    # 신경망 구조는 그대로다(체크포인트 호환은 별개 — 재학습 전제).
+    vol_dim: tuple = (20, 20, 20)
+    voxel_size: float = 0.10
+    trunc_margin: float = 0.10   # voxel_size와 동일 유지 필수 (step_1 known issue)
 
 
 @configclass
@@ -120,7 +134,16 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     phi_min: float = math.radians(10)
     phi_max: float = math.radians(80)
     psi_min: float = 1.0
-    psi_max: float = 4.5
+    # 2026-09-03: 4.5 → **2.5**. 앵커를 써도 psi 4.5 m는 허용 오차 밖이다
+    # (AbsRel 0.13 × 4.5 = 0.59 m ≈ 6 voxel). 대표거리가 1.7 m로 내려오면
+    # σ ≈ 0.22 m ≈ 2 voxel로 들어온다.
+    #
+    # 알려진 제약(측정치, 2026-09-03): 카메라 320×240 / focal 24 mm /
+    # aperture 20.955 → HFOV 47.2°, VFOV 36.3°. psi=1.0 m에서 화면에 담기는
+    # 범위는 0.87 × 0.65 m라 1.13 m 물체는 한 시점에 다 들어오지 않는다.
+    # NBV는 여러 시점을 누적하는 과제라 치명적이지 않지만, 하한 근처에서는
+    # "한 시점당 보이는 표면"이 줄어든다는 점은 기록해 둔다.
+    psi_max: float = 2.5
 
     tsdf: TSDFCfg = TSDFCfg()
     mesh_root: str = join("isaac-sim", "extsUser", "OceanSim", "oceansim_asset", "collected_rock")
@@ -138,6 +161,15 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     mesh_pool_filter_flat: bool = True
     mesh_pool_min_aspect: float = 0.25
     mesh_pool_limit: int = 0        # >0이면 앞에서 그만큼만 (소규모 시험용)
+    # 학습은 "train", 배포 리허설(미학습 물체)은 "holdout".
+    # 791개 중 91개를 홀드아웃으로 뺀다 — 수조 표적은 정의상 학습에 없던
+    # 물체이므로 이 평가가 곧 배포 조건이다.
+    mesh_pool_split: str = "train"
+    mesh_pool_holdout: int = 91
+    # 한 실행에서 보는 물체는 min(num_envs, 풀)개뿐이라, 풀 전체를 훑으려면
+    # offset을 옮겨가며 여러 번 돌려야 한다(홀드아웃 91개를 16 env로 평가 =
+    # offset 0,16,...,80으로 6회).
+    mesh_pool_offset: int = 0
 
     # ── 보상 가중치 (2026-08-26 재보정 — step_1 실제 학습 이력 조사 반영) ──
     #
@@ -181,7 +213,12 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     k_c: float = 20.0
     k_x: float = 0.0
     c_step: float = 0.02
-    coverage_terminal: float = 0.65
+    # 2026-09-03 GSO ceiling 실측으로 재설정. 이전 0.65는 **random이 100%
+    # 넘는** 값이었다(40결정 완주 기준; 9~10결정이면 도달). 성공률이 정책을
+    # 전혀 구분하지 못하는 상태였고, 무학습 정책도 succ=100%로 찍혔다.
+    # 0.85에서 random 58% / orbit 0%로 갈린다.
+    # 평가에서만 쓰인다(학습은 커리큘럼 값을 쓴다).
+    coverage_terminal: float = 0.85
     coverage_bonus: float = 10.0
 
     # ── 커리큘럼 (2026-08-26 사용자 확정: coverage_terminal 임계값 상향 방식) ──
@@ -209,8 +246,19 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     # end 0.80: 결정 25에서 random이 0.661이므로 상한이 그보다 충분히 위에
     #   있어야 "random을 넘어라"는 압박이 걸린다. 이전 0.65는 random에도
     #   못 미쳐 커리큘럼이 정책을 압박할 수 없었다.
-    curriculum_coverage_terminal_start: float = 0.55
-    curriculum_coverage_terminal_end: float = 0.80
+    # random이 5~7결정에 넘는 값(0.55)에서 시작하면 초반 롤아웃이 자명한
+    # 목표에 낭비된다. 0.70은 random @15결정 수준이라 부트스트랩은 되면서
+    # 처음부터 의미 있는 압력이 걸린다.
+    curriculum_coverage_terminal_start: float = 0.70
+    # **적응형 커리큘럼에서 이 값은 스케줄이 아니라 캡이다.**
+    # `_update_curriculum()`은 성공률 EMA가 게이트를 넘을 때만 올리고 여기서
+    # 클램프하므로, 높게 잡아도 정책이 못 따라오면 저절로 멈춘다. 과거의
+    # "임계값이 정책을 3.3배 앞질렀다"는 사고는 step 기반 선형 커리큘럼
+    # (`curriculum_adaptive=False`)에서 난 것이라 여기 적용되지 않는다.
+    # 따라서 낮게 잡는 쪽만 손해다 — 이전 0.80은 random 혼자 25결정에 0.790,
+    # 40결정에 0.850을 찍으므로 즉시 막힌다.
+    # 0.92 = GSO random 분포의 p90(0.90)과 최대(0.929) 사이.
+    curriculum_coverage_terminal_end: float = 0.92
     curriculum_total_steps: int = 0
 
     # ── 적응형 커리큘럼 (2026-08-27) ────────────────────────────────────────
@@ -254,20 +302,31 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     # binary 기준 baseline이라 A/B 비교가 가능하도록 남겨둔다.
     use_quality_coverage: bool = True
 
-    # μ와 Q_sat은 **설정하지 않는다** — 카메라의 실제 `atten_coeff` 채널 평균에서
+    # μ는 **설정하지 않는다** — 카메라의 실제 `atten_coeff` 채널 평균에서
     # 유도한다(step_1 `env_GenNBV_quality.py::_reset_idx`와 동일 메커니즘).
     # 렌더러가 실제로 적용하는 감쇠와 품질 모델이 어긋나면 coverage_q가 이미지에
-    # 없는 것을 재는 지표가 되기 때문. step_3 `scene_cfg.py`의
-    # atten_coeff=(0.05,0.05,0.20) → μ=0.10 → Q_sat=exp(-0.10×psi_min)=0.905.
+    # 없는 것을 재는 지표가 되기 때문.
     #
-    # 주의: step_1은 DR이 꺼져 있으면 μ가 초기값 0.1에 머무는데 Q_sat은 cfg의
-    # 0.80을 그대로 써서 둘이 불일치했다(step_1 CLAUDE.md §13 "Q_sat 설계 불일치").
-    # step_3는 DR 여부와 무관하게 항상 둘을 함께 유도해 이 불일치를 없앤다.
+    # 2026-09-03 (A) 정규화 도입: 전역 상수 `Q_sat = exp(−μ·psi_min)`을
+    # **voxel별** `q*(v) = exp(−μ·max(psi_min − r_v, d_near))`로 교체했다.
+    # 전역 상수는 근측면 voxel의 품질비가 1을 넘게 만들고, 합산-후-clamp라
+    # 그 초과분이 못 본 voxel을 상쇄했다 — Stage 2 평가에서 정책이 실제로
+    # 그 경로를 찾아냈다(cov_q/cov_bin=1.083, psi 하한 고착, 관측 표면량은
+    # 고정 orbit과 동일). 상세는 `env.py::_update_q_star()`.
     #
-    # 종료·커리큘럼·보상은 모두 **정규화값 `coverage_q / Q_sat` (0~1)** 을 쓴다.
-    # 그래야 ⓐ `coverage_terminal=0.65`가 step_1과 같은 "달성 가능 상한의 65%"
-    # 의미를 유지하고 ⓑ 위에서 실측으로 맞춰둔 k_c/c_step/coverage_bonus 보정이
-    # binary와 같은 스케일에서 그대로 유효하다.
+    # 종료·커리큘럼·보상은 모두 이 **voxel별 정규화 coverage (0~1)** 를 쓴다.
+    # 상한 1.0이 어떤 μ에서도 달성 가능하므로 임계값의 눈금이 수질과 무관해지고,
+    # binary 기준으로 맞춰둔 k_c/c_step/coverage_bonus 보정도 그대로 유효하다.
+    #
+    # d_near: q*의 하한 가드. r_v가 psi_min에 가까운 voxel은 분모가
+    # "거리 0에서 봐야 만점"이 되어 달성 불가능해진다. DP 추종오차가 0.18 m
+    # 수준이라 그보다 가까운 거리는 실제로 만들 수 없다.
+    quality_d_near: float = 0.2
+
+    # ── ②a 파라메트릭 오염 (기본 off) ──────────────────────────────────
+    # 학습(teacher)은 GT depth/pose로 돌고, 허용 오차 스윕에서만 켠다.
+    # 상세는 `envs/depth_corruption.py`.
+    corruption: DepthCorruptionCfg = DepthCorruptionCfg()
     lambda_q: float = 0.1
     k_still: float = 0.05
     stall_thr: float = 1e-4

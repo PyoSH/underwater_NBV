@@ -112,10 +112,13 @@ class EnvUtilsMixin:
         """
         from isaaclab.utils.math import quat_apply
 
-        return self._robot.data.root_pos_w + quat_apply(
+        pos = self._robot.data.root_pos_w + quat_apply(
             self._robot.data.root_quat_w,
             self._camera_offset_pos.unsqueeze(0).expand(self.num_envs, -1),
         )
+        # ②a: 품질(거리 감쇠)도 로봇이 믿는 pose 기준이어야 융합과 일관된다.
+        pos, _ = self._corruptor.apply_pose(pos, self._robot.data.root_quat_w)
+        return pos
 
     def _build_cam_pose(self) -> torch.Tensor:
         """카메라 extrinsic (world → OpenCV camera frame, 4x4).
@@ -150,6 +153,11 @@ class EnvUtilsMixin:
             robot_quat, self._camera_offset_pos.unsqueeze(0).expand(N, -1)
         )
         cam_quat_w = robot_quat   # scene_cfg의 offset.rot이 항등이므로 그대로
+
+        # ②a: 여기서부터는 **믿는** pose다. 오염이 꺼져 있으면 항등.
+        # 위치·yaw 드리프트는 voxel을 엉뚱한 자리에 기입하게 만들므로,
+        # depth 오차(재구성이 흐려짐)와는 질적으로 다른 열화를 만든다.
+        cam_pos_w, cam_quat_w = self._corruptor.apply_pose(cam_pos_w, cam_quat_w)
 
         R_wc = self._quat_to_rot_matrix(cam_quat_w)   # (E,3,3) cam→world
         R_cw = R_wc.transpose(1, 2)                    # (E,3,3) world→cam

@@ -22,9 +22,6 @@ __pycache__/
 /step_2_BROV/stage2_results
 /step_2_BROV/stage3_results
 /step_2_BROV/deploy.zip
-/step_3_NBV_BROV/debug_images
-/step_3_NBV_BROV/checkpoints
-.idea
 # 진단 스크래치 (세션 임시 산출물 — 커밋 금지)
 step_2_BROV/_seed_*.json
 step_2_BROV/_vh_*.json
@@ -38,3 +35,7 @@ step_2_BROV/_*.sh
 # 정책 export는 빌드 산출물이다 — 배포본은 brov_ros2/artifacts/policies/ 가 정본
 step_2_BROV/deploy/exported/
 step_2_BROV/deploy/exported_mk2_*/
+step_3_NBV_BROV/debug_images
+step_3_NBV_BROV/checkpoints
+step_3_NBV_BROV/eval_out
+.idea
