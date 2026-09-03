@@ -177,6 +177,36 @@ def main() -> int:
         print("[train] wandb 미설치 — 로깅 없이 진행")
 
     obs, _ = env.reset()
+
+    # ── 렌더 건전성 관문 (2026-09-03 추가) ──────────────────────────────
+    # env를 128개로 올렸을 때 RTX가 `Unable to allocate descriptor sets`를
+    # 920번 뱉었는데도 **씬 생성과 리셋은 성공**했다. 렌더러는 일부 카메라의
+    # 파이프라인을 만들지 못한 채 조용히 계속 갈 수 있다는 뜻이다. 그대로
+    # 두면 그 env는 균일한 빈 화면을 정상 관측으로 학습에 섞는다 — 크래시보다
+    # 나쁘다(수 시간 뒤에 "왜 안 배우지"로만 드러난다).
+    #
+    # 판정: env별 이미지 표준편차가 0이면 균일 화면 = 죽은 카메라.
+    # depth 유효 화소가 0인 경우도 함께 잡는다.
+    _rgb = env._camera.data.output["uw_rgb"][..., :3].float()
+    _dep = env._camera.data.output["distance_to_camera"].float()
+    if _dep.dim() == 4:
+        _dep = _dep.squeeze(-1)
+    _std = _rgb.std(dim=(1, 2, 3))
+    _fin = (torch.isfinite(_dep) & (_dep > 0)).float().mean(dim=(1, 2))
+    _dead = ((_std < 1e-3) | (_fin < 1e-3)).nonzero(as_tuple=True)[0].tolist()
+    print(f"[train] 렌더 건전성: 이미지 std 최소 {_std.min():.3f} / 중앙 "
+          f"{_std.median():.3f}, depth 유효 최소 {_fin.min()*100:.1f}%")
+    if _dead:
+        env.close()
+        raise RuntimeError(
+            f"카메라 {len(_dead)}개가 유효한 이미지를 내지 못한다 (env {_dead[:20]}"
+            f"{' ...' if len(_dead) > 20 else ''}).\n"
+            f"  렌더러가 일부 env의 파이프라인 생성에 실패한 상태다. 조치:\n"
+            f"   1) 남아 있는 다른 kit 프로세스 정리 (pgrep -af train.py)\n"
+            f"   2) --kit_args='--/rtx/descriptorSets=32768' 로 descriptor 풀 상향\n"
+            f"   3) 그래도 안 되면 --num_envs 축소\n"
+            f"  이 상태로 학습하면 해당 env는 빈 화면을 정상 데이터로 학습한다."
+        )
     ep_return = torch.zeros(E, device=device)
     ep_len = torch.zeros(E, dtype=torch.long, device=device)
     done_returns: list[float] = []

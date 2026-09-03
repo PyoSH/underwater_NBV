@@ -43,6 +43,50 @@ if args.mesh_pool:
     cfg.mesh_pool_limit = args.mesh_pool_limit
 
 
+def report_cameras(env) -> int:
+    """env마다 카메라가 **실제로 유효한 이미지를 내고 있는지** 확인한다.
+
+    왜 필요한가 (2026-09-03): env 128개로 올리자 RTX가
+    `Unable to allocate descriptor sets`를 920번 뱉었는데도 **씬 생성은
+    성공**했다. 즉 렌더러는 일부 카메라의 파이프라인을 만들지 못한 채로
+    조용히 계속 갈 수 있다. 그러면 그 env는 검은 화면/고정 화면을 보면서
+    학습에 정상 데이터로 섞인다 — 크래시보다 나쁘다.
+
+    판정: env별 이미지 표준편차가 0에 가까우면(균일 화면) 죽은 카메라다.
+    depth도 함께 본다 — 유한값 비율이 0이면 아무것도 못 보고 있는 것이다.
+    """
+    import numpy as np
+    import torch
+
+    rgb = env._camera.data.output["uw_rgb"][..., :3].float()          # (E,H,W,3)
+    depth = env._camera.data.output["distance_to_camera"].float()
+    if depth.dim() == 4:
+        depth = depth.squeeze(-1)
+
+    img_std = rgb.std(dim=(1, 2, 3))                                  # (E,)
+    img_mean = rgb.mean(dim=(1, 2, 3))
+    finite = torch.isfinite(depth) & (depth > 0)
+    finite_frac = finite.float().mean(dim=(1, 2))
+
+    dead = (img_std < 1e-3) | (finite_frac < 1e-3)
+    print(f"[smoke] --- 카메라 건전성 (env {env.num_envs}개) ---")
+    print(f"[smoke]  이미지 std : 최소 {img_std.min():.3f} / 중앙 {img_std.median():.3f}"
+          f" / 최대 {img_std.max():.3f}")
+    print(f"[smoke]  이미지 평균: 최소 {img_mean.min():.1f} / 중앙 {img_mean.median():.1f}"
+          f" / 최대 {img_mean.max():.1f}")
+    print(f"[smoke]  depth 유효 : 최소 {finite_frac.min()*100:.1f}%"
+          f" / 중앙 {finite_frac.median()*100:.1f}%")
+    if dead.any():
+        ids = dead.nonzero(as_tuple=True)[0].tolist()
+        print(f"[smoke]  ✗ 죽은 카메라 {len(ids)}개: env {ids[:20]}"
+              f"{' ...' if len(ids) > 20 else ''}")
+        print(f"[smoke]    → 렌더러가 일부 env의 파이프라인을 만들지 못했다."
+              f" descriptor set 부족을 의심할 것(--kit_args).")
+    else:
+        print(f"[smoke]  ✓ 전 env가 유효한 이미지를 낸다")
+    return int(dead.sum())
+
+
 def report_objects(env, tag: str) -> None:
     """env마다 어떤 물체가, 어떤 크기로 서 있는지 보고한다.
 
@@ -89,6 +133,7 @@ try:
     obs, _ = env.reset()
     print(f"[smoke] reset OK — policy obs shape={obs['policy'].shape}, extra_info shape={obs['extra_info'].shape}")
     print(f"[smoke] curr_coverage after reset: {env.curr_coverage.tolist()}")
+    n_dead = report_cameras(env)
     report_objects(env, "reset 1")
     for k in range(1, args.n_resets):
         env.reset()
@@ -116,6 +161,10 @@ try:
         if torch.isnan(obs['policy']).any():
             raise RuntimeError("policy obs contains NaN")
 
+    if n_dead:
+        raise RuntimeError(
+            f"카메라 {n_dead}개가 유효한 이미지를 내지 못한다 — 이 상태로 학습하면 "
+            f"해당 env는 빈 화면을 정상 데이터로 학습한다")
     print("[smoke] PASSED")
 finally:
     if env is not None:
