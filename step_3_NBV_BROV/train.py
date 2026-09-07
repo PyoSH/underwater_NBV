@@ -48,6 +48,10 @@ parser.add_argument("--gamma",          type=float, default=0.99)
 parser.add_argument("--gae_lambda",     type=float, default=0.95)
 parser.add_argument("--clip_eps",       type=float, default=0.2)
 parser.add_argument("--ent_coef",       type=float, default=0.03)
+parser.add_argument("--curriculum_end",  type=float, default=None,
+                    help="커리큘럼 임계값 상한 덮어쓰기. 미지정 시 env_cfg 기본값. "
+                         "**에피소드 예산에서 도달 가능한 값**이어야 한다 — "
+                         "2026-09-07 런은 25결정에서 도달 불가한 0.92로 죽었다")
 parser.add_argument("--vf_coef",        type=float, default=0.5)
 parser.add_argument("--max_grad_norm",  type=float, default=0.5)
 parser.add_argument("--target_kl",      type=float, default=0.05,
@@ -123,6 +127,8 @@ def main() -> int:
     # env_cfg는 envs/env_cfg.py가 정본 — 여기서 보상/물리 가중치를 덮어쓰지 않는다.
     env_cfg = NBVBROVEnvCfg()
     env_cfg.use_tiled_camera = (args.camera_path == "tiled")
+    if args.curriculum_end is not None:
+        env_cfg.curriculum_coverage_terminal_end = args.curriculum_end
     env_cfg.scene.num_envs = args.num_envs
     if args.mesh_pool:
         env_cfg.mesh_pool_manifest = args.mesh_pool
@@ -313,6 +319,12 @@ def main() -> int:
             f"nupd={stats['n_updates']} "
             f"| ep={n_ep} ({ep_per_obj:.0f}/물체) "
             f"succ={succ_rate:.0f}% "
+            # 임계값과 성공률 EMA를 **콘솔에** 남긴다. 지금까지 wandb에만 있어서,
+            # 2026-09-07 런에서 "임계값이 정책을 추월해 성공률이 0이 됐다"를
+            # 로그만으로는 진단할 수 없었다(추론해야 했다). curr가 cov를
+            # 앞지르기 시작하면 즉시 보인다.
+            f"curr={env._current_coverage_terminal():.3f} "
+            f"ema={env.curriculum_success_ema:.2f} "
             f"succ_share={term_abs['success']/tot*100:.0f}% "
             f"dist={env.last_dist_moved.mean().item():.3f} "
             f"logstd={actor.log_std.mean().item():+.2f} "

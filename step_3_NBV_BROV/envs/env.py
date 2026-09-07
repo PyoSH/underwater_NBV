@@ -513,19 +513,36 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         그 부수적 요인에 좌우된다. 비례시키면 `curriculum_rate`가 "num_envs개
         에피소드가 끝날 때마다의 상승폭"이라는 안정된 의미를 갖는다.
 
-        임계값은 **단조 증가**만 한다(내려가지 않음) — 난이도가 오르내리면
-        보상 분포가 비정상(non-stationary)이 돼 critic이 쫓아가기 어렵다.
+        임계값은 기본적으로 **단조 증가**한다 — 난이도가 오르내리면 보상 분포가
+        비정상(non-stationary)이 돼 critic이 쫓아가기 어렵기 때문이다. 다만
+        성공률이 완전히 무너지면 **하향한다**(2026-09-07 추가).
+
+        하향이 필요한 이유(실측): 임계값이 상한 0.92에 도달했는데 정책 최고
+        coverage는 0.886이었다. 25결정 예산에서 0.92는 도달 불가라 성공률이
+        구조적으로 0이 됐고, `coverage_bonus`(리턴의 절반)가 사라져 리턴이
+        31→13.5로 반토막, 이후 23롤아웃 동안 PPO 갱신 0회. 단조 증가만 있으면
+        **영구히 회복할 수 없다** — 런 전체를 잃는 쪽이 critic이 잠깐 흔들리는
+        것보다 명백히 나쁘다.
+
+        진동하지 않는 이유: 상향 게이트(0.7)와 하향 게이트(0.10) 사이가 넓은
+        사구간이다. 오르내리려면 성공률이 그 구간을 통째로 왕복해야 한다.
         """
         cfg = self.cfg
         succ = self._last_coverage_reached[env_ids].float().mean().item()
         a = cfg.curriculum_success_ema_alpha
         self.curriculum_success_ema = (1.0 - a) * self.curriculum_success_ema + a * succ
 
+        frac = len(env_ids) / self.num_envs
         if self.curriculum_success_ema >= cfg.curriculum_success_gate:
-            frac = len(env_ids) / self.num_envs
             self._curriculum_level = min(
                 cfg.curriculum_coverage_terminal_end,
                 self._curriculum_level + cfg.curriculum_rate * frac,
+            )
+        elif self.curriculum_success_ema <= cfg.curriculum_relief_gate:
+            # 바닥은 시작값 — 그 아래로 내려가면 과제가 자명해진다.
+            self._curriculum_level = max(
+                cfg.curriculum_coverage_terminal_start,
+                self._curriculum_level - cfg.curriculum_relief_rate * frac,
             )
 
     def _sync_quality_water(self, env_ids: torch.Tensor) -> None:
