@@ -21,7 +21,7 @@ __pycache__/
 /step_2_BROV/wandb/*
 /step_2_BROV/stage2_results
 /step_2_BROV/stage3_results
-/step_2_BROV/deploy.zip
+step_2_BROV/demoA/*
 # 진단 스크래치 (세션 임시 산출물 — 커밋 금지)
 step_2_BROV/_seed_*.json
 step_2_BROV/_vh_*.json

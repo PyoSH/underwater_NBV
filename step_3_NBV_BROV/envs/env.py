@@ -82,6 +82,8 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
             cfg.scene.camera.viewport_env_id = cfg.camera_viewport_env_id
 
         # Stage 4 다중 대상 물체 — 씬 생성 **이전**에 스포너를 교체해야 한다.
+        cfg.scene.use_camera_path(cfg.use_tiled_camera)
+
         # `use_mesh_pool()`이 replicate_physics=False도 함께 설정한다.
         if cfg.mesh_pool_manifest:
             from envs.mesh_pool import load_mesh_pool

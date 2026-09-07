@@ -359,6 +359,10 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     # 소나 융합이 2차 대안으로 계획돼 있다([[project_step3_roadmap]] Stage 3).
     enable_sonar: bool = False
 
+    # 렌더 경로. True=TiledCamera(env 수 확장), False=Camera(~96 env 한계).
+    # 밝기의 env 수 의존성 비교에 쓴다 — `scene_cfg.use_camera_path()` 주석 참조.
+    use_tiled_camera: bool = True
+
     # ── 카메라 수중 DR (step_1과 동일, 기본 비활성) ──
     jerlov_dr_enabled: bool = False
     jerlov_types: tuple = ("IB", "II", "III", "1C", "3C", "5C")

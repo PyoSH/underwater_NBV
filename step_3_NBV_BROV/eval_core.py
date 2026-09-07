@@ -49,6 +49,22 @@ class Policy:
             img_ch=2, scalar_dim=3, action_dim=cfg.action_space,
             H=cfg.visual.h, W=cfg.visual.w,
         ).to(device)
+        # ── 학습/평가 env 수 일치 검사 (2026-09-03) ────────────────────
+        # tiled rendering에서 **env 수가 화면 밝기를 바꾼다**(같은 32개 물체로
+        # 32 env 평균 160.0 vs 256 env 평균 122.2). 광원은 매 리셋 고정값
+        # (light_level=7)이라 절대 밝기가 정책이 붙잡을 수 있는 단서이고,
+        # 따라서 학습과 다른 env 수로 평가하면 정책이 학습 때 본 적 없는
+        # 밝기를 보게 된다. coverage는 depth 기반이라 무관하지만, actor의
+        # 시각 입력은 직접 영향을 받는다.
+        #
+        # 조용히 어기기 쉬운 규칙이라 여기서 경고한다. 근본 해결은 조명
+        # 레벨 DR이며, 그것은 "파이프라인 구성 후 다변수화" 단계의 1순위다.
+        trained_envs = (ckpt.get("args") or {}).get("num_envs")
+        if trained_envs is not None and trained_envs != env.num_envs:
+            print(f"[eval] ⚠ 학습 env 수({trained_envs}) ≠ 평가 env 수"
+                  f"({env.num_envs}) — tiled 렌더는 env 수에 따라 화면 밝기가"
+                  f" 달라진다. 같은 값으로 맞출 것.")
+
         self.actor.load_state_dict(ckpt["actor"])
         self.actor.eval()
         self.trained_iters = ckpt.get("it", -1)

@@ -20,6 +20,10 @@ parser.add_argument("--mesh_pool", type=str, default=None,
                     help="GSO manifest.json 경로 — 주면 env마다 다른 대상 물체 "
                          "(Stage 4 다중 메쉬 경로 검증)")
 parser.add_argument("--mesh_pool_limit", type=int, default=0)
+parser.add_argument("--camera_path", type=str, default="tiled",
+                    choices=("tiled", "per_env"),
+                    help="렌더 경로. tiled=TiledCamera(env 수 확장), "
+                         "per_env=Camera(~96 env 한계). 밝기의 env 수 의존성 비교용")
 parser.add_argument("--n_resets", type=int, default=2,
                     help="리셋을 반복해 스케일 랜덤화가 누적되지 않는지 확인")
 AppLauncher.add_app_launcher_args(parser)
@@ -38,6 +42,7 @@ from envs.env import NBVBROVEnv
 cfg = NBVBROVEnvCfg()
 cfg.scene.num_envs = args.num_envs
 cfg.debug_vis = False
+cfg.use_tiled_camera = (args.camera_path == "tiled")
 if args.mesh_pool:
     cfg.mesh_pool_manifest = args.mesh_pool
     cfg.mesh_pool_limit = args.mesh_pool_limit
@@ -128,7 +133,8 @@ def report_objects(env, tag: str) -> None:
 env = None
 try:
     env = NBVBROVEnv(cfg)
-    print(f"[smoke] env constructed, num_envs={env.num_envs}, device={env.device}")
+    print(f"[smoke] env constructed, num_envs={env.num_envs}, "
+          f"camera={type(env._camera).__name__}, device={env.device}")
 
     obs, _ = env.reset()
     print(f"[smoke] reset OK — policy obs shape={obs['policy'].shape}, extra_info shape={obs['extra_info'].shape}")
