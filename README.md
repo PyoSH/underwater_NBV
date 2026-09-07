@@ -54,8 +54,9 @@ usual occupancy.
 **Setup.** Isaac Sim + IsaacLab, PPO. The agent moves on a sphere around the
 target in discrete steps (azimuth, elevation, distance). It observes a short
 history of images, a scalar view pose, and a 40³ voxel grid whose channels carry
-*unknown / free / accumulated quality*. Water parameters are randomized during
-training so the policy does not overfit one turbidity.
+*unknown / free / accumulated quality*. Water optics are randomized during
+training over six Jerlov water types so the policy does not overfit one
+turbidity.
 
 ![Occupancy versus observation quality](docs/figures/fig_step1_quality_voxel.png)
 
@@ -63,7 +64,13 @@ Baseline planners (GenNBV, ScanRL and variants) are implemented under
 `algorithm/` and evaluated through one shared harness, so every method sees
 identical episodes.
 
-See [`step_1_NBV/CLAUDE.md`](step_1_NBV/CLAUDE.md).
+**Status.** Trained and evaluated in simulation. The quality-aware policy
+outperforms manual orbit, ScanRL and GenNBV on quality-weighted coverage and
+success rate, both at fixed turbidity and across the six Jerlov types.
+Not yet deployed on hardware; that is `step_3`.
+<!-- TODO: add the comparison table from analysis/comparison_table.csv -->
+
+See [`step_1_NBV/DESIGN.md`](step_1_NBV/DESIGN.md).
 
 ---
 
@@ -94,7 +101,14 @@ carries **delay-aware training** — action delay and observation staleness as
 domain randomization — and the diagnostic tooling to measure loop delay in the
 first place.
 
-See [`step_2_BROV/CLAUDE.md`](step_2_BROV/CLAUDE.md).
+**Status.** Physics validated; Sim2Swim reproduced with corrected desired-state
+generation and evaluated in IsaacLab. The delay-aware policy has been deployed
+on a BlueROV2 Heavy in a test tank through `brov_ros2`: actuator saturation
+fell from 58 % to 7 % (surge) and 67 % to 4 % (sway), with divergence-free runs
+of over 150 s. Remaining: a residual 2 Hz component in surge, and DVL dropouts
+since traced to the DVL mounting position.
+
+See [`step_2_BROV/DESIGN.md`](step_2_BROV/DESIGN.md).
 
 ---
 
@@ -121,14 +135,20 @@ The binding constraint is generalization: tank water quality and the target
 object are not known in advance, so reward and observation must be normalized to
 be invariant to both. That normalization, not the planner, is the critical path.
 
-See [`step_3_NBV_BROV/DEPLOY_3WEEK_PLAN.md`](step_3_NBV_BROV/DEPLOY_3WEEK_PLAN.md).
+**Status.** In progress, simulation only. Reward normalization, geometry and
+multi-object assets are in place; the privileged-teacher retraining and the
+depth pipeline are next. No NBV result on hardware yet.
+
+See [`step_3_NBV_BROV/DESIGN.md`](step_3_NBV_BROV/DESIGN.md); the dated task
+plan is [`DEPLOY_3WEEK_PLAN.md`](step_3_NBV_BROV/DEPLOY_3WEEK_PLAN.md).
 
 ---
 
 ## Running
 
 Everything runs inside containers; no stage is expected to work against a bare
-host Python.
+host Python. `step_1` uses the NVIDIA Isaac Sim 5.1 image, `step_2`/`step_3`
+the IsaacLab image; `python.sh` below is the interpreter shipped with each.
 
 | Stage | Container | Entry point |
 |---|---|---|
@@ -144,6 +164,11 @@ python.sh test_policy.py --checkpoint <ckpt> --test straight_line
 python.sh test_policy.py --checkpoint <ckpt> --test square_ballast --duration 60
 python.sh test_policy.py --checkpoint <ckpt> --test square_random_attitude
 ```
+
+## Author
+
+Seunghyun Pyo — UST-KRISO, Ship and Ocean Engineering.
+jeongmok99@gmail.com · [github.com/PyoSH](https://github.com/PyoSH)
 
 ## References
 
