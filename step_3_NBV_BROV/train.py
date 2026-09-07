@@ -78,6 +78,12 @@ parser.add_argument("--mesh_pool_limit", type=int, default=0,
 parser.add_argument("--mesh_pool_offset", type=int, default=0,
                     help="풀 선택 창을 회전시킨다. 한 실행에서 보는 물체는 "
                          "min(num_envs, 풀)개뿐이라 풀 전체를 훑으려면 여러 번 필요")
+parser.add_argument("--camera_path", type=str, default="tiled",
+                    choices=("tiled", "per_env"),
+                    help="렌더 경로. tiled=TiledCamera(전체 env가 render product "
+                         "1개를 공유, env 수 확장 가능). per_env=Camera(env마다 "
+                         "view, ~96 한계). 체크포인트 args에 기록되므로 평가 때 "
+                         "같은 값을 쓸 것 — 두 경로는 화면 밝기가 다르다")
 parser.add_argument("--mesh_pool_split", type=str, default="train",
                     choices=("train", "holdout", "all"),
                     help="학습은 train(700개). holdout(91개)은 배포 리허설용이라 "
@@ -116,6 +122,7 @@ def main() -> int:
 
     # env_cfg는 envs/env_cfg.py가 정본 — 여기서 보상/물리 가중치를 덮어쓰지 않는다.
     env_cfg = NBVBROVEnvCfg()
+    env_cfg.use_tiled_camera = (args.camera_path == "tiled")
     env_cfg.scene.num_envs = args.num_envs
     if args.mesh_pool:
         env_cfg.mesh_pool_manifest = args.mesh_pool

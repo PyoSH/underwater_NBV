@@ -37,7 +37,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "step_1_NBV"))
 from utils_NBV.jerlov_presets import JERLOV_PRESETS
 from robots.assets.brov_rigid import BROV_RIGID_CFG
-from sensors.UWCamera.UW_Camera_cfg import UWTiledCameraCfg
+from sensors.UWCamera.UW_Camera_cfg import UWCameraCfg, UWTiledCameraCfg
 from sensors.ImagingSonar.ImagingSonarCfg import ImagingSonarCfg
 
 OCEANSIM_DIR = "/isaac-sim/extsUser/OceanSim"
@@ -140,6 +140,40 @@ class NBVBROVSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.UsdFileCfg(usd_path=ROCK_USD),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -3.0), rot=_ROT_45Z),
     )
+
+    def use_camera_path(self, tiled: bool) -> None:
+        """렌더 경로를 `TiledCamera`(기본) ↔ `Camera`로 바꾼다. 씬 생성 **이전** 호출.
+
+        왜 전환 가능해야 하는가 (2026-09-03): 두 경로는 확장성과 밝기 재현이
+        엇갈린다.
+
+        - `TiledCamera`: 전체 env가 render product 1개를 공유 → env 수 무제한에
+          가깝다(256 확인). 대신 **env 수에 따라 화면 밝기가 달라진다**
+          (같은 32물체로 32env 평균 160.0 vs 256env 122.2). 원인 미확정.
+        - `Camera`: env마다 view를 만들어 ~96 env가 한계(128에서 RTX 자원 고갈로
+          정지). 대신 각 env가 독립 렌더라 밝기가 env 수에 무관할 가능성이 있다.
+
+        이 구분이 중요한 이유: 본 연구는 **조명을 action에 넣는 것**을 계획하고
+        있다(조명-카메라 시스템). 그러면 절대 밝기는 잡음이 아니라 정책이
+        제어하는 신호가 되고, 정책이 자기 행동으로 설명할 수 없는 밝기 변화는
+        credit assignment를 직접 오염시킨다. 따라서 "env 수에 따라 밝기가
+        변하는가"는 나중에 반드시 답해야 하는 질문이며, 그 비교를 코드 수정
+        없이 할 수 있어야 한다.
+        """
+        if tiled:
+            return                      # 기본값이 이미 tiled
+        t = self.camera
+        self.camera = UWCameraCfg(
+            prim_path=t.prim_path, update_period=t.update_period,
+            height=t.height, width=t.width, spawn=t.spawn, offset=t.offset,
+            data_types=list(t.data_types),
+            backscatter_value=t.backscatter_value,
+            atten_coeff=t.atten_coeff,
+            backscatter_coeff=t.backscatter_coeff,
+            enable_viewport=t.enable_viewport,
+            viewport_env_id=t.viewport_env_id,
+            defer_uw_render=t.defer_uw_render,
+        )
 
     def use_mesh_pool(self, usd_paths: list[str]) -> None:
         """대상 물체를 다중 USD 풀로 교체한다. 씬 생성 **이전**에 호출할 것."""
