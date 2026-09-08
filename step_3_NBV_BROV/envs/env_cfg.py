@@ -170,6 +170,11 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     # offset을 옮겨가며 여러 번 돌려야 한다(홀드아웃 91개를 16 env로 평가 =
     # offset 0,16,...,80으로 6회).
     mesh_pool_offset: int = 0
+    # solidity 상한 — 이 값 이하(=오목한) 물체만 쓴다. 1.0이면 필터 없음.
+    mesh_pool_max_solidity: float = 1.0
+    # 텍스처 실재 여부 확인. 측정 목적(coverage는 depth 기반이라 텍스처 무관)으로
+    # 임시로 끌 수 있게 둔다 — 학습에서는 반드시 True.
+    mesh_pool_require_texture: bool = True
 
     # ── 보상 가중치 (2026-08-26 재보정 — step_1 실제 학습 이력 조사 반영) ──
     #

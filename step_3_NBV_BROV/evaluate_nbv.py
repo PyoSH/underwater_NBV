@@ -61,12 +61,37 @@ parser.add_argument("--ceiling", action="store_true",
 parser.add_argument("--mesh_pool", type=str, default=None,
                     help="메쉬 풀 manifest 경로. 홀드아웃 평가(= 배포 리허설)에 쓴다")
 parser.add_argument("--mesh_pool_limit", type=int, default=0)
+parser.add_argument("--max_solidity", type=float, default=1.0,
+                    help="solidity 상한. 이 값 이하(=오목한) 물체만 쓴다. "
+                         "볼록체는 어느 시점에서 봐도 다 보여 시점 선택 문제가 "
+                         "성립하지 않는다. 1.0=필터 없음")
+parser.add_argument("--no_require_texture", action="store_true",
+                    help="텍스처 실재 확인을 끈다. **측정 전용** — coverage는 "
+                         "depth 기반이라 텍스처와 무관하지만, 학습에서 끄면 "
+                         "실루엣만 보고 배우게 된다")
 parser.add_argument("--mesh_pool_offset", type=int, default=0,
                     help="풀 선택 창을 회전시킨다. 한 실행에서 보는 물체는 "
                          "min(num_envs, 풀)개뿐이라 풀 전체를 훑으려면 여러 번 필요")
 parser.add_argument("--mesh_pool_split", type=str, default="holdout",
                     choices=("train", "holdout", "all"),
                     help="기본 holdout — 수조 표적은 정의상 미학습 물체다")
+# ── 기하 덮어쓰기 (2026-09-07) ──────────────────────────────────────────
+# 과제의 "여유(headroom)"를 재기 위한 스윕용. 랜덤과 상한 사이 간격이 좁으면
+# 정책이 배울 여지가 없고, 보상 지형이 평평해져 경계 고착이 일어난다
+# (Stage 2는 psi 하한, run03은 psi 상한). 어떤 기하가 여유를 만드는지는
+# 추측이 아니라 ceiling 곡선으로 재야 한다.
+parser.add_argument("--psi_min", type=float, default=None)
+parser.add_argument("--psi_max", type=float, default=None,
+                    help="관측 반경 상한. 줄이면 물체가 프레임을 넘쳐 가려짐이 생긴다")
+parser.add_argument("--voxel_size", type=float, default=None,
+                    help="voxel 크기[m]. 줄이면 표면 voxel 수가 늘어 보상 해상도가 오른다")
+parser.add_argument("--vol_dim", type=int, default=None,
+                    help="볼륨 한 변의 voxel 수. 물리 크기 = vol_dim × voxel_size")
+parser.add_argument("--camera_path", type=str, default="tiled",
+                    choices=("tiled", "per_env"),
+                    help="렌더 경로. **학습과 반드시 같아야 한다** — 두 경로는 "
+                         "화면 밝기가 다르고(그리고 tiled는 env 수에 따라서도 "
+                         "달라진다), 정책 입력이 그레이스케일이라 직접 영향받는다")
 parser.add_argument("--stochastic", action="store_true",
                     help="체크포인트 정책을 greedy(tanh(mu)) 대신 샘플링으로 실행")
 AppLauncher.add_app_launcher_args(parser)
@@ -91,11 +116,24 @@ from eval_core import Policy, run_policy, _max_len, _cov_at
 def main() -> int:
     cfg = NBVBROVEnvCfg()
     cfg.scene.num_envs = args.num_envs
+    cfg.use_tiled_camera = (args.camera_path == "tiled")
+    if args.psi_min is not None:    cfg.psi_min = args.psi_min
+    if args.psi_max is not None:    cfg.psi_max = args.psi_max
+    if args.voxel_size is not None:
+        cfg.tsdf.voxel_size = args.voxel_size
+        cfg.tsdf.trunc_margin = args.voxel_size   # 반드시 동일 (step_1 known issue)
+    if args.vol_dim is not None:
+        cfg.tsdf.vol_dim = (args.vol_dim,) * 3
+    print(f"[eval] 기하: psi {cfg.psi_min}~{cfg.psi_max} m, "
+          f"voxel {cfg.tsdf.voxel_size} m × {cfg.tsdf.vol_dim[0]} "
+          f"= 볼륨 {cfg.tsdf.vol_dim[0]*cfg.tsdf.voxel_size:.2f} m")
     if args.mesh_pool:
         cfg.mesh_pool_manifest = args.mesh_pool
         cfg.mesh_pool_limit = args.mesh_pool_limit
         cfg.mesh_pool_split = args.mesh_pool_split
         cfg.mesh_pool_offset = args.mesh_pool_offset
+        cfg.mesh_pool_max_solidity = args.max_solidity
+        cfg.mesh_pool_require_texture = not args.no_require_texture
     # 평가는 고정 난이도에서 — 커리큘럼이 돌면 정책 간 종료 기준이 달라져
     # 비교 자체가 성립하지 않는다.
     cfg.curriculum_enabled = False

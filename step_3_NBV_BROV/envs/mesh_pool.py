@@ -28,6 +28,7 @@ def load_mesh_pool(
     filter_flat: bool = True,
     min_aspect: float = 0.25,
     require_texture: bool = True,
+    max_solidity: float = 1.0,
     limit: int = 0,
     offset: int = 0,
     split: str = "all",
@@ -44,6 +45,17 @@ def load_mesh_pool(
         텍스처가 살아있는 자산만 쓴다. actor 입력이 그레이스케일이라 색보다
         **휘도 변화(표면 무늬)**가 중요한데, 텍스처가 없으면 실루엣만 남아
         표면 관측이라는 과제가 성립하지 않는다.
+    max_solidity
+        solidity(메쉬부피/볼록껍질부피)가 이 값 **이하**인 물체만 쓴다.
+        1.0이면 필터 없음.
+
+        왜 상한인가: solidity가 1에 가까우면 볼록체(공·상자류)이고, 볼록체는
+        어느 시점에서 봐도 자기 가려짐이 없어 **시점 선택 문제가 성립하지
+        않는다**. 납작 필터(종횡비)가 "앞뒤 두 장이면 끝나는 물체"를 걸렀다면
+        이쪽은 "어디서 봐도 다 보이는 물체"를 거른다.
+
+        2026-09-07 실측(GSO 791개): 중앙 0.564, p10 0.187, p90 0.990.
+        볼록체가 10% 정도 섞여 있고 절반은 상당히 오목하다.
     limit
         0보다 크면 앞에서 그만큼만. 소규모 시험용. 분할 **이후**에 적용되므로
         limit을 바꿔도 train/holdout 경계는 움직이지 않는다.
@@ -74,12 +86,29 @@ def load_mesh_pool(
 
     kept, dropped = [], []
     for e in entries:
-        if require_texture and not e.get("has_texture", False):
-            dropped.append((e["name"], "텍스처 없음"))
-            continue
+        if require_texture:
+            # manifest의 `has_texture`는 **변환 당시** 기록이라 신뢰할 수 없다.
+            # 2026-09-07 실측: 서버의 791개 텍스처 디렉토리가 **전부 비어 있는데도**
+            # manifest는 has_texture=True였고(변환은 로컬에서 했으므로), 그 결과
+            # run02·run03이 통째로 **텍스처 없는 물체**로 학습됐다. 전송 중
+            # 텍스처만 누락된 것을 이 필터가 못 잡았다.
+            # 따라서 **파일시스템을 직접 확인**한다.
+            texdir = p.parent / e["name"] / "textures"
+            has_tex = texdir.is_dir() and any(texdir.iterdir())
+            if not has_tex:
+                dropped.append((e["name"], "텍스처 파일 없음(실제 확인)"))
+                continue
         if filter_flat and e.get("aspect_min_over_max", 1.0) < min_aspect:
             dropped.append((e["name"], f"납작함 {e['aspect_min_over_max']:.2f}"))
             continue
+        if max_solidity < 1.0:
+            sol = e.get("solidity")
+            if sol is None:
+                dropped.append((e["name"], "solidity 미계산"))
+                continue
+            if sol > max_solidity:
+                dropped.append((e["name"], f"볼록함 {sol:.2f}"))
+                continue
         # manifest에는 변환 당시의 절대경로가 들어 있는데, 컨테이너에서 만들고
         # 호스트나 서버에서 읽으면 경로가 달라진다. 변환기가 항상
         # `<out>/<name>/<name>.usd` 구조로 쓰므로 **manifest 위치 기준으로

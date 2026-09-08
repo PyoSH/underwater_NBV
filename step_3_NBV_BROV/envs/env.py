@@ -99,6 +99,8 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
                 cfg.mesh_pool_manifest,
                 filter_flat=cfg.mesh_pool_filter_flat,
                 min_aspect=cfg.mesh_pool_min_aspect,
+                max_solidity=cfg.mesh_pool_max_solidity,
+                require_texture=cfg.mesh_pool_require_texture,
                 limit=limit,
                 offset=cfg.mesh_pool_offset,
                 split=cfg.mesh_pool_split,

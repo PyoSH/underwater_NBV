@@ -59,7 +59,17 @@ class Policy:
         #
         # 조용히 어기기 쉬운 규칙이라 여기서 경고한다. 근본 해결은 조명
         # 레벨 DR이며, 그것은 "파이프라인 구성 후 다변수화" 단계의 1순위다.
-        trained_envs = (ckpt.get("args") or {}).get("num_envs")
+        _targs = ckpt.get("args") or {}
+
+        # 렌더 경로도 같아야 한다 — Camera와 TiledCamera는 화면 밝기가 다르다.
+        trained_path = _targs.get("camera_path")
+        cur_path = "tiled" if getattr(env.cfg, "use_tiled_camera", True) else "per_env"
+        if trained_path is not None and trained_path != cur_path:
+            print(f"[eval] ⚠ 학습 렌더 경로({trained_path}) ≠ 평가 경로({cur_path})"
+                  f" — 두 경로는 화면 밝기가 다르므로 정책이 학습 때 본 적 없는"
+                  f" 입력을 받는다. --camera_path {trained_path} 로 맞출 것.")
+
+        trained_envs = _targs.get("num_envs")
         if trained_envs is not None and trained_envs != env.num_envs:
             print(f"[eval] ⚠ 학습 env 수({trained_envs}) ≠ 평가 env 수"
                   f"({env.num_envs}) — tiled 렌더는 env 수에 따라 화면 밝기가"

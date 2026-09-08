@@ -79,6 +79,14 @@ parser.add_argument("--mesh_pool", type=str, default=None,
                          "물체를 스폰한다. 미지정 시 env_cfg 기본값(단일 rock)")
 parser.add_argument("--mesh_pool_limit", type=int, default=0,
                     help="메쉬 풀에서 앞 N개만 사용 (0=전부). 소규모 시험용")
+parser.add_argument("--max_solidity", type=float, default=1.0,
+                    help="solidity 상한. 이 값 이하(=오목한) 물체만 쓴다. "
+                         "볼록체는 어느 시점에서 봐도 다 보여 시점 선택 문제가 "
+                         "성립하지 않는다. 1.0=필터 없음")
+parser.add_argument("--no_require_texture", action="store_true",
+                    help="텍스처 실재 확인을 끈다. **측정 전용** — coverage는 "
+                         "depth 기반이라 텍스처와 무관하지만, 학습에서 끄면 "
+                         "실루엣만 보고 배우게 된다")
 parser.add_argument("--mesh_pool_offset", type=int, default=0,
                     help="풀 선택 창을 회전시킨다. 한 실행에서 보는 물체는 "
                          "min(num_envs, 풀)개뿐이라 풀 전체를 훑으려면 여러 번 필요")
@@ -135,6 +143,8 @@ def main() -> int:
         env_cfg.mesh_pool_limit = args.mesh_pool_limit
         env_cfg.mesh_pool_split = args.mesh_pool_split
         env_cfg.mesh_pool_offset = args.mesh_pool_offset
+        env_cfg.mesh_pool_max_solidity = args.max_solidity
+        env_cfg.mesh_pool_require_texture = not args.no_require_texture
 
     env = NBVBROVEnv(cfg=env_cfg)
     device = env.device
