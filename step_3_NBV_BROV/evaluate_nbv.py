@@ -244,9 +244,12 @@ def _report(results: list[dict], out_dir: Path, cfg) -> None:
             a, b = _cov_at(r["cov_curves"], k, 0), _cov_at(base["cov_curves"], k, 0)
             d = a - b
             rel = d / b * 100 if b else float("nan")
-            sig = d > 2 * base["coverage_std"]
+            # 평균 차이의 유의성은 에피소드별 분산이 아니라 표준오차로 본다.
+            se = math.sqrt(r["coverage_std"] ** 2 / max(r.get("n_episodes", 1), 1)
+                           + base["coverage_std"] ** 2 / max(base.get("n_episodes", 1), 1))
+            sig = d > 2 * se
             print(f"  ① 효율 — 결정 {k}회 시점 cov_q {a:.3f} vs 랜덤 {b:.3f} "
-                  f"({d:+.3f}, {rel:+.1f}%) → "
+                  f"({d:+.3f}, {rel:+.1f}%, 2·SE={2*se:.3f}) → "
                   f"{'랜덤보다 유의하게 우수' if sig else '랜덤과 구분 불가'}")
             print(f"     성공률 {r['success_rate']:.2f} vs 랜덤 {base['success_rate']:.2f}, "
                   f"성공까지 {r.get('mean_success_length', float('nan')):.1f}결정 vs "

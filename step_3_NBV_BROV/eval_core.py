@@ -225,6 +225,7 @@ def run_policy(env, policy: Policy, n_episodes: int, seed: int, out_dir: Path) -
         success_rate=float(np.mean([r["outcome"] == "success" for r in ep_rows])),
         coverage=m("coverage"),
         coverage_std=float(np.std([r["coverage"] for r in ep_rows])),
+        n_episodes=len(ep_rows),
         coverage_binary=m("coverage_binary"),
         mean_obs_dist_m=m("mean_obs_dist_m"),
         gt_never=m("gt_never"), gt_partial=m("gt_partial"), gt_full=m("gt_full"),
