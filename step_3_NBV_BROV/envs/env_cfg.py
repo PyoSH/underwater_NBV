@@ -223,7 +223,10 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     # 전혀 구분하지 못하는 상태였고, 무학습 정책도 succ=100%로 찍혔다.
     # 0.85에서 random 58% / orbit 0%로 갈린다.
     # 평가에서만 쓰인다(학습은 커리큘럼 값을 쓴다).
-    coverage_terminal: float = 0.85
+    # 2026-09-08 nbuv(tsdf 법선) ceiling 재유도: random@25 0.773 / @39 0.856,
+    # orbit 15결정 포화 0.54. 0.80 = random@25 위·@39 아래. 커리큘럼 상한과 같은
+    # 값 = "판정받을 눈금까지 학습". (exp 모델 시절 0.85와는 다른 눈금이다)
+    coverage_terminal: float = 0.80
     coverage_bonus: float = 10.0
 
     # ── 커리큘럼 (2026-08-26 사용자 확정: coverage_terminal 임계값 상향 방식) ──
@@ -254,7 +257,8 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     # random이 5~7결정에 넘는 값(0.55)에서 시작하면 초반 롤아웃이 자명한
     # 목표에 낭비된다. 0.70은 random @15결정 수준이라 부트스트랩은 되면서
     # 처음부터 의미 있는 압력이 걸린다.
-    curriculum_coverage_terminal_start: float = 0.70
+    # nbuv 눈금: orbit@25가 0.54라 0.55면 아무 정책이나 넘어 부트스트랩된다.
+    curriculum_coverage_terminal_start: float = 0.55
     # **적응형 커리큘럼에서 이 값은 스케줄이 아니라 캡이다.**
     # `_update_curriculum()`은 성공률 EMA가 게이트를 넘을 때만 올리고 여기서
     # 클램프하므로, 높게 잡아도 정책이 못 따라오면 저절로 멈춘다. 과거의
@@ -263,7 +267,7 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     # 따라서 낮게 잡는 쪽만 손해다 — 이전 0.80은 random 혼자 25결정에 0.790,
     # 40결정에 0.850을 찍으므로 즉시 막힌다.
     # 0.92 = GSO random 분포의 p90(0.90)과 최대(0.929) 사이.
-    curriculum_coverage_terminal_end: float = 0.92
+    curriculum_coverage_terminal_end: float = 0.80   # nbuv 눈금 (2026-09-08)
     curriculum_total_steps: int = 0
 
     # ── 적응형 커리큘럼 (2026-08-27) ────────────────────────────────────────
