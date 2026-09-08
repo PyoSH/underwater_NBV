@@ -65,6 +65,9 @@ parser.add_argument("--quality_model", type=str, default=None,
                     choices=("exp", "pixel", "nbuv"),
                     help="voxel 품질 모델. exp=exp(-mu*d), "
                          "pixel=exp(-mu*d)*cos(th)/d^2 (표면적당 수집 신호)")
+parser.add_argument("--normal_source", type=str, default=None,
+                    choices=("tsdf", "gt"),
+                    help="입사각 법선 출처. tsdf=∇TSDF(배포 가능, 기본), gt=메쉬(privileged, 상한 비교용)")
 parser.add_argument("--max_solidity", type=float, default=1.0,
                     help="solidity 상한. 이 값 이하(=오목한) 물체만 쓴다. "
                          "볼록체는 어느 시점에서 봐도 다 보여 시점 선택 문제가 "
@@ -123,6 +126,8 @@ def main() -> int:
     cfg.use_tiled_camera = (args.camera_path == "tiled")
     if args.quality_model is not None:
         cfg.quality_model = args.quality_model
+    if args.normal_source is not None:
+        cfg.quality_normal_source = args.normal_source
     if args.psi_min is not None:    cfg.psi_min = args.psi_min
     if args.psi_max is not None:    cfg.psi_max = args.psi_max
     if args.voxel_size is not None:

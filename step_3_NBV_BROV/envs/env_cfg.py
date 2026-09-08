@@ -371,7 +371,16 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     # 법선 출처. "gt"=메쉬 법선(privileged), "tsdf"=재구성 기울기(배포 가능).
     # 보상은 학습 전용이라 gt가 허용되지만, **관측 ch2는 배포에서 계산되어야**
     # 하므로 최종적으로는 tsdf로 가야 한다(§ imitation gap).
-    quality_normal_source: str = "gt"
+    # 2026-09-08 실측(voxel 10 cm, psi 1.6, 32물체): 한쪽차분 ∇TSDF 법선은
+    # 관측 표면의 62~84%에서 가용, GT 대비 각오차 중앙 11~25°(무작위는 60°).
+    # 배포에서 계산 가능한 유일한 법선이므로 **기본값을 tsdf**로 둔다 —
+    # 보상·관측이 같은 법선을 쓰면 정책이 실기에 없는 신호에 의존하지 않는다.
+    # "gt"는 상한 비교용(privileged).
+    quality_normal_source: str = "tsdf"
+    # ∇TSDF를 못 구하는 voxel(어느 축에도 관측 이웃 없음, 관측의 16~38%)의
+    # cos 대체값. 무작위 입사각의 |cos| 중앙값 ≈ 0.7. 1.0이면 첫 관측 과보상,
+    # 0이면 신규 관측이 0점이 되어 탐색 신호가 죽는다.
+    nbuv_cos_fallback: float = 0.7
 
     # ── "nbuv" 품질 모델 (2026-09-08, Sheinin & Schechner CVPR 2016 이식) ──
     # `quality_model = "nbuv"`일 때만 쓰인다. 세 가지가 함께 바뀐다:

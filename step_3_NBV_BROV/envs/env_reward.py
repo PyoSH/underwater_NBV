@@ -160,7 +160,17 @@ class EnvRewardMixin:
             view = cam - centers                       # voxel -> 카메라
             view = view / view.norm(dim=-1, keepdim=True).clamp(min=1e-6)
             # |cos| — 면의 어느 쪽인지는 입사각과 무관하다(env_utils 법선 주석).
-            cos_inc = (self._surf_normal * view).sum(dim=-1).abs()
+            if self.cfg.quality_normal_source == "tsdf":
+                # 배포에서 계산 가능한 법선. 이번 스텝의 융합이 끝난 TSDF에서
+                # 한쪽차분으로 구한다(`tools/measure_tsdf_normals.py` 실측 근거).
+                n_est, n_valid = self._tsdf_normals()
+                cos_inc = torch.where(
+                    n_valid,
+                    (n_est * view).sum(dim=-1).abs(),
+                    torch.full_like(dist, self.cfg.nbuv_cos_fallback),
+                )
+            else:
+                cos_inc = (self._surf_normal * view).sum(dim=-1).abs()
 
         if self.cfg.quality_model == "pixel":
             # (브랜치 1차안, 비교용으로 유지) 해상도 항을 SNR에 곱한 형태.
@@ -206,6 +216,30 @@ class EnvRewardMixin:
         self._quality_vol = torch.maximum(
             self._quality_vol, quality_new * observed.float()
         )
+
+    def _tsdf_normals(self):
+        """∇TSDF 법선 (한쪽차분 허용) — 관측 이웃이 있는 축만 쓴다.
+
+        6-이웃 중앙차분은 voxel 10 cm(물체 6~11칸)에서 관측 표면의 5~21%만
+        가용해 관측 채널에 쓸 수 없다. 축마다 관측된 이웃이 한쪽이라도 있으면
+        그쪽 차분을 쓰면 가용이 62~84%로 오르고 정확도는 같다(2026-09-08 실측:
+        각오차 중앙 11~25°, 무작위 60°). 반환: (E,Nx,Ny,Nz,3) 단위법선, 유효 mask.
+        """
+        tsdf, obs = self._tsdf_vol, self._weight_vol > 0
+        g = torch.zeros(*tsdf.shape, 3, device=tsdf.device)
+        valid = obs.clone()
+        for ax in range(3):
+            c = [slice(None)] * 4; f = [slice(None)] * 4; b = [slice(None)] * 4
+            c[ax + 1] = slice(1, -1); f[ax + 1] = slice(2, None); b[ax + 1] = slice(None, -2)
+            c, f, b = tuple(c), tuple(f), tuple(b)
+            fwd = torch.zeros_like(tsdf); bwd = torch.zeros_like(tsdf)
+            of = torch.zeros_like(obs);   ob = torch.zeros_like(obs)
+            fwd[c] = tsdf[f] - tsdf[c];   bwd[c] = tsdf[c] - tsdf[b]
+            of[c] = obs[f];               ob[c] = obs[b]
+            g[..., ax] = torch.where(of & ob, 0.5 * (fwd + bwd), torch.where(of, fwd, bwd))
+            valid &= (of | ob)
+        n = g / g.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        return n, valid
 
     def _compute_coverage_q(self) -> torch.Tensor:
         """GT surface voxel의 **voxel별 정규화** 품질 평균 — (A), 상한 1.0.
