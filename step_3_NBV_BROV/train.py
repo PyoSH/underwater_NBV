@@ -79,6 +79,10 @@ parser.add_argument("--mesh_pool", type=str, default=None,
                          "물체를 스폰한다. 미지정 시 env_cfg 기본값(단일 rock)")
 parser.add_argument("--mesh_pool_limit", type=int, default=0,
                     help="메쉬 풀에서 앞 N개만 사용 (0=전부). 소규모 시험용")
+parser.add_argument("--quality_model", type=str, default=None,
+                    choices=("exp", "pixel", "nbuv"),
+                    help="voxel 품질 모델. exp=exp(-mu*d), "
+                         "pixel=exp(-mu*d)*cos(th)/d^2 (표면적당 수집 신호)")
 parser.add_argument("--max_solidity", type=float, default=1.0,
                     help="solidity 상한. 이 값 이하(=오목한) 물체만 쓴다. "
                          "볼록체는 어느 시점에서 봐도 다 보여 시점 선택 문제가 "
@@ -135,6 +139,8 @@ def main() -> int:
     # env_cfg는 envs/env_cfg.py가 정본 — 여기서 보상/물리 가중치를 덮어쓰지 않는다.
     env_cfg = NBVBROVEnvCfg()
     env_cfg.use_tiled_camera = (args.camera_path == "tiled")
+    if args.quality_model is not None:
+        env_cfg.quality_model = args.quality_model
     if args.curriculum_end is not None:
         env_cfg.curriculum_coverage_terminal_end = args.curriculum_end
     env_cfg.scene.num_envs = args.num_envs

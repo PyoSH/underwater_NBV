@@ -199,6 +199,11 @@ class EnvUtilsMixin:
             v2 = verts[faces[:, 2]]
             pts = a * v0 + b * v1 + c * v2
 
+            # 삼각형 법선 — 표본점마다 그 삼각형의 법선을 갖고 간다.
+            # voxel별 법선은 아래에서 면적가중 평균으로 모은다(큰 삼각형이
+            # 그 voxel의 방향을 더 많이 결정해야 하므로 정규화 전 벡터를 더한다).
+            cross = np.cross(v1 - v0, v2 - v0)          # |cross| = 2·면적
+
             obj_min = pts.min(axis=0)
             obj_max = pts.max(axis=0)
             center = (obj_min + obj_max) / 2.0
@@ -220,6 +225,29 @@ class EnvUtilsMixin:
 
             surf_vol = torch.zeros(Nx, Ny, Nz, dtype=torch.bool, device=self.device)
             surf_vol[idx[:, 0], idx[:, 1], idx[:, 2]] = True
+
+            # ── voxel별 표면 법선 (2026-09-08) ───────────────────────────
+            # 품질 모델이 입사각을 쓰려면 각 표면 voxel의 방향이 필요하다.
+            # 같은 voxel에 여러 삼각형이 떨어지므로 면적가중 합 후 정규화한다.
+            #
+            # 부호 규약: 메쉬 winding에 따라 안팎이 뒤집힐 수 있으므로,
+            # **물체 중심에서 바깥을 향하도록** 강제한다. GSO는 대체로 일관된
+            # winding이지만 스캔 자산이라 신뢰할 수 없고, 뒤집힌 법선은
+            # cos을 음수로 만들어 그 voxel을 영원히 0점으로 만든다.
+            nrm = torch.tensor(cross[in_bounds.cpu().numpy()], device=self.device)
+            flat = (idx[:, 0] * Ny + idx[:, 1]) * Nz + idx[:, 2]
+            acc = torch.zeros(Nx * Ny * Nz, 3, device=self.device)
+            acc.index_add_(0, flat, nrm)
+            acc = acc.reshape(Nx, Ny, Nz, 3)
+
+            # 부호는 **강제하지 않는다** (2026-09-08 정정). "물체 중심에서
+            # 바깥쪽"으로 뒤집던 휴리스틱은 오목면(그릇 안쪽)에서 정확히 반대로
+            # 동작해 그 면을 영원히 0점으로 만들었다 — 오목 필터로 고른 물체의
+            # 안쪽이 통째로 죽는 구조였다. 입사각은 면의 어느 쪽인지와 무관하므로
+            # 품질 계산에서 |cos|를 쓴다. 뒤쪽에서 보는 경우는 TSDF 가시성
+            # (weight>0)이 이미 걸러낸다.
+
+            self._surf_normal[env_id] = acc / acc.norm(dim=-1, keepdim=True).clamp(min=1e-8)
 
             self._total_surf_voxels[env_id] = surf_vol.sum().float().clamp(min=1.0)
             self._tsdf_vol[env_id] = torch.zeros(Nx, Ny, Nz, device=self.device)

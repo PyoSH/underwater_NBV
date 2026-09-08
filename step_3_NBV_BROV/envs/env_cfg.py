@@ -347,6 +347,69 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     # 수준이라 그보다 가까운 거리는 실제로 만들 수 없다.
     quality_d_near: float = 0.2
 
+    # ── 품질 모델 (2026-09-08) ──────────────────────────────────────────
+    # "exp"  : q = exp(-mu*d)                    기존
+    # "pixel": q = exp(-mu*d) * cos(th) / d^2    표면적당 수집 신호
+    #
+    # 왜 바꾸는가 (실측 근거):
+    # `exp`만 쓰면 정책이 psi 상한으로 물러나 고착한다(run03/04). 측정상
+    # 물러날 때 한 시점 관측 voxel이 **3.04배**로 늘고 품질 손실은 **16%**뿐이라
+    # 교환비가 압도적으로 물러나는 쪽이다. 품질을 볼록화(q^p)해도 p=4에서
+    # 여전히 1.49로 이득이었다 — 지수 감쇠의 동적 범위가 psi 1.0~2.5 구간에서
+    # 15%밖에 안 되기 때문이다(mu=0.233에서 exp(-0.233*1.5)=0.705가 상한).
+    #
+    # `pixel`은 두 항을 더한다:
+    #   cos(th)  입사각 — 한 시점에서 정면으로 보이는 voxel은 작은 패치뿐이라
+    #            전부 만점을 받으려면 **물체를 돌아야 한다**. 동적 범위 0~1로
+    #            psi 구간에 눌리지 않는다.
+    #   1/d^2    투영 입체각 — psi 1.0->2.5에서 6.25배 떨어져 거리 압력이 세다.
+    #
+    # 물리적 의미: (픽셀당 신호 exp(-mu*d)) x (표면적당 픽셀 수 cos/d^2)
+    #            = **표면 단위면적에서 센서가 거두는 신호량**. 단일 물리량이다.
+    quality_model: str = "exp"
+
+    # 법선 출처. "gt"=메쉬 법선(privileged), "tsdf"=재구성 기울기(배포 가능).
+    # 보상은 학습 전용이라 gt가 허용되지만, **관측 ch2는 배포에서 계산되어야**
+    # 하므로 최종적으로는 tsdf로 가야 한다(§ imitation gap).
+    quality_normal_source: str = "gt"
+
+    # ── "nbuv" 품질 모델 (2026-09-08, Sheinin & Schechner CVPR 2016 이식) ──
+    # `quality_model = "nbuv"`일 때만 쓰인다. 세 가지가 함께 바뀐다:
+    #   (1) 품질 Q = SNR^2 형태 (Eq.16)  +  해상도 임계 (Sec.6, Eq.29-30)
+    #   (2) 누적: max -> **합** (Fisher 정보는 더해진다, Eq.21)
+    #   (3) 보상: dcov -> **log-gain** 1/2 ln(1 + Q/Q_acc) (Eq.25)
+    #
+    # 왜 (1)인가 — 현재 브랜치의 "pixel" 모델은 해상도 항 cos/d^2를 SNR에 곱해
+    # **무한 상승 항**으로 만들었다. 그 결과 (a) psi_min 고착 유인, (b) 눈금
+    # 붕괴(random 0.18), (c) depth 오차 5배 증폭. NBUV는 해상도를 **요구조건**
+    # 으로 분리한다: 요구치 R_min 미달이면 exp 벌, 초과는 평균화 이득만(상한).
+    # 거리 압력이 임계 밖에서만 걸리므로 psi_min·psi_max 고착이 둘 다 사라진다.
+    #
+    # 조사량 E에 **자체조명 1/d^2** (Eq.2, co-located L: l_LS = l_SC = d)를
+    # 넣는다. 기존 exp(-mu d)는 이걸 빠뜨려 맑은 물에서 거리 압력이 15%뿐이었다.
+    #
+    # 전역 상수(C0, f^2, well)는 log-gain의 비율에서 상쇄되므로 절대 보정은
+    # 불필요하다. 남는 것은 **형태**뿐이라 아래 값들은 형태를 정하는 손잡이다.
+
+    # E(d) = light_power * exp(-2 mu d) / d^2   (normalized well 단위, [0,1] 근처)
+    # mu=0.233에서 d=1.5 m일 때 E=0.5가 되도록 잡은 값 — "작업 거리에 맞춘 조명".
+    nbuv_light_power: float = 2.3
+    # Q_snr = E^2 / (rho * E + B + noise_floor)     (Eq.16)
+    # rho: 대표 albedo. noise_floor = sigma_RN^2 / well = 13.1^2/24000 (NBUV의
+    # Canon 60D 수치, Sec.8). B는 카메라 프리셋의 backscatter에서 유도한다.
+    nbuv_albedo: float = 0.5
+    nbuv_noise_floor: float = 0.00715
+    # 해상도 요구: voxel 한 변이 화면에서 최소 몇 픽셀이어야 하는가.
+    # R_min = (px/edge)^2 / voxel^2 [px/m^2]. 21 px @ voxel 10 cm이면
+    # f=366 px 카메라에서 gamma=1이 되는 거리 d_req = f*voxel/px = **1.75 m**
+    # (계획의 대표 관측거리). 이 값이 곧 "얼마나 가까이"의 정의다.
+    nbuv_px_per_voxel_edge: float = 21.0
+    nbuv_res_penalty_eta: float = 10.0     # gamma<1 벌의 세기 (NBUV eta=10)
+    nbuv_res_gain_max: float = 4.0         # gamma>1 평균화 이득 상한 (NBUV는 무제한 — 우리는 근접 과보상을 막기 위해 캡)
+    # 정보 이득의 사전 정밀도 비율: Q_prior = ratio * Q_target.
+    # 첫 관측의 이득 상한 = 1/2 ln(1 + 1/ratio). 정규화 상수로도 쓴다.
+    nbuv_prior_ratio: float = 0.01
+
     # ── ②a 파라메트릭 오염 (기본 off) ──────────────────────────────────
     # 학습(teacher)은 GT depth/pose로 돌고, 허용 오차 스윕에서만 켠다.
     # 상세는 `envs/depth_corruption.py`.

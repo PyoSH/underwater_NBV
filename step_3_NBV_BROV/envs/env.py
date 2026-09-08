@@ -224,9 +224,16 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         # μ는 카메라 실제 감쇠계수에서 유도한다 — `_sync_quality_water()`.
         # 여기서는 형태만 잡아두고 첫 리셋에서 실제 값으로 덮인다.
         self._quality_mu = torch.full((self.num_envs,), 0.1, device=self.device)
+        # backscatter B(d) = B_inf (1 - exp(-beta_B d)) — nbuv SNR의 분모항.
+        # mu와 같이 카메라 프리셋에서 유도한다(`_sync_quality_water`).
+        self._quality_binf = torch.zeros(self.num_envs, device=self.device)
+        self._quality_bcoef = torch.zeros(self.num_envs, device=self.device)
+        self._last_info_gain = torch.zeros(self.num_envs, device=self.device)
         # **voxel별 달성 가능 최대 품질** q*(v) — (A) 정규화의 분모.
         # 전역 스칼라 Q_sat=exp(-μ·psi_min)을 대체한다(`_update_q_star()` 참조).
         self._q_star = torch.ones(self.num_envs, Nx, Ny, Nz, device=self.device)
+        # voxel별 표면 법선 (bool surf_vol과 짝) — `_voxelize_gt_mesh()`가 채운다.
+        self._surf_normal = torch.zeros(self.num_envs, Nx, Ny, Nz, 3, device=self.device)
         # GT surface voxel의 품질 분포 진단 (step_1 diag/gt_* 대응).
         # binary coverage로는 안 보이는 "봤지만 멀어서 흐릿함"을 드러낸다.
         self._diag_gt_never = torch.zeros(self.num_envs, device=self.device)
@@ -561,6 +568,12 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         mu_np = self._camera._atten_coeff_np[ids].mean(axis=1)
         mu = torch.from_numpy(mu_np).to(self.device).float()
         self._quality_mu[env_ids] = mu
+        # backscatter도 같은 프리셋에서 — 세 값은 한 세트다(scene_cfg 주석).
+        cam = self._camera
+        self._quality_binf[env_ids] = torch.from_numpy(
+            cam._backscatter_value_np[ids].mean(axis=1)).to(self.device).float()
+        self._quality_bcoef[env_ids] = torch.from_numpy(
+            cam._backscatter_coeff_np[ids].mean(axis=1)).to(self.device).float()
 
     def _update_q_star(self, env_ids: torch.Tensor) -> None:
         """voxel별 달성 가능 최대 품질 q*(v)를 갱신한다 — (A) 정규화의 분모.
@@ -608,7 +621,43 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
 
         d_best = (cfg.psi_min - r_v).clamp(min=cfg.quality_d_near)
         mu = self._quality_mu[env_ids].view(-1, 1, 1, 1)
-        self._q_star[env_ids] = torch.exp(-mu * d_best)
+        q_star = torch.exp(-mu * d_best)
+
+        if cfg.quality_model == "pixel":
+            # 입사각의 **달성 가능한 최대**를 넣어야 한다.
+            #
+            # 왜 cos=1을 못 쓰는가: 법선이 시점 구면 밖(phi < 10도 = 거의 수직
+            # 위, phi > 80도 = 거의 수평 아래)을 향한 voxel은 어떤 시점에서도
+            # 정면으로 볼 수 없다. cos=1로 나누면 그 voxel은 영원히 만점을
+            # 못 받고, run02의 "도달 불가 임계값"이 voxel 단위로 재현된다.
+            #
+            # 카메라가 물체 중심 방향에서 본다고 근사하면 시선 방향은 그 시점의
+            # 방사 방향이고, phi in [phi_min, phi_max] 안에서 법선에 가장 가까운
+            # 방향까지의 각도 차가 곧 최선의 입사각이다. 방위각(theta)은 자유라
+            # 법선의 극각만 보면 된다.
+            #
+            # 중심에서 떨어진 voxel은 카메라가 theta를 돌리며 더 좋은 각도를
+            # 만들 수 있으므로 이 근사는 **보수적**이다(q*를 과소평가 → 비율이
+            # 1을 넘으면 clamp). 과대평가보다 이쪽이 안전하다.
+            n_z = self._surf_normal[env_ids][..., 2].clamp(-1.0, 1.0)
+            phi_n = torch.acos(n_z)                       # 법선의 극각
+            phi_best = phi_n.clamp(cfg.phi_min, cfg.phi_max)
+            cos_best = torch.cos(phi_n - phi_best).clamp(min=1e-3)
+            q_star = q_star * cos_best / d_best.clamp(min=1e-3) ** 2
+
+        if cfg.quality_model == "nbuv":
+            # Q_target = 요구 해상도(gamma=1)를 정면(cos=1)에서 정확히 만족하는
+            # 한 번의 관측이 주는 SNR 품질. 이것이 1.0의 의미다 — 이론 최대가
+            # 아니라 **설계 요구치**라 눈금이 뭉개지지 않는다(pixel 모델의
+            # 결함 교정). gamma=1인 거리: d_req = f * voxel / px_per_edge.
+            f_px = self._camera.data.intrinsic_matrices[env_ids, 0, 0]
+            d_req = (f_px * cfg.tsdf.voxel_size / cfg.nbuv_px_per_voxel_edge).clamp(min=cfg.quality_d_near)
+            mu1 = self._quality_mu[env_ids]
+            E_req = cfg.nbuv_light_power * torch.exp(-2.0 * mu1 * d_req) / d_req ** 2
+            B_req = self._quality_binf[env_ids] * (1.0 - torch.exp(-self._quality_bcoef[env_ids] * d_req))
+            q_t = E_req ** 2 / (cfg.nbuv_albedo * E_req + B_req + cfg.nbuv_noise_floor)
+            q_star = q_t.view(-1, 1, 1, 1).expand_as(q_star).clone()
+        self._q_star[env_ids] = q_star
 
     def _update_quality_diagnostics(self, env_ids: Sequence[int]) -> None:
         """GT surface voxel의 품질 분포를 never/partial/full로 집계한다.
@@ -682,7 +731,13 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         goal_reached = (coverage >= self._current_coverage_terminal()).float()
         success_reward = goal_reached * cfg.coverage_bonus
 
-        reward_coverage = cfg.k_c * delta_coverage
+        if cfg.quality_model == "nbuv":
+            # log-gain (NBUV Eq.25/27). dcov와 달리 재방문에도 체감 이득이 남고,
+            # 요구치를 넘는 관측이 그 이상 과보상되지 않는다. 정규화상 "요구조건을
+            # 정확히 만족하는 첫 관측 = 1 voxel분"이라 k_c 눈금이 유지된다.
+            reward_coverage = cfg.k_c * self._last_info_gain
+        else:
+            reward_coverage = cfg.k_c * delta_coverage
         reward_penalty = (cfg.k_x * dist_moved) + cfg.c_step
         stall_mask = (delta_coverage < cfg.stall_thr).float()
         reward_stall = cfg.k_still * stall_mask

@@ -6,6 +6,7 @@ step_1_NBV/env/env_reward.py를 무수정 이식 — TSDF 적분/coverage 계산
 """
 
 from __future__ import annotations
+import math
 import torch
 
 
@@ -152,6 +153,56 @@ class EnvRewardMixin:
         quality_new = torch.exp(-mu * dist)
 
         observed = self._weight_vol > 0
+        E = self.num_envs
+        self._last_info_gain = torch.zeros(E, device=self.device)
+
+        if self.cfg.quality_model in ("pixel", "nbuv"):
+            view = cam - centers                       # voxel -> 카메라
+            view = view / view.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+            # |cos| — 면의 어느 쪽인지는 입사각과 무관하다(env_utils 법선 주석).
+            cos_inc = (self._surf_normal * view).sum(dim=-1).abs()
+
+        if self.cfg.quality_model == "pixel":
+            # (브랜치 1차안, 비교용으로 유지) 해상도 항을 SNR에 곱한 형태.
+            # 무한 상승 항이라 psi_min 고착·눈금 붕괴를 만든다 — "nbuv" 참조.
+            quality_new = quality_new * cos_inc / dist.clamp(min=1e-3) ** 2
+
+        if self.cfg.quality_model == "nbuv":
+            cfg = self.cfg
+            d = dist.clamp(min=1e-3)
+            # ── 해상도 요구 (NBUV Sec.6) ──
+            # R = f^2 cos / d^2 [px/m^2]: voxel 표면이 화면에서 차지하는 픽셀 밀도.
+            f_px = self._camera.data.intrinsic_matrices[:, 0, 0].view(-1, 1, 1, 1)
+            R = f_px ** 2 * cos_inc / d ** 2
+            R_min = (cfg.nbuv_px_per_voxel_edge / cfg.tsdf.voxel_size) ** 2
+            gamma = R / R_min
+            # gamma<1: 요구 해상도 미달 -> exp 벌 (Eq.29). gamma>1: 여분 픽셀의
+            # 평균화 이득, 상한 (Eq.30). 임계 밖에서만 거리 압력이 걸린다.
+            res_factor = (torch.exp(-cfg.nbuv_res_penalty_eta * (1.0 / gamma.clamp(min=1e-3) - 1.0).clamp(min=0.0))
+                          * gamma.clamp(max=cfg.nbuv_res_gain_max).clamp(min=1e-6))
+            # ── SNR 품질 (NBUV Eq.2,4,16; co-located 조명이라 l_LS = l_SC = d) ──
+            # E: 조명 역제곱 + 왕복 감쇠 + Lambertian cos. B: 시선 backscatter.
+            E_irr = cfg.nbuv_light_power * torch.exp(-2.0 * mu * d) / d ** 2 * cos_inc
+            binf = self._quality_binf.view(-1, 1, 1, 1)
+            bcoef = self._quality_bcoef.view(-1, 1, 1, 1)
+            B = binf * (1.0 - torch.exp(-bcoef * d))
+            q_snr = E_irr ** 2 / (cfg.nbuv_albedo * E_irr + B + cfg.nbuv_noise_floor)
+            quality_new = q_snr * res_factor
+
+            # ── 정보 이득 (Eq.25): 1/2 ln(1 + Q_t / Q_acc) — 재방문은 체감 ──
+            # Q_acc에 사전 정밀도 Q_prior를 더해 첫 관측의 이득을 유한하게 한다.
+            # 정규화: 요구조건을 정확히 만족하는 첫 관측(Q=Q_target)의 이득 = 1.
+            q_new_obs = quality_new * observed.float()
+            q_prior = cfg.nbuv_prior_ratio * self._q_star
+            gain = 0.5 * torch.log1p(q_new_obs / (self._quality_vol + q_prior))
+            gain_norm = 0.5 * math.log1p(1.0 / cfg.nbuv_prior_ratio)
+            surf = self._surf_vol.float()
+            self._last_info_gain = (gain * surf).sum(dim=(1, 2, 3)) / (
+                self._total_surf_voxels * gain_norm)
+            # 누적은 **합** (Eq.21) — Fisher 정보는 더해진다.
+            self._quality_vol = self._quality_vol + q_new_obs
+            return
+
         self._quality_vol = torch.maximum(
             self._quality_vol, quality_new * observed.float()
         )
