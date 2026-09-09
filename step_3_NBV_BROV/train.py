@@ -48,6 +48,11 @@ parser.add_argument("--gamma",          type=float, default=0.99)
 parser.add_argument("--gae_lambda",     type=float, default=0.95)
 parser.add_argument("--clip_eps",       type=float, default=0.2)
 parser.add_argument("--ent_coef",       type=float, default=0.03)
+parser.add_argument("--resume", type=str, default=None,
+                    help="체크포인트에서 이어서 학습한다. actor/critic/옵티마이저/\n"
+                         "커리큘럼 수준·성공률 EMA·롤아웃 번호를 모두 복원한다.\n"
+                         "옵티마이저 상태가 없는 옛 체크포인트도 받지만(가중치만 복원)\n"
+                         "그 경우 Adam 모멘텀이 초기화되므로 재개 직후 잠시 흔들린다.")
 parser.add_argument("--curriculum_end",  type=float, default=None,
                     help="커리큘럼 임계값 상한 덮어쓰기. 미지정 시 env_cfg 기본값. "
                          "**에피소드 예산에서 도달 가능한 값**이어야 한다 — "
@@ -261,8 +266,29 @@ def main() -> int:
           f"({args.total_steps // max_dec // max(n_obj,1):,}개/물체 이상; "
           f"조기 성공하면 늘어난다)")
 
+    # ── 재개 ────────────────────────────────────────────────────────────────
+    start_it = 0
+    if args.resume:
+        ck = torch.load(args.resume, map_location=device)
+        actor.load_state_dict(ck["actor"])
+        critic.load_state_dict(ck["critic"])
+        start_it = int(ck.get("it", 0))
+        if "opt_a" in ck:
+            opt_a.load_state_dict(ck["opt_a"])
+            opt_c.load_state_dict(ck["opt_c"])
+        else:
+            print("[train] ⚠ 옵티마이저 상태 없는 체크포인트 — Adam 모멘텀 초기화됨")
+        if "curriculum_level" in ck:
+            env._curriculum_level = ck["curriculum_level"]
+            env.curriculum_success_ema = ck["curriculum_ema"]
+        else:
+            print(f"[train] ⚠ 커리큘럼 상태 없음 — 시작값 "
+                  f"{env._curriculum_level:.3f}부터 다시 오른다")
+        print(f"[train] 재개: {args.resume} → 롤아웃 {start_it}부터 "
+              f"{n_rollouts}까지, 커리큘럼 {env._curriculum_level:.3f}")
+
     t0 = time.time()
-    for it in range(n_rollouts):
+    for it in range(start_it, n_rollouts):
         buf.reset()
         for _t in range(T):
             with torch.no_grad():
@@ -308,6 +334,11 @@ def main() -> int:
 
         flat = buf.flat()
         ev = explained_variance(flat["old_values"], flat["returns"])
+        # 지도 임베딩 크기 — 정책이 voxel 관측을 실제로 쓰고 있는지의 대리 지표.
+        # 자기좌표 임베딩과 나란히 봐야 의미가 있어 비율로도 남긴다.
+        with torch.no_grad():
+            geo_norm = actor.embed.geo(
+                obs["vox_actor"]).norm(dim=-1).mean().item()
         rew_mean = buf.rewards.mean().item()
         terms = env.last_reward_terms
         term_abs = {k: v.abs().mean().item() for k, v in terms.items()}
@@ -349,6 +380,10 @@ def main() -> int:
             f"succ_share={term_abs['success']/tot*100:.0f}% "
             f"dist={env.last_dist_moved.mean().item():.3f} "
             f"logstd={actor.log_std.mean().item():+.2f} "
+            # 지도 사용도 — run06에서 이 값이 4.8→0.1로 무너지며 정책이 voxel
+            # 관측을 통째로 무시하게 됐다(2026-09-09 진단). 학습 중에 보이면
+            # 끝나고 절제 실험을 하기 전에 알 수 있다.
+            f"geo={geo_norm:.2f} "
             f"({time.time()-t0:.0f}s)"
         )
 
@@ -377,6 +412,8 @@ def main() -> int:
                 "train/return_std":  flat["returns"].std().item(),
                 "train/value_mean":  flat["old_values"].mean().item(),
                 "train/log_std":       actor.log_std.mean().item(),
+                # 지도(voxel) 임베딩 크기 — 0으로 수렴하면 정책이 지도를 버린 것
+                "diag/geo_embed_norm":  geo_norm,
                 "train/lr":            opt_a.param_groups[0]["lr"],
                 "diag/dist_moved":     env.last_dist_moved.mean().item(),
                 # 커리큘럼이 실제로 조여지고 있는지 — cov와 함께 봐야 의미가 있다
@@ -442,6 +479,13 @@ def main() -> int:
         if (it + 1) % args.save_interval == 0 and not args.smoke:
             path = os.path.join(args.ckpt_dir, f"nbv_step3_{it+1:05d}.pt")
             torch.save({"actor": actor.state_dict(), "critic": critic.state_dict(),
+                        # ── 재개용 상태 (2026-09-09) ──
+                        # 재부팅으로 run07이 롤아웃 47에서 통째로 날아간 뒤 추가했다.
+                        # 가중치만으로는 Adam 모멘텀과 커리큘럼 수준이 복원되지
+                        # 않아 재개가 사실상 새 학습이 된다.
+                        "opt_a": opt_a.state_dict(), "opt_c": opt_c.state_dict(),
+                        "curriculum_level": float(env._curriculum_level),
+                        "curriculum_ema": float(env.curriculum_success_ema),
                         "it": it + 1, "args": vars(args)}, path)
             print(f"[train] saved {path}")
 

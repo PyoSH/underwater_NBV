@@ -243,7 +243,16 @@ class Critic(nn.Module):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class RolloutBuffer:
-    """vox는 uint8로 저장(메모리 절약), `flat()`에서 float 변환."""
+    """vox는 float16으로 저장(메모리 절약), `flat()`에서 float32 변환.
+
+    **uint8을 쓰면 안 된다** (2026-09-09 수정): ch2는 관측 품질 0~1 **연속값**
+    (`env.py::_get_vox_actor()`)이라 `to(torch.uint8)`가 0.99를 0으로 잘라낸다.
+    그 결과 행동은 연속 ch2로 고르면서 PPO 갱신은 ch2가 사실상 전부 0인 입력으로
+    계산돼, 정책이 "본 정도"를 학습할 방법이 원천 차단됐다. 실제로 run06에서
+    지도 임베딩 노름이 4.78 → 0.13으로 무너지고 좌우 반전 민감도가 0.80 → 0.0006이
+    됐다(`tools/measure_map_sensitivity.py`). ch0/ch1은 0/1이라 무사했지만
+    품질 채널이 죽은 채로는 NBUV 보상이 재는 양을 정책이 볼 수 없다.
+    float16이면 96env·32스텝에서 147 MB로, uint8 대비 74 MB 추가일 뿐이다."""
 
     def __init__(self, T: int, E: int,
                  Nx: int, Ny: int, Nz: int,
@@ -253,7 +262,7 @@ class RolloutBuffer:
         self.T, self.E, self.ptr = T, E, 0
         kw = dict(device=device)
 
-        self.vox               = torch.zeros(T, E, 3, Nx, Ny, Nz, dtype=torch.uint8, **kw)
+        self.vox               = torch.zeros(T, E, 3, Nx, Ny, Nz, dtype=torch.float16, **kw)
         self.img               = torch.zeros(T, E, M, H, W,            **kw)
         self.obs_scalar        = torch.zeros(T, E, scalar_dim,          **kw)
         self.obs_scalar_critic = torch.zeros(T, E, scalar_dim_critic,   **kw)
@@ -266,7 +275,7 @@ class RolloutBuffer:
     def add(self, vox, img, obs_scalar, obs_scalar_critic,
             action_u, logprob, reward, done, value):
         t = self.ptr
-        self.vox              [t] = vox.to(torch.uint8)
+        self.vox              [t] = vox.to(torch.float16)
         self.img              [t] = img
         self.obs_scalar       [t] = obs_scalar
         self.obs_scalar_critic[t] = obs_scalar_critic
