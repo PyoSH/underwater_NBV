@@ -204,6 +204,10 @@ def run_policy(env, policy: Policy, n_episodes: int, seed: int, out_dir: Path) -
             covq_belief = env.terminal_coverage_q[eid].item()
             ep_rows.append(dict(
                 episode=len(ep_rows),
+                # env 번호 = 물체 번호(물체는 env마다 고정 배정된다). 같은 물체의
+                # 여러 궤적을 묶어 "이 물체에서 잘 고르면 얼마나 더 볼 수 있나"를
+                # 재려면 반드시 필요하다 — 적응성 여유 측정의 축이다.
+                env_id=eid,
                 outcome="success" if terminated[eid].item() else "timeout",
                 length=int(ep_len[eid].item()),
                 ep_return=ep_ret[eid].item(),
