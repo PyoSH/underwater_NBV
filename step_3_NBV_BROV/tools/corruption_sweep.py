@@ -164,7 +164,7 @@ def main() -> int:
             env._corruptor.clear_stats()
             print(f"\n[②a] ── {name}: {env._corruptor.describe()} ──")
 
-            r = run_policy(env, Policy(args.policy, env, env.device, args.seed),
+            r = run_policy(env, Policy(args.policy, env, env.device, args.seed, False),  # greedy
                            args.num_episodes, args.seed, out_dir / name)
             r["level"] = name
             r["params"] = {k: getattr(env.cfg.corruption, k) for k in _FIELDS}
