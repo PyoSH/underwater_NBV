@@ -101,8 +101,8 @@ class EnvUtilsMixin:
 
         return R
 
-    def _camera_position_w(self) -> torch.Tensor:
-        """카메라 광학중심의 월드 좌표 (E,3).
+    def _camera_position_w(self, corrupt: bool = True) -> torch.Tensor:
+        """카메라 광학중심의 월드 좌표 (E,3). `corrupt=False`면 실제 pose(②a 진실 스트림).
 
         quality 계산(Beer-Lambert 거리 감쇠)이 쓰는 거리는 **로봇 root가 아니라
         카메라 위치** 기준이어야 한다 — 오프셋 0.16 m가 psi_min=1.0 m 대비 16%라
@@ -117,11 +117,12 @@ class EnvUtilsMixin:
             self._camera_offset_pos.unsqueeze(0).expand(self.num_envs, -1),
         )
         # ②a: 품질(거리 감쇠)도 로봇이 믿는 pose 기준이어야 융합과 일관된다.
-        pos, _ = self._corruptor.apply_pose(pos, self._robot.data.root_quat_w)
+        if corrupt:
+            pos, _ = self._corruptor.apply_pose(pos, self._robot.data.root_quat_w)
         return pos
 
-    def _build_cam_pose(self) -> torch.Tensor:
-        """카메라 extrinsic (world → OpenCV camera frame, 4x4).
+    def _build_cam_pose(self, corrupt: bool = True) -> torch.Tensor:
+        """카메라 extrinsic (world → OpenCV camera frame, 4x4). `corrupt=False`면 실제 pose.
 
         step_1과의 유일한 차이: `self.cam_pos`/`self.cam_orient`(독립 sensor_rig
         pose) 대신 카메라 센서 자체의 `data.pos_w`/`data.quat_w`를 직접 읽는다
@@ -157,7 +158,8 @@ class EnvUtilsMixin:
         # ②a: 여기서부터는 **믿는** pose다. 오염이 꺼져 있으면 항등.
         # 위치·yaw 드리프트는 voxel을 엉뚱한 자리에 기입하게 만들므로,
         # depth 오차(재구성이 흐려짐)와는 질적으로 다른 열화를 만든다.
-        cam_pos_w, cam_quat_w = self._corruptor.apply_pose(cam_pos_w, cam_quat_w)
+        if corrupt:
+            cam_pos_w, cam_quat_w = self._corruptor.apply_pose(cam_pos_w, cam_quat_w)
 
         R_wc = self._quat_to_rot_matrix(cam_quat_w)   # (E,3,3) cam→world
         R_cw = R_wc.transpose(1, 2)                    # (E,3,3) world→cam
@@ -252,6 +254,8 @@ class EnvUtilsMixin:
             self._total_surf_voxels[env_id] = surf_vol.sum().float().clamp(min=1.0)
             self._tsdf_vol[env_id] = torch.zeros(Nx, Ny, Nz, device=self.device)
             self._weight_vol[env_id] = torch.zeros(Nx, Ny, Nz, device=self.device)
+            self._tsdf_vol_true[env_id] = 0.0        # ②a 진실 스트림
+            self._weight_vol_true[env_id] = 0.0
             self._surf_vol[env_id] = surf_vol
 
     def _load_mesh(self, env_id: int):

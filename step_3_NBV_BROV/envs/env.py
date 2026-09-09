@@ -188,6 +188,13 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         Nx, Ny, Nz = cfg.tsdf.vol_dim
         self._tsdf_vol = torch.zeros(self.num_envs, Nx, Ny, Nz, device=self.device)
         self._weight_vol = torch.zeros(self.num_envs, Nx, Ny, Nz, device=self.device)
+        # ②a 진실 스트림 (채점 전용, `cfg.corruption.enabled`일 때만 갱신) — env_reward 주석.
+        self._tsdf_vol_true = torch.zeros(self.num_envs, Nx, Ny, Nz, device=self.device)
+        self._weight_vol_true = torch.zeros(self.num_envs, Nx, Ny, Nz, device=self.device)
+        self.curr_coverage_true = torch.zeros(self.num_envs, device=self.device)
+        self.curr_coverage_q_true = torch.zeros(self.num_envs, device=self.device)
+        self.terminal_coverage_true = torch.zeros(self.num_envs, device=self.device)
+        self.terminal_coverage_q_true = torch.zeros(self.num_envs, device=self.device)
         self._vol_origin = torch.zeros(self.num_envs, 3, device=self.device)
         self._total_surf_voxels = torch.ones(self.num_envs, device=self.device)
         self._surf_vol = torch.zeros(self.num_envs, Nx, Ny, Nz, dtype=torch.bool, device=self.device)
@@ -212,6 +219,7 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
 
         # ── Quality-weighted coverage (env_cfg.use_quality_coverage 참조) ──
         self._quality_vol = torch.zeros(self.num_envs, Nx, Ny, Nz, device=self.device)
+        self._quality_vol_true = torch.zeros(self.num_envs, Nx, Ny, Nz, device=self.device)
         # 보상 delta의 기준 — binary/quality 중 실제로 쓰는 쪽의 정규화값을 담는다.
         self._prev_coverage_norm = torch.zeros(self.num_envs, device=self.device)
         self.curr_coverage_q = torch.zeros(self.num_envs, device=self.device)
@@ -224,6 +232,7 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         # μ는 카메라 실제 감쇠계수에서 유도한다 — `_sync_quality_water()`.
         # 여기서는 형태만 잡아두고 첫 리셋에서 실제 값으로 덮인다.
         self._quality_mu = torch.full((self.num_envs,), 0.1, device=self.device)
+        self._quality_mu_true = torch.full((self.num_envs,), 0.1, device=self.device)  # ②a: μ̂ 교란 전
         # backscatter B(d) = B_inf (1 - exp(-beta_B d)) — nbuv SNR의 분모항.
         # mu와 같이 카메라 프리셋에서 유도한다(`_sync_quality_water`).
         self._quality_binf = torch.zeros(self.num_envs, device=self.device)
@@ -232,6 +241,7 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         # **voxel별 달성 가능 최대 품질** q*(v) — (A) 정규화의 분모.
         # 전역 스칼라 Q_sat=exp(-μ·psi_min)을 대체한다(`_update_q_star()` 참조).
         self._q_star = torch.ones(self.num_envs, Nx, Ny, Nz, device=self.device)
+        self._q_star_true = torch.ones(self.num_envs, Nx, Ny, Nz, device=self.device)  # ②a: 실제 μ 기준
         # voxel별 표면 법선 (bool surf_vol과 짝) — `_voxelize_gt_mesh()`가 채운다.
         self._surf_normal = torch.zeros(self.num_envs, Nx, Ny, Nz, 3, device=self.device)
         # GT surface voxel의 품질 분포 진단 (step_1 diag/gt_* 대응).
@@ -568,6 +578,7 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         mu_np = self._camera._atten_coeff_np[ids].mean(axis=1)
         mu = torch.from_numpy(mu_np).to(self.device).float()
         self._quality_mu[env_ids] = mu
+        self._quality_mu_true[env_ids] = mu
         # backscatter도 같은 프리셋에서 — 세 값은 한 세트다(scene_cfg 주석).
         cam = self._camera
         self._quality_binf[env_ids] = torch.from_numpy(
@@ -575,7 +586,8 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         self._quality_bcoef[env_ids] = torch.from_numpy(
             cam._backscatter_coeff_np[ids].mean(axis=1)).to(self.device).float()
 
-    def _update_q_star(self, env_ids: torch.Tensor) -> None:
+    def _update_q_star(self, env_ids: torch.Tensor, mu_all: torch.Tensor | None = None,
+                       out: torch.Tensor | None = None) -> None:
         """voxel별 달성 가능 최대 품질 q*(v)를 갱신한다 — (A) 정규화의 분모.
 
             q*(v) = exp(−μ · max(psi_min − r_v, d_near)),   r_v = |v − 물체중심|
@@ -620,7 +632,9 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         r_v = torch.norm(centers - obj_center[:, None, None, None, :], dim=-1)
 
         d_best = (cfg.psi_min - r_v).clamp(min=cfg.quality_d_near)
-        mu = self._quality_mu[env_ids].view(-1, 1, 1, 1)
+        # ②a: 기본은 로봇이 믿는 μ̂(보상용). 진실 스트림은 실제 μ와 별도 출력 볼륨을 넘긴다.
+        mu_src = self._quality_mu if mu_all is None else mu_all
+        mu = mu_src[env_ids].view(-1, 1, 1, 1)
         q_star = torch.exp(-mu * d_best)
 
         if cfg.quality_model == "pixel":
@@ -652,12 +666,12 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
             # 결함 교정). gamma=1인 거리: d_req = f * voxel / px_per_edge.
             f_px = self._camera.data.intrinsic_matrices[env_ids, 0, 0]
             d_req = (f_px * cfg.tsdf.voxel_size / cfg.nbuv_px_per_voxel_edge).clamp(min=cfg.quality_d_near)
-            mu1 = self._quality_mu[env_ids]
+            mu1 = mu_src[env_ids]
             E_req = cfg.nbuv_light_power * torch.exp(-2.0 * mu1 * d_req) / d_req ** 2
             B_req = self._quality_binf[env_ids] * (1.0 - torch.exp(-self._quality_bcoef[env_ids] * d_req))
             q_t = E_req ** 2 / (cfg.nbuv_albedo * E_req + B_req + cfg.nbuv_noise_floor)
             q_star = q_t.view(-1, 1, 1, 1).expand_as(q_star).clone()
-        self._q_star[env_ids] = q_star
+        (self._q_star if out is None else out)[env_ids] = q_star
 
     def _update_quality_diagnostics(self, env_ids: Sequence[int]) -> None:
         """GT surface voxel의 품질 분포를 never/partial/full로 집계한다.
@@ -700,6 +714,15 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         if self.cfg.use_quality_coverage:
             self._compute_quality()                       # _integrate_depth 이후
             self.curr_coverage_q = self._compute_coverage_q()
+
+        if self.cfg.corruption.enabled:
+            # ②a 진실 스트림 — 채점 전용. 정책·보상·종료는 위의 믿음 스트림만 본다.
+            self._integrate_depth_true()
+            self.curr_coverage_true = self._compute_curr_coverage(self._weight_vol_true)
+            if self.cfg.use_quality_coverage:
+                self._compute_quality_true()
+                self.curr_coverage_q_true = self._compute_coverage_q(
+                    self._quality_vol_true, self._q_star_true)
 
         # 보상·종료·커리큘럼이 공통으로 쓰는 정규화 coverage
         coverage = self._coverage_for_reward()
@@ -845,6 +868,12 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         self.curr_coverage[env_ids_t] = 0.0
         self._quality_vol[env_ids_t] = 0.0
         self.curr_coverage_q[env_ids_t] = 0.0
+        # ②a 진실 스트림도 같은 순서로 캐싱·초기화 (TSDF/weight는 `_voxelize_gt_mesh`가 0으로)
+        self.terminal_coverage_true[env_ids_t] = self.curr_coverage_true[env_ids_t]
+        self.terminal_coverage_q_true[env_ids_t] = self.curr_coverage_q_true[env_ids_t]
+        self.curr_coverage_true[env_ids_t] = 0.0
+        self.curr_coverage_q_true[env_ids_t] = 0.0
+        self._quality_vol_true[env_ids_t] = 0.0
         self._prev_coverage_norm[env_ids_t] = 0.0
         self._prev_robot_pos[env_ids_t] = spawn_pos
         self._actions[env_ids_t] = 0.0
@@ -916,6 +945,10 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         # 정규화돼 보상이 조용히 틀어진다. μ̂ 교란도 이 앞에 와야 반영된다.
         if cfg.use_quality_coverage:
             self._update_q_star(env_ids_t)
+            if cfg.corruption.enabled:
+                # 채점 분모는 **실제** μ로 — μ̂ 교란은 로봇의 믿음에만 들어간다.
+                self._update_q_star(env_ids_t, mu_all=self._quality_mu_true,
+                                    out=self._q_star_true)
 
     def _randomize_water_params(self, env_ids) -> None:
         import numpy as np

@@ -145,7 +145,10 @@ def run_policy(env, policy: Policy, n_episodes: int, seed: int, out_dir: Path) -
         p_err = torch.norm(
             env._robot.data.root_pos_w - env._guidance.p_target, dim=-1)
         q_err = _quat_angle(env._robot.data.root_quat_w, env._guidance.q_target)
-        cov_now = env._coverage_for_reward()
+        # ②a: 채점은 진실 스트림(오염이 꺼져 있으면 보상용과 동일 텐서).
+        cov_now = env._coverage_for_scoring()
+        cov_bin_now = env._coverage_bin_for_scoring()
+        term_q, term_bin = env._terminal_coverage_for_scoring()
 
         step_rows.append(dict(
             decision=decision,
@@ -153,7 +156,7 @@ def run_policy(env, policy: Policy, n_episodes: int, seed: int, out_dir: Path) -
             pos_err_max_m=p_err.max().item(),
             att_err_deg=math.degrees(q_err.mean().item()),
             coverage=cov_now.mean().item(),
-            coverage_binary=env.curr_coverage.mean().item(),
+            coverage_binary=cov_bin_now.mean().item(),
             psi=env._sph_psi.mean().item(),
             phi_deg=math.degrees(env._sph_phi.mean().item()),
             # 클램프 한계에 붙어 있는 env 비율 — 포화 여부의 직접 지표
@@ -171,17 +174,17 @@ def run_policy(env, policy: Policy, n_episodes: int, seed: int, out_dir: Path) -
         # 종료된 env의 `cov_now`는 이미 리셋된 0이므로 `terminal_*`를 쓴다.
         for i in range(E):
             if done[i]:
-                cur_curve[i].append((env.terminal_coverage_q[i].item(),
-                                     env.terminal_coverage[i].item()))
+                cur_curve[i].append((term_q[i].item(), term_bin[i].item()))
             else:
-                cur_curve[i].append((cov_now[i].item(),
-                                     env.curr_coverage[i].item()))
+                cur_curve[i].append((cov_now[i].item(), cov_bin_now[i].item()))
 
         for eid in done.nonzero(as_tuple=True)[0].tolist():
             if len(ep_rows) >= n_episodes:
                 break
-            covq = env.terminal_coverage_q[eid].item()
-            covb = env.terminal_coverage[eid].item()
+            covq = term_q[eid].item()
+            covb = term_bin[eid].item()
+            # 로봇의 자가채점(믿음 스트림) — 진실과의 차이가 "얼마나 잘못 알고 있나"
+            covq_belief = env.terminal_coverage_q[eid].item()
             ep_rows.append(dict(
                 episode=len(ep_rows),
                 outcome="success" if terminated[eid].item() else "timeout",
@@ -189,6 +192,7 @@ def run_policy(env, policy: Policy, n_episodes: int, seed: int, out_dir: Path) -
                 ep_return=ep_ret[eid].item(),
                 coverage=covq,
                 coverage_binary=covb,
+                coverage_belief=covq_belief,
                 # 에피소드 동안의 평균 관측 반경. 예전에는 품질비를
                 # Beer-Lambert로 역산했는데, 그 식은 전역 Q_sat 정규화를
                 # 전제하므로 (A) voxel별 정규화 도입 후 무효다. 실제 psi를
@@ -227,6 +231,7 @@ def run_policy(env, policy: Policy, n_episodes: int, seed: int, out_dir: Path) -
         coverage_std=float(np.std([r["coverage"] for r in ep_rows])),
         n_episodes=len(ep_rows),
         coverage_binary=m("coverage_binary"),
+        coverage_belief=m("coverage_belief"),
         mean_obs_dist_m=m("mean_obs_dist_m"),
         gt_never=m("gt_never"), gt_partial=m("gt_partial"), gt_full=m("gt_full"),
         mean_length=float(np.mean([r["length"] for r in ep_rows])),

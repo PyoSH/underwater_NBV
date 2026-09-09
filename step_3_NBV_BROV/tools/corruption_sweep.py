@@ -181,16 +181,18 @@ def main() -> int:
     base = results[0]
     print("\n" + "=" * 84)
     print(f"{'조건':>16s}{'AbsRel':>9s}{'cov_q':>8s}{'열화':>8s}"
-          f"{'cov_bin':>9s}{'성공률':>8s}{'psi평균':>9s}{'판정':>8s}")
-    print("-" * 84)
+          f"{'자가채점':>9s}{'cov_bin':>9s}{'성공률':>8s}{'psi평균':>9s}{'판정':>8s}")
+    print("-" * 93)
     for r in results:
         drop = (base["coverage"] - r["coverage"]) / max(base["coverage"], 1e-6)
         ok = drop <= args.tolerance
         print(f"{r['level']:>16s}{r['absrel']:>9.3f}{r['coverage']:>8.3f}"
-              f"{drop*100:>7.1f}%{r['coverage_binary']:>9.3f}"
+              f"{drop*100:>7.1f}%{r.get('coverage_belief', float('nan')):>9.3f}"
+              f"{r['coverage_binary']:>9.3f}"
               f"{r['success_rate']:>8.2f}{r['mean_obs_dist_m']:>9.2f}"
               f"{'합격' if ok else '탈락':>8s}")
-    print("-" * 84)
+    print("-" * 93)
+    print("  cov_q = 진실 스트림(깨끗한 depth·실제 pose·실제 μ) 채점, 자가채점 = 로봇의 믿음 스트림")
 
     # 허용선: 합격한 조건들 중 realized AbsRel 최댓값
     passed = [r for r in results[1:]
