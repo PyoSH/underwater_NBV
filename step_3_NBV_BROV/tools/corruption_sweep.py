@@ -27,7 +27,8 @@
 /isaac-sim/python.sh -u tools/corruption_sweep.py --headless --enable_cameras \
     --policy checkpoints/stage4_A_run01/nbv_step3_00140.pt \
     --mesh_pool ../robots/data/gso_usd/manifest.json \
-    --num_envs 16 --num_episodes 32 --max_decisions 25
+    --num_envs 16 --num_episodes 32 --max_decisions 25 \
+    --camera_path per_env --quality_model nbuv --normal_source tsdf --max_solidity 0.5 --ceiling
 """
 
 from __future__ import annotations
@@ -58,6 +59,17 @@ parser.add_argument("--axes", type=str, default="scale,noise,pose,combo",
                     help="쉼표 구분. scale/noise/pose/mu/combo")
 parser.add_argument("--tolerance", type=float, default=0.15,
                     help="허용 열화 비율. 계획 §5의 distillation 발동 기준과 동일")
+# 학습·평가와 **같은** 카메라·보상·물체풀로 재야 한다 (evaluate_nbv.py와 동일 인자).
+parser.add_argument("--camera_path", type=str, default="per_env",
+                    choices=("per_env", "tiled"))
+parser.add_argument("--quality_model", type=str, default=None,
+                    choices=("exp", "pixel", "nbuv"))
+parser.add_argument("--normal_source", type=str, default=None, choices=("gt", "tsdf"))
+parser.add_argument("--max_solidity", type=float, default=None)
+parser.add_argument("--no_require_texture", action="store_true")
+parser.add_argument("--ceiling", action="store_true",
+                    help="coverage 종료 비활성화(임계값 1.1). evaluate_nbv --ceiling과 "
+                         "같은 눈금이라 열화를 임계값에 눌리지 않고 잰다")
 AppLauncher.add_app_launcher_args(parser)
 if "--enable_cameras" not in sys.argv:
     sys.argv.append("--enable_cameras")
@@ -117,10 +129,20 @@ def main() -> int:
     cfg.scene.num_envs = args.num_envs
     cfg.curriculum_enabled = False
     cfg.episode_length_s = args.max_decisions * (cfg.sim.dt * cfg.decimation)
+    cfg.use_tiled_camera = (args.camera_path == "tiled")
+    if args.quality_model is not None:
+        cfg.quality_model = args.quality_model
+    if args.normal_source is not None:
+        cfg.quality_normal_source = args.normal_source
+    if args.ceiling:
+        cfg.coverage_terminal = 1.1
     if args.mesh_pool:
         cfg.mesh_pool_manifest = args.mesh_pool
         cfg.mesh_pool_split = args.mesh_pool_split
         cfg.mesh_pool_offset = args.mesh_pool_offset
+        if args.max_solidity is not None:
+            cfg.mesh_pool_max_solidity = args.max_solidity
+        cfg.mesh_pool_require_texture = not args.no_require_texture
     # 오염기는 항상 만들어 두고 조건마다 필드만 바꾼다 — 씬을 다시 짓지 않는
     # 것이 핵심이다(씬 생성이 이 실험에서 가장 비싼 부분이고, 물체 배정이
     # 바뀌면 조건 간 비교가 무너진다).
