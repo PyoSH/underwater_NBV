@@ -30,13 +30,24 @@ def _quat_angle(q_a: torch.Tensor, q_b: torch.Tensor) -> torch.Tensor:
 class Policy:
     """액션 생성기. 환경 난수 스트림을 오염시키지 않는 것이 핵심 계약."""
 
-    def __init__(self, name: str, env, device, seed: int, stochastic: bool):
+    def __init__(self, name: str, env, device, seed: int, stochastic: bool,
+                 ablate_map: str = "none"):
         self.name = name
         self.kind = "ckpt"
         self._device = device
         # 환경과 분리된 Generator — 공정 비교의 전제(모듈 docstring 참조)
         self._gen = torch.Generator(device=device).manual_seed(seed)
         self._stochastic = stochastic
+        # ── 지도 절제 (2026-09-09) ──────────────────────────────────────
+        # "정책이 정말 지도를 읽고 다음 시점을 고르는가, 아니면 자기 좌표만 보고
+        # 좋은 훑기 궤적을 재생하는가"를 가르는 시험이다. actor의 스칼라 입력은
+        # 자기 구면좌표 3개뿐이라(`env.py::_get_observations`), "무엇을 이미
+        # 봤는지"는 **오직 voxel 격자에서만** 온다. 그래서 voxel만 무력화하면
+        # 지도 의존도가 분리된다.
+        #   shuffle: env끼리 voxel을 뒤섞는다 — 입력 분포는 그대로(진짜 지도)이고
+        #            자기 상태와의 **대응만** 깨진다. zero보다 공정한 시험이다.
+        #   zero:    지도가 아예 없는 경우.
+        self._ablate_map = ablate_map
 
         if name in ("random", "hold", "orbit", "approach"):
             self.kind = name
@@ -101,12 +112,18 @@ class Policy:
             return torch.rand(
                 (n_env, a_dim), generator=self._gen, device=self._device
             ) * 2.0 - 1.0
+        vox = obs["vox_actor"]
+        if self._ablate_map == "shuffle":
+            perm = torch.randperm(vox.shape[0], generator=self._gen, device=self._device)
+            vox = vox[perm]
+        elif self._ablate_map == "zero":
+            vox = torch.zeros_like(vox)
+
         if self._stochastic:
             a, _u, _lp, _e = self.actor.sample(
-                obs["vox_actor"], obs["img_semantic"], obs["extra_info"])
+                vox, obs["img_semantic"], obs["extra_info"])
             return a
-        return self.actor.greedy(
-            obs["vox_actor"], obs["img_semantic"], obs["extra_info"])
+        return self.actor.greedy(vox, obs["img_semantic"], obs["extra_info"])
 
 
 def run_policy(env, policy: Policy, n_episodes: int, seed: int, out_dir: Path) -> dict:

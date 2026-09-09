@@ -99,6 +99,11 @@ parser.add_argument("--camera_path", type=str, default="tiled",
                     help="렌더 경로. **학습과 반드시 같아야 한다** — 두 경로는 "
                          "화면 밝기가 다르고(그리고 tiled는 env 수에 따라서도 "
                          "달라진다), 정책 입력이 그레이스케일이라 직접 영향받는다")
+parser.add_argument("--ablate_map", type=str, default="none",
+                    choices=("none", "shuffle", "zero"),
+                    help="지도 절제 시험: shuffle=env끼리 voxel 관측을 뒤섞음(입력 분포 유지,\n"
+                         "자기 상태와의 대응만 파괴), zero=voxel 관측 제거. 성능이 유지되면\n"
+                         "정책이 지도가 아니라 자기 좌표 기반 궤적으로 움직인다는 뜻이다")
 parser.add_argument("--stochastic", action="store_true",
                     help="체크포인트 정책을 greedy(tanh(mu)) 대신 샘플링으로 실행")
 AppLauncher.add_app_launcher_args(parser)
@@ -167,7 +172,8 @@ def main() -> int:
             name = name.strip()
             if not name:
                 continue
-            pol = Policy(name, env, env.device, args.seed, args.stochastic)
+            pol = Policy(name, env, env.device, args.seed, args.stochastic,
+                         args.ablate_map)
             print(f"\n[eval] ── {name} ──")
             res = run_policy(env, pol, args.num_episodes, args.seed, out_dir)
             results.append(res)
