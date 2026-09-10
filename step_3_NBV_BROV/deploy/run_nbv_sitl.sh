@@ -23,6 +23,11 @@ usage: run_nbv_sitl.sh <run_dir> [옵션]
   --dvl-restart-after-s N  첫 injector 정지 후 N초 뒤 두 번째 injector 기동 (0=안 함).
                       EKF 가 fix 복귀에 회복하는지 재는 용도
   --belief 0|1        NBV 믿음 노드(TSDF) 기동 (기본 1)
+  --control 0|1       Phase 4 ② 폐루프: brov 스택(obs_node truth + model PID) + truth
+                      localization + 정책 노드를 띄워 --decisions 홉을 돈다 (기본 0)
+  --policy NAME       폐루프 정책 (hold|approach|sweep|orbit|random, 기본 random)
+  --decisions N       폐루프 결정 수 (기본 10)
+  --seed N            폐루프 시드 (기본 0)
 USAGE
   exit 2
 }
@@ -36,6 +41,10 @@ WATER=IB
 DVL_DURATION_S=0
 BELIEF=1
 DVL_RESTART_AFTER_S=0
+CONTROL=0
+POLICY=random
+DECISIONS=10
+SEED=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --tilt-deg) TILT_DEG=$2; shift 2 ;;
@@ -45,6 +54,10 @@ while [[ $# -gt 0 ]]; do
     --dvl-duration-s) DVL_DURATION_S=$2; shift 2 ;;
     --dvl-restart-after-s) DVL_RESTART_AFTER_S=$2; shift 2 ;;
     --belief) BELIEF=$2; shift 2 ;;
+    --control) CONTROL=$2; shift 2 ;;
+    --policy) POLICY=$2; shift 2 ;;
+    --decisions) DECISIONS=$2; shift 2 ;;
+    --seed) SEED=$2; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -61,15 +74,21 @@ DVL_INJECTOR=/tmp/stage2_sitl_dvl_injector.py
 ORIGIN_HELPER=/tmp/stage2_set_ekf_origin.py
 BROV_SOURCE=/home/bluerov2_sitl/brov_ros2
 BROV_INSTALL=$BROV_SOURCE/install_mk2
+[[ "$CONTROL" == "1" ]] && BROV_INSTALL=$BROV_SOURCE/install
 SEABED_Z=-2.7
 export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-42}
 
-GZ_PID=; ARDUSUB_PID=; MAVPROXY_PID=; BRIDGE_PID=; DVL_PID=; DVL2_PID=; CAM_PID=; BAG_PID=; EKF_PID=; BELIEF_PID=
+GZ_PID=; ARDUSUB_PID=; MAVPROXY_PID=; BRIDGE_PID=; DVL_PID=; DVL2_PID=; CAM_PID=; BAG_PID=; EKF_PID=; BELIEF_PID=; LAUNCH_PID=; LOC_PID=
 stop_group() { local p=${1:-} s=${2:-INT}; [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null && kill -"$s" -- -"$p" 2>/dev/null || true; }
 cleanup() {
   echo "[nbv-sitl] 정리"
+  if [[ -n "$LAUNCH_PID" ]] && kill -0 "$LAUNCH_PID" 2>/dev/null; then
+    for svc in model_based/stop stop_control disarm_control; do
+      timeout 4 ros2 service call /brov/$svc std_srvs/srv/Trigger "{}" >/dev/null 2>&1 || true
+    done
+  fi
   for sig in INT TERM KILL; do
-    for p in "$BAG_PID" "$BELIEF_PID" "$EKF_PID" "$CAM_PID" "$DVL2_PID" "$DVL_PID" "$BRIDGE_PID" "$MAVPROXY_PID" "$ARDUSUB_PID" "$GZ_PID"; do
+    for p in "$BAG_PID" "$LOC_PID" "$LAUNCH_PID" "$BELIEF_PID" "$EKF_PID" "$CAM_PID" "$DVL2_PID" "$DVL_PID" "$BRIDGE_PID" "$MAVPROXY_PID" "$ARDUSUB_PID" "$GZ_PID"; do
       stop_group "$p" "$sig"
     done
     sleep 1
@@ -90,8 +109,16 @@ set -u
 export GZ_SIM_RESOURCE_PATH=$DEPLOY/models:$GZ_SIM_RESOURCE_PATH
 
 # ROV 카메라를 얹은 파생 모델을 상류에서 매번 새로 만든다 (포크 금지)
-python3 "$DEPLOY/make_rov_with_camera.py" --out "$DEPLOY/models/bluerov2_heavy" \
-  > "$RUN_DIR/rov_camera.txt" 2>&1
+# 폐루프에서는 카메라를 5 Hz 로 낮춘다: 헤드리스 ogre2 렌더가 RTF 를 0.5 로 끌어내리고
+# (run #4/#5 실측), belief 는 dwell 끝의 프레임 한 장만 쓴다.
+CAM_RATE=15; [[ "$CONTROL" == "1" ]] && CAM_RATE=5
+# 학습 카메라 오프셋 x 0.1575 는 Edo 선체 mesh 안쪽이라 depth 가 전부 -inf (run #10 실측).
+# SITL 에서는 카메라를 x 0.30 에 두고 정책 노드가 base_link 목표를 그 차이만큼 look 축 뒤로
+# 물려 카메라가 학습 위치에 정확히 오게 한다 (실기는 실제 오프셋 = 학습 오프셋, shift 0).
+CAM_TRAIN_X=0.15751251578330994; CAM_GZ_X=0.30; CAM_Y=0.0052856863476336; CAM_Z=0.06784216314554214
+CAM_X_SHIFT=$(python3 -c "print($CAM_GZ_X - $CAM_TRAIN_X)")
+python3 "$DEPLOY/make_rov_with_camera.py" --out "$DEPLOY/models/bluerov2_heavy" --rate-hz "$CAM_RATE" \
+  --cam-xyz "$CAM_GZ_X" "$CAM_Y" "$CAM_Z" > "$RUN_DIR/rov_camera.txt" 2>&1
 
 {
   echo "world=$WORLD"
@@ -103,6 +130,9 @@ python3 "$DEPLOY/make_rov_with_camera.py" --out "$DEPLOY/models/bluerov2_heavy" 
   echo "duration_s=$DURATION_S"
   echo "dvl_duration_s=$DVL_DURATION_S"
   echo "dvl_restart_after_s=$DVL_RESTART_AFTER_S"
+  echo "control=$CONTROL policy=$POLICY decisions=$DECISIONS seed=$SEED camera_rate_hz=$CAM_RATE"
+  echo "camera_body_xyz=$CAM_GZ_X,$CAM_Y,$CAM_Z cam_x_shift=$CAM_X_SHIFT"
+  echo "brov_install=$BROV_INSTALL"
   sha256sum "$WORLD" "$PARAMS" "$DVL_INJECTOR" "$DEPLOY/nbv_camera_pipeline.py" \
             "$DEPLOY/uw_render.py" "$DEPLOY/viewpoint_geofence.py"
 } > "$RUN_DIR/manifest.txt"
@@ -128,7 +158,8 @@ ARDUSUB_PID=$!
 
 setsid bash -lc "cd '$RUN_DIR' && exec /home/bluerov2_sitl/.local/bin/mavproxy.py \
   --daemon --master=tcp:127.0.0.1:5760 --sitl=127.0.0.1:5501 --streamrate=25 \
-  --out=udp:127.0.0.1:14552 --out=udp:127.0.0.1:14554 --out=udp:127.0.0.1:14555" \
+  --out=udp:127.0.0.1:14552 --out=udp:127.0.0.1:14554 --out=udp:127.0.0.1:14555 \
+  --out=udp:127.0.0.1:14556" \
   > "$RUN_DIR/mavproxy.log" 2>&1 &
 MAVPROXY_PID=$!
 
@@ -179,7 +210,7 @@ DVL_PID=$!
 /usr/bin/python3 "$ORIGIN_HELPER" --connection udpin:0.0.0.0:14554 \
   > "$RUN_DIR/ekf_origin.log" 2>&1
 
-setsid python3 "$DEPLOY/mavlink_ekf_probe.py" --connection udpin:0.0.0.0:14552 \
+setsid python3 "$DEPLOY/mavlink_ekf_probe.py" --connection udpin:0.0.0.0:14556 \
   --confirm-sitl > "$RUN_DIR/ekf_probe.log" 2>&1 &
 EKF_PID=$!
 
@@ -188,7 +219,10 @@ setsid python3 "$DEPLOY/nbv_camera_pipeline.py" --ros-args \
 CAM_PID=$!
 
 if [[ "$BELIEF" == "1" ]]; then
-  setsid python3 "$DEPLOY/nbv_belief_node.py" \
+  # GT 표면 마스크(make_gt_surface.py, 467 voxel)가 있으면 Isaac 과 같은 눈금으로 cov_bin 을 낸다
+  SURF_ARGS=(); [[ -f "$DEPLOY/surf_vol.npy" ]] && SURF_ARGS=(-p "surface_mask_path:=$DEPLOY/surf_vol.npy")
+  setsid python3 "$DEPLOY/nbv_belief_node.py" --ros-args \
+    -p "camera_offset_body:=[$CAM_GZ_X,$CAM_Y,$CAM_Z]" "${SURF_ARGS[@]}" \
     > "$RUN_DIR/belief.log" 2>&1 &
   BELIEF_PID=$!
 fi
@@ -198,6 +232,9 @@ setsid ros2 bag record -o "$RUN_DIR/bag" \
   /brov/stage2/dvl_sample /brov/stage2/dvl_valid /brov/stage2/dvl_status \
   /brov/camera/camera_info /brov/nbv/image_obs \
   /brov/nbv/vox_actor /brov/nbv/spherical /brov/nbv/belief_status \
+  /brov/observation /brov/thruster_pwm /brov/control_active /brov/mission_complete \
+  /brov/localization/status /brov/localization/odometry_pool /brov/mission/resolved \
+  /brov/mission/active_path_pool /brov/debug/q_desired_zup /brov/debug/pos_mission \
   > "$RUN_DIR/bag.log" 2>&1 &
 BAG_PID=$!
 
@@ -211,6 +248,39 @@ start_dvl() {   # $1 = duration-s, $2 = 로그 접미사
     --duration-s "$1" --confirm-sitl > "$RUN_DIR/dvl_injector_$2.log" 2>&1 &
   echo $!
 }
+
+if [[ "$CONTROL" == "1" ]]; then
+  # ── Phase 4 ② 폐루프 ──
+  MANAGER_PARAMS=$BROV_SOURCE/brov_bringup/config/mission_manager_nbv_pose.yaml
+  test -f "$MANAGER_PARAMS"; test -f "$DEPLOY/nbv_policy_node.py"; test -f "$DEPLOY/nbv_truth_localization.py"
+  if ros2 node list 2>/dev/null | grep -Eq '^/brov_(obs_node|model_based_controller|mission_manager)$'; then
+    echo "stale BROV control nodes are already running" >&2; exit 1
+  fi
+  setsid ros2 launch "$BROV_SOURCE/brov_bringup/launch/nbv_pose_sitl.launch.py" \
+    connection:=udpin:0.0.0.0:14552 send_pwm:=true arm:=true \
+    > "$RUN_DIR/brov_launch.log" 2>&1 &
+  LAUNCH_PID=$!
+  for _ in $(seq 1 60); do
+    timeout 1 ros2 topic echo --once /brov/odometry/local_with_session >/dev/null 2>&1 && break
+  done
+  timeout 2 ros2 topic echo --once /brov/odometry/local_with_session > "$RUN_DIR/odom_session_first.txt"
+  setsid python3 "$DEPLOY/nbv_truth_localization.py" > "$RUN_DIR/truth_localization.log" 2>&1 &
+  LOC_PID=$!
+  for _ in $(seq 1 40); do
+    timeout 1 ros2 topic echo --once /brov/localization/valid 2>/dev/null | grep -q "data: true" && break
+    sleep 0.25
+  done
+  timeout 2 ros2 topic echo --once /brov/localization/status > "$RUN_DIR/localization_status_first.txt"
+  grep -q "state: 2" "$RUN_DIR/localization_status_first.txt"
+  ros2 param dump /brov_obs_node > "$RUN_DIR/obs_params.yaml" 2>/dev/null || true
+  ros2 topic info -v /brov/thruster_pwm > "$RUN_DIR/thruster_pwm_authority.txt"
+  grep -q "Publisher count: 1" "$RUN_DIR/thruster_pwm_authority.txt"
+  echo "[nbv-sitl] 폐루프 시작: policy=$POLICY decisions=$DECISIONS"
+  python3 "$DEPLOY/nbv_policy_node.py" --policy "$POLICY" --decisions "$DECISIONS" --seed "$SEED" \
+    --manager-params "$MANAGER_PARAMS" --cam-x-shift "$CAM_X_SHIFT" --out "$RUN_DIR/closed_loop" 2>&1 | tee "$RUN_DIR/policy_node.log"
+  echo "[nbv-sitl] 완료: $RUN_DIR"
+  exit 0
+fi
 
 echo "[nbv-sitl] 기록 ${DURATION_S}s (tilt gate ${TILT_DEG} deg)"
 if [[ "$DVL_RESTART_AFTER_S" != "0" && "$DVL_DURATION_S" != "0" ]]; then

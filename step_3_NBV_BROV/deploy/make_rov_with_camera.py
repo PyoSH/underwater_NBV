@@ -64,6 +64,8 @@ def main() -> int:
     ap.add_argument("--out", type=Path, required=True,
                     help="파생 모델 디렉터리 (이름은 bluerov2_heavy 로 고정)")
     ap.add_argument("--rate-hz", type=float, default=15.0)
+    ap.add_argument("--cam-xyz", type=float, nargs=3, default=None,
+                    help="카메라 body 오프셋 재정의 [m] (기본 = scene_cfg 와 같은 CAM_XYZ). 진단용")
     ap.add_argument("--near", type=float, default=0.05)
     ap.add_argument("--far", type=float, default=20.0)
     args = ap.parse_args()
@@ -79,6 +81,9 @@ def main() -> int:
     if anchor is None:
         raise SystemExit("imu_sensor 블록의 끝을 찾지 못했다 — 상류 구조가 바뀌었다")
     cut = text.index('<sensor name="imu_sensor"') + anchor.end()
+    global CAM_XYZ
+    if args.cam_xyz is not None:
+        CAM_XYZ = tuple(float(v) for v in args.cam_xyz)
     patched = text[:cut] + camera_block(args.rate_hz, args.near, args.far) + text[cut:]
 
     out = args.out

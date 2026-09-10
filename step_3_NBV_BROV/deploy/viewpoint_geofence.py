@@ -160,3 +160,76 @@ def project(theta: float, phi: float, psi: float,
     if not ok:
         reason = why
     return theta, phi, psi_new, reason
+
+
+# ── 경로(chord) 검사와 호 분할 (2026-09-10, Phase 4 ②) ──
+#
+# guidance 는 두 pose 사이를 **직선**으로 간다. 끝점이 유효해도 chord 가 물체
+# 원기둥을 지날 수 있다: psi=1.0 에서 theta/phi 를 동시에 30° 옮기면 chord 중점이
+# 중심에서 0.93 m, 선체 reach 0.38 을 빼면 0.55 < R 0.80. 바닥·수면·벽은 볼록 상자라
+# 끝점이 유효하면 chord 도 유효하므로 물체 원기둥만 검사한다.
+#
+# 이동 중 자세는 slew 중이라 앞면이 물체를 향한다는 보장이 없다 → 선체 반경은
+# 방향 무관하게 REACH_TOWARD_OBJ_M(=최대 반길이+여유) 를 쓴다. 보수적이다.
+
+def segment_clearance(p0, p1, samples: int = 33) -> float:
+    """base_link 두 점을 잇는 직선 위에서 물체 원기둥까지의 최소 여유 [m].
+
+    선체 반경(REACH_TOWARD_OBJ_M)을 뺀 값. 음수면 충돌 위험.
+    """
+    if samples < 2:
+        raise ValueError("samples must be >= 2")
+    best = math.inf
+    for i in range(samples):
+        s = i / (samples - 1)
+        x = p0[0] + s * (p1[0] - p0[0])
+        y = p0[1] + s * (p1[1] - p0[1])
+        z = p0[2] + s * (p1[2] - p0[2])
+        c = clearance_to_object(math.hypot(x, y), z) - REACH_TOWARD_OBJ_M
+        if c < best:
+            best = c
+    return best
+
+
+def segment_is_clear(p0, p1) -> bool:
+    return segment_clearance(p0, p1) >= 0.0
+
+
+def shortest_theta_delta(theta0: float, theta1: float) -> float:
+    """theta0 -> theta1 최단 방위 변화 [rad] in (-pi, pi]."""
+    d = (theta1 - theta0) % (2.0 * math.pi)
+    return d - 2.0 * math.pi if d > math.pi else d
+
+
+# 경유점을 포락 경계 **위**가 아니라 살짝 밖에 둔다: 경계 위 두 점을 잇는 chord 는
+# (경계가 볼록하므로) 항상 안으로 처지고, psi_min_safe 의 이분법 오차(1e-4)도 있다.
+# 7° 간격 chord 의 처짐은 1.6 m 에서 3 mm — 2 cm 면 충분하다.
+ARC_LIFT_MARGIN_M = 0.02
+
+
+def arc_split(sph0, sph1, max_pieces: int = 6):
+    """구면좌표 두 시점 사이를, 각 chord 가 물체를 비끼는 **최소 조각 수**로 나눈다.
+
+    반환 (경유 시점 목록[(theta,phi,psi)...] 끝점 포함, 조각 수). 못 나누면 (None, max_pieces).
+    theta 는 최단 방위 경로, phi/psi 는 선형 보간 — 구면 위 호에 가깝다.
+    sph0 는 측정 pose 에서 되읽은 값이라 구면 밖(psi 범위 밖)일 수 있다; 상관없다.
+    """
+    th0, ph0, ps0 = sph0
+    th1, ph1, ps1 = sph1
+    dth = shortest_theta_delta(th0, th1)
+    for k in range(1, max_pieces + 1):
+        pts = []
+        for i in range(1, k + 1):
+            th = (th0 + dth * i / k) % (2.0 * math.pi)
+            ph = ph0 + (ph1 - ph0) * i / k
+            ps = ps0 + (ps1 - ps0) * i / k
+            # 중간점도 끝점과 같은 사영을 받는다: psi_min_safe 는 phi 에 따라 최대
+            # 1.61 m(phi 41°)까지 올라가므로, phi 를 가로지르는 호는 그 등고선을
+            # 따라 psi 를 밀어 올려야 chord 꼭짓점이 포락 안에 들어가지 않는다.
+            if i < k:
+                ps = max(ps, psi_min_safe(ph) + ARC_LIFT_MARGIN_M)
+            pts.append((th, ph, ps))
+        chain = [view_position(*sph0)] + [view_position(*s) for s in pts]
+        if all(segment_is_clear(chain[i], chain[i + 1]) for i in range(len(chain) - 1)):
+            return pts, k
+    return None, max_pieces

@@ -1616,3 +1616,88 @@ draft 를 validate→commit 해 canonical 에 자세표가 실리는 것까지).
 - `gazebo_truth` 피드백으로 PID 폐루프 확인: 도착 반경 0.10 m, 자세 5°.
 - launch: `sim2swim_demo.launch.py` 프로파일 표에 nbv_pose 항목(§16.1 yaml) 추가 — ②에서
   스택을 조립할 때 함께.
+
+### 16.3 ② controller 폐루프 — 구현과 통합 발견 (2026-09-11)
+
+**구성** (전부 기존 스택 재사용, 새 msg 없음):
+```
+정책 노드 (deploy/nbv_policy_node.py)            = env._pre_physics_step + _get_observations
+  (Δθ,Δφ,Δψ) 적분·clamp → geofence(끝점 사영 + chord 검사·호 분할) → pool pose N점
+  → mission manager(홉마다 subprocess, v3) validate/commit → ResolvedMission
+  → obs_node prepare/arm/start + model_based/start → /brov/mission_complete 상승 edge
+  → /brov/nbv/capture (belief 융합) → (θ,φ,ψ)_actual 되읽기 → 다음 결정
+truth localization (deploy/nbv_truth_localization.py, SIM ONLY)
+  ^pool T_odom 해석적 고정 (R_z(+90°), t=(0,0,2.7)) + gz truth 대조 자기검증 → INVALID 로 fail-closed
+obs_node  allow_gazebo_truth_pool_missions (SIM ONLY): truth 운동학 + MAVLink 식별자를 합친
+  navigation snapshot 으로 odometry 발행·prepare/arm/start·watchdog 을 한 상태에서 돈다
+launch    brov_bringup/launch/nbv_pose_sitl.launch.py (+ safety_nbv_sitl.yaml, mission_nbv_bootstrap.yaml)
+실행      run_nbv_sitl.sh --control 1 --policy random --decisions N
+```
+
+**통합 발견** — 각각 한 run 씩 잡아먹었다. 모두 "계약은 맞는데 배선이 틀린" 부류다:
+| run | 증상 | 원인 | 조치 |
+|---|---|---|---|
+| #1 | manager "orientation_support_enabled … not implemented" | 컨테이너 overlay 의 `build/brov_mission` 이 **소스 복사본**(readlink -f 가 자기 경로를 돌려준 것을 symlink 로 오독) | `colcon build --symlink-install` 재빌드 (brov_base/mission/localization/control/bringup) |
+| #1 | +47 s EKF flags 누락 → position stale | 제어 없이 30 s 부상 → gz z > −0.05 → DVL injector bottom-lock 상실 → VISO 7 s timeout | spawn −0.2→−0.4 m; 정상 루프에선 PID 가 깊이를 잡는다 |
+| #2 | prepare "resolved mission publisher; found 0" | commit 직후 manager 를 죽임 — obs_node 권한 게이트는 홉 내내 발행자 **정확히 1** 요구 | manager 를 홉 완료까지 살려 두고 다음 홉 전에 정리 |
+| #2 | validate "waypoint[0].z=2.41 > 2.40" | wp0 = 현재 pose; 부상한 기체가 안전상자 천장 위 | 상자 z max 2.58 (시점 상한은 geofence 가 따로 더 엄격히) |
+| #2 | capture 6/6 실패 | belief 신선도를 header stamp(gz **sim time**) 와 wall clock 차로 계산 — Phase 3 프로브는 wall stamp 재발행이라 안 드러남 | 수신시각 기준 + depth/pose stamp 시각차 검사 |
+| #3 | arm "vehicle moved 2.17 m after prepare" | `_tick` 의 inactive-arm watchdog 이 원시 MAVLink snapshot 으로 `_prepared_gate` — EKF 원점 vs truth 위치차 = 2.17 m | watchdog 도 navigation snapshot |
+| #4 | start 0.3 s 뒤 "PWM slew-rate limit exceeded (0.20 > 0.16)" | obs_node PWM 게이트 4.0/s × 0.04 s; model PID 는 활성화 시 ≥ minimum_active_pwm 0.10 으로 점프 | SITL safety 50/s (계약은 "양수" 만 요구) |
+| #4 | (잠복) 수직 1 cm/s | bootstrap `depth_speed_limit`/`terminal_speed_limit` 0.01 은 **프로세스 파라미터**라 PREPARE 후에도 남는다 — 수평 루프(case C)엔 무해, Δz 0.9 m 홉엔 90 s | `mission_nbv_bootstrap.yaml` 0.15 / 0.10 |
+| #5 | 홉 16 s 뒤 "heartbeat stale (2.012 s > 2.0)" | **RTF 0.51–0.58** (bag 의 sim/wall stamp 비율; 헤드리스 ogre2 640×480 RGBD 15 Hz + JSON lock-step) → ArduSub 1 Hz heartbeat 가 wall 2 s 간격. 2.0 s 게이트는 RTF 1 에서도 패킷 1개 유실에 걸린다 | SITL safety heartbeat 5 s; 폐루프에선 카메라 5 Hz·`--water none` |
+
+| #6 | 목표 0.106 m 옆으로 스친 뒤 **0.63 m 지나쳐 물체 위에 얹힘**(PWM 0.21 로 밀며 정지) | BF LOS 는 무한 직선 조향: 위치는 왔지만 look-at 자세(160° 회전, 10°/s 슬루 = 16 s)가 정착할 때까지 `reached` 가 아니고, 그동안 LOS 가 끝점 너머 lookahead 를 계속 겨냥. 학습 env 의 DP 는 목표 pose 를 "붙잡는" 것이 기본 | guidance: 자세 모드에서 `position_reached & ~reached` 면 그 waypoint 로의 position hold(terminal 법칙) — 단위시험 2건 |
+| #7 | hold 는 정확(위치 5 mm, 자세 2–3°)한데 dwell 이 안 쌓임 | body rate 4–8°/s 채터(`minimum_active_pwm` 0.10 relay, step_2 의 2 Hz 진동과 같은 뿌리) 가 각속도 허용 5°/s 를 넘나들며 `angular_ready` 를 깜빡임 | 미션 허용 자세 10°, 각속도 0.20 rad/s(안전층 상한); 정책 노드 wall 타임아웃 150 s(RTF 0.5 × sim 60 s) + 완료 후 오차로 `settled_timeout` 판정 |
+
+| #9 | 5홉 "final waypoint reached", 그러나 CSV 는 settled_timeout + 관측 voxel 0 | (a) 오차를 **완료→disarm 뒤** 재서 자세가 풀린 값(6–17°) (b) capture 를 service 로 나중에 찍음 (c) 5 Hz 카메라가 sim 시간으로 pose 보다 0.4–1 s 뒤처져 belief 가 최신 pose 로 융합 | belief 가 `/brov/mission_complete` 상승 edge 에서 스스로 융합(학습의 "hold 마지막 프레임"), depth stamp 에 맞는 pose 를 이력에서 선택, 정책 노드는 edge 시점 pose 로 오차 계산 |
+| #10 | 홉 2 validate "localization status has not been received" | 홉마다 새 manager 가 latched status(5 Hz)·aligned odometry 를 받기 전에 validate 호출 | validate 재시도 12×0.5 s |
+
+| #10 | edge capture 성공, 그러나 depth 유효 0.00 ([nan,nan]) → 관측 voxel 0 | **ROV 카메라가 Edo 선체 mesh 안쪽**: 학습 오프셋 (0.158, 0.005, 0.068) 에서 전 화소 −inf(near clip). Phase 3 는 별도 프로브 카메라라 안 드러남. 프로브 실측: x 0.30 → 유효 74 %, z 0.20 → 71 % | SITL 카메라 x 0.30; 정책 노드가 base_link 목표를 look 축 뒤로 Δ=0.1425 물려 **카메라가 학습 위치에 정확히**(자세 동일). 관측 (θ,φ,ψ)_actual 도 학습 등가 base 로 되읽음. 실기는 Δ=0 |
+| #10 | 홉 4 arm "resolved mission not prepared" | 이전 홉 disarm 잔향으로 첫 arm 이 revoke 되며 prepared 계약이 지워짐 | arm 실패 시 재-prepare (최대 3회) |
+
+| #11 | 4/4 도착(≤1.7 cm / ≤2.4°), edge capture 유효 100 %, 관측 voxel 420→703 — 그러나 홉 2 가 60 s 상한 | 자세 오차는 1–3° 로 내내 안정인데 body rate 가 2 s 창마다 12–38°/s 로 튐: model PID 의 T200 deadband relay(`minimum_active_pwm ≥ 0.075` 는 계약 강제) × gz 저복원모멘트 limit cycle. 각속도 게이트 11.5°/s 가 dwell 을 계속 리셋 | "정착" 은 자세·위치 게이트가 맡고 각속도 게이트는 limit-cycle 포락 위(0.70 rad/s, SITL 안전 상한 동반). 후속: guidance 에 저역통과 rate 게이트(계약 확장) |
+| #12 | cov_bin NaN | belief 는 마스크를 읽고 0.2334 를 냈는데 정책 노드 파서가 `"0.2334; depth …"` 전체를 float 로 변환 | 파서 수정 |
+
+**② 실측 — controller 폐루프 (run #9 bag, GT pose, model-based PID, RTF 0.94)**
+```
+hop  n_wp  len[m]  arrive<0.15m[s sim]  진입후 최대이탈[m]  종점오차          dur[s sim]  pwm max
+ 1    2    1.20        7.5                 0.145           1.0 cm / 1.8°      27.5        0.19
+ 2    2    0.67        3.8                 0.149           0.5 cm / 1.9°      20.5        0.21
+ 3    2    0.61        3.4                 0.145           1.8 cm / 1.7°       7.2        0.17
+ 4    2    0.70        4.0                 0.147           1.4 cm / 0.9°       9.1        0.20
+ 5    2    0.34        1.5                 0.149           0.3 cm / 1.6°      11.4        0.18
+ 6    6    0.82       57.0                 0.148           2.6 cm / 2.0°      61.1        0.22   <- 호 분할: 중간점마다 정착+dwell
+```
+판정: 2점 홉은 학습 env 의 5 s 결정 주기 안팎에 도착하고(1.5–7.5 s), 종점 오차는 계약 허용(0.15 m /
+10°)의 1/10 수준(≤2.6 cm / ≤2.0°). dur 이 arrive 보다 긴 것은 자세 slew(10°/s)·각속도 채터·dwell 2 s
+때문. 호 분할 홉은 중간점마다 정착을 요구해 느리다 — 중간점 dwell 을 짧게 주는 계약 확장은 후속.
+
+**② 결과 — 폐루프 성립 (run #11: 4/4, run #12: 8/8, random baseline, GT pose, model-based PID)**
+```
+run #12 (8 결정)   pos_err[m]  att_err[deg]  fly[s wall, RTF≈0.95]   융합 후 관측 voxel   cov_bin
+  hop 1  2점        0.008        2.2           39.8                  427                 0.233
+  hop 2  2점        0.006        1.4           29.9                  545                 0.328
+  hop 3  2점        0.017        2.2            8.2                  641                 0.388
+  hop 4  2점        0.005        1.1           28.7                  716                 0.505
+  hop 5  2점        0.007        1.0           13.5                  724                 0.508
+  hop 6  4점(호)    0.005        2.0           62.4                  778                 0.548
+  hop 7  2점        0.010        1.6           55.3                  816                 0.559
+  hop 8  2점        0.011        2.0           10.2                  888                 0.585
+```
+- 도착 정확도: pos_err 중앙값 **7 mm**, att_err **1.8°** (계약 허용 0.15 m / 10° 의 1/10 이하).
+- coverage: 0.233 → 0.585 @8. Phase 3 teleport 파이프라인의 random @5 0.365 / @10 0.510(§15.7)과 같은
+  자릿수 — 제어·지연·edge capture 가 붙어도 belief 눈금이 유지된다.
+- 홉 시간의 분산(8–62 s)은 도착이 아니라 **dwell 대기**: 각속도 relay 채터가 11.5°/s 게이트를 리셋.
+  run #13 은 게이트 0.70 rad/s 로 재측정.
+- 남은 차이(학습 env 대비): 학습은 5 s 고정 뒤 촬영, 배포는 도착+정착+dwell 2 s. 결정당 시간이
+  길어질 뿐 관측 분포(정착된 pose 의 프레임)는 같다 — 정본 §16.2 의 결정 그대로.
+
+컨테이너 메모: PID 1 이 `sleep infinity` 라 종료된 ardusub/mavproxy 가 zombie 로 남는다(수십 개,
+CPU·포트 점유 없음). `pkill -f` 패턴이 docker exec 셸의 명령줄과 겹치면 셸이 자기를 죽이므로
+정리는 스크립트 파일(`/tmp/kill_leftovers.sh`)로.
+
+**geofence 보강**: 유효한 두 시점(ψ 1.6, φ 60→30, θ +30°) 사이 chord 가 물체 포락을 −0.08 m
+침범한다 — `psi_min_safe(φ)` 가 φ 41° 에서 1.61 m 로 볼록해 그 능선을 가로지르기 때문.
+`arc_split` 은 중간점 ψ 를 `psi_min_safe(φ)+0.02` 로 들어 올려(경계 위 두 점의 chord 는
+볼록성 때문에 항상 안으로 처진다) 최소 조각 수를 찾는다: 위 사례 3조각, 여유 +0.06/+0.01/+0.01.

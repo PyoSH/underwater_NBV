@@ -125,3 +125,45 @@ def test_projection_always_yields_a_valid_view():
                 _, _, psi_new, _ = project(theta, phi, psi, PSI_MIN, PSI_MAX)
                 ok, why = is_valid(theta, phi, psi_new)
                 assert ok, f"phi={deg} theta={t} psi={psi}->{psi_new:.3f}: {why}"
+
+
+# ── chord / 호 분할 ──
+import viewpoint_geofence as gf  # noqa: E402
+
+def test_chord_between_valid_viewpoints_can_enter_object_envelope():
+    """유효한 두 시점(psi 1.6, phi 60->30, theta +30°)의 직선 chord 가 물체 포락을 침범한다.
+
+    psi_min_safe 는 phi 41° 에서 1.61 m 로 볼록해, 그 능선을 가로지르는 chord 는
+    끝점이 둘 다 유효해도 중간에서 선체 reach 만큼 파고든다 (실측 -0.08 m).
+    """
+    a = (0.0, math.radians(60.0), 1.6)
+    b = (math.radians(30.0), math.radians(30.0), 1.6)
+    assert gf.is_valid(*a)[0] and gf.is_valid(*b)[0]
+    p0, p1 = gf.view_position(*a), gf.view_position(*b)
+    assert gf.segment_clearance(p0, p1) < 0.0
+    assert not gf.segment_is_clear(p0, p1)
+
+
+def test_arc_split_lifts_intermediate_psi_and_keeps_endpoint():
+    a = (0.0, math.radians(60.0), 1.6)
+    b = (math.radians(30.0), math.radians(30.0), 1.6)
+    pts, k = gf.arc_split(a, b)
+    assert pts is not None and 1 < k <= 6
+    assert pts[-1] == pytest.approx(b)
+    for s in pts[:-1]:
+        assert gf.is_valid(*s)[0]
+    chain = [gf.view_position(*a)] + [gf.view_position(*s) for s in pts]
+    for i in range(len(chain) - 1):
+        assert gf.segment_is_clear(chain[i], chain[i + 1])
+
+
+def test_arc_split_single_chord_when_far():
+    a = (0.0, math.radians(45.0), 2.0)
+    b = (math.radians(20.0), math.radians(50.0), 2.0)
+    pts, k = gf.arc_split(a, b)
+    assert k == 1 and len(pts) == 1
+
+
+def test_shortest_theta_delta_wraps():
+    assert gf.shortest_theta_delta(math.radians(350.0), math.radians(10.0)) == pytest.approx(math.radians(20.0))
+    assert gf.shortest_theta_delta(math.radians(10.0), math.radians(350.0)) == pytest.approx(-math.radians(20.0))
