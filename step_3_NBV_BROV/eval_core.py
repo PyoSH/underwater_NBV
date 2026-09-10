@@ -80,6 +80,15 @@ class Policy:
                   f" — 두 경로는 화면 밝기가 다르므로 정책이 학습 때 본 적 없는"
                   f" 입력을 받는다. --camera_path {trained_path} 로 맞출 것.")
 
+        # 관측 프레임이 어긋나면 정책이 학습 때 본 적 없는 입력을 받는다 —
+        # 렌더 경로 불일치보다 조용하고 더 치명적이다(값이 그럴듯하게 나온다).
+        trained_ego = _targs.get("egocentric_vox")
+        cur_ego = bool(getattr(env.cfg, "vox_egocentric", False))
+        if trained_ego is not None and bool(trained_ego) != cur_ego:
+            print(f"[eval] ⚠ 학습 voxel 프레임(자기중심={bool(trained_ego)}) ≠ 평가"
+                  f"(자기중심={cur_ego}) — 관측 프레임이 다르다."
+                  f" {'--egocentric_vox 를 줄 것' if trained_ego else '--egocentric_vox 를 뺄 것'}.")
+
         trained_envs = _targs.get("num_envs")
         if trained_envs is not None and trained_envs != env.num_envs:
             print(f"[eval] ⚠ 학습 env 수({trained_envs}) ≠ 평가 env 수"

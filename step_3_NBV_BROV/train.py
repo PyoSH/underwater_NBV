@@ -48,6 +48,10 @@ parser.add_argument("--gamma",          type=float, default=0.99)
 parser.add_argument("--gae_lambda",     type=float, default=0.95)
 parser.add_argument("--clip_eps",       type=float, default=0.2)
 parser.add_argument("--ent_coef",       type=float, default=0.03)
+parser.add_argument("--egocentric_vox", action="store_true",
+                    help="voxel 관측을 에이전트 방위각 기준으로 회전시켜 준다.\n"
+                         "월드 프레임 격자 ↔ 구면 프레임 행동의 좌표변환을 정책이\n"
+                         "스스로 배우지 않아도 되게 한다 (env_cfg.vox_egocentric 주석).")
 parser.add_argument("--resume", type=str, default=None,
                     help="체크포인트에서 이어서 학습한다. actor/critic/옵티마이저/\n"
                          "커리큘럼 수준·성공률 EMA·롤아웃 번호를 모두 복원한다.\n"
@@ -151,6 +155,7 @@ def main() -> int:
         env_cfg.quality_model = args.quality_model
     if args.normal_source is not None:
         env_cfg.quality_normal_source = args.normal_source
+    env_cfg.vox_egocentric = args.egocentric_vox
     if args.curriculum_end is not None:
         env_cfg.curriculum_coverage_terminal_end = args.curriculum_end
     env_cfg.scene.num_envs = args.num_envs

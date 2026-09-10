@@ -449,7 +449,7 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         # 오버라이드를 빠뜨렸는데, **voxel 그리드가 "무엇을 이미 봤는지"를 정책에
         # 알려주는 유일한 수단**이라 이게 없으면 NBV 학습 자체가 성립하지 않는다
         # (정책이 최근 이미지와 자기 좌표만 보고 커버리지 상태를 모름).
-        vox_actor = self._get_vox_actor()
+        vox_actor = self._get_vox_actor(theta_actual)
 
         return {
             "policy": self._image_buffer,
@@ -470,7 +470,7 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
             "img_semantic": self._image_buffer[:, -2:, :, :].clone(),
         }
 
-    def _get_vox_actor(self) -> torch.Tensor:
+    def _get_vox_actor(self, theta: torch.Tensor | None = None) -> torch.Tensor:
         """3-state voxel 관측 (E, 3, Nx, Ny, Nz).
 
         `step_1_NBV/env/env_GenNBV.py::_get_vox_actor()` 무수정 이식 — TSDF/weight
@@ -488,11 +488,25 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
             ch2 = (self._quality_vol / self._q_star).clamp(0.0, 1.0)
         else:
             ch2 = (observed & (self._tsdf_vol <= 0)).float()
-        return torch.stack([
+        vox = torch.stack([
             (~observed).float(),                             # ch0: unknown
             (observed & (self._tsdf_vol > 0)).float(),       # ch1: free
             ch2,                                             # ch2: 품질 또는 occupied
         ], dim=1)
+        if self.cfg.vox_egocentric and theta is not None:
+            vox = self._to_egocentric(vox, theta)
+        return vox
+
+    def _to_egocentric(self, vox: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
+        """격자를 에이전트 방위각 기준으로 돌린다 — 수학은 `envs/vox_transform.py`.
+
+        그쪽에 둔 이유는 Isaac 없이 단위 검증이 가능해야 하기 때문이다
+        (`tools/test_egocentric_vox.py`). 여기서는 좌표 격자만 캐시한다.
+        """
+        from envs.vox_transform import make_base, to_egocentric
+        if not hasattr(self, "_ego_base"):
+            self._ego_base = make_base(*vox.shape[2:5], self.device)
+        return to_egocentric(vox, theta, self._ego_base)
 
     def _current_coverage_terminal(self) -> float:
         """커리큘럼: coverage 성공 임계값.
