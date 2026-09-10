@@ -87,6 +87,13 @@ parser.add_argument("--mesh_pool_split", type=str, default="holdout",
 # 정책이 배울 여지가 없고, 보상 지형이 평평해져 경계 고착이 일어난다
 # (Stage 2는 psi 하한, run03은 psi 상한). 어떤 기하가 여유를 만드는지는
 # 추측이 아니라 ceiling 곡선으로 재야 한다.
+parser.add_argument("--fixed_object_pose", action="store_true",
+                    help="물체 자세·스케일 랜덤화 off (실물체 고정 평가). 시작 시점은 랜덤")
+parser.add_argument("--observable_mask", type=str, default=None,
+                    help="sweep 베이스라인이 저장한 observable_mask.npy — coverage 분모를 "
+                         "관측 가능 표면으로 (고정 자세 단일 물체 전용)")
+parser.add_argument("--phi_min_deg", type=float, default=None)
+parser.add_argument("--phi_max_deg", type=float, default=None)
 parser.add_argument("--psi_min", type=float, default=None)
 parser.add_argument("--psi_max", type=float, default=None,
                     help="관측 반경 상한. 줄이면 물체가 프레임을 넘쳐 가려짐이 생긴다")
@@ -133,6 +140,14 @@ def main() -> int:
         cfg.quality_model = args.quality_model
     if args.normal_source is not None:
         cfg.quality_normal_source = args.normal_source
+    if args.fixed_object_pose:
+        cfg.randomize_object_pose = False
+    if args.observable_mask:
+        cfg.observable_mask_path = args.observable_mask
+    if args.phi_min_deg is not None:
+        cfg.phi_min = math.radians(args.phi_min_deg)
+    if args.phi_max_deg is not None:
+        cfg.phi_max = math.radians(args.phi_max_deg)
     if args.psi_min is not None:    cfg.psi_min = args.psi_min
     if args.psi_max is not None:    cfg.psi_max = args.psi_max
     if args.voxel_size is not None:
@@ -227,7 +242,7 @@ def _report(results: list[dict], out_dir: Path, cfg) -> None:
 
     base = next((r for r in results if r["policy"] == "random"), None)
     ckpts = [r for r in results
-             if r["policy"] not in ("random", "hold", "orbit", "approach")]
+             if r["policy"] not in ("random", "hold", "orbit", "approach", "sweep")]
     orbit = next((r for r in results if r["policy"] == "orbit"), None)
     appr = next((r for r in results if r["policy"] == "approach"), None)
     if orbit and appr:

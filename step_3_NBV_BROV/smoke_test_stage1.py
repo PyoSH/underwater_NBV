@@ -20,6 +20,12 @@ parser.add_argument("--mesh_pool", type=str, default=None,
                     help="GSO manifest.json 경로 — 주면 env마다 다른 대상 물체 "
                          "(Stage 4 다중 메쉬 경로 검증)")
 parser.add_argument("--mesh_pool_limit", type=int, default=0)
+parser.add_argument("--no_require_texture", action="store_true",
+                    help="무텍스처 자산(실물체 STEP 변환본) 허용")
+parser.add_argument("--fixed_object_pose", action="store_true",
+                    help="물체 자세·스케일 랜덤화 off — 실물체를 실제 크기·자세로")
+parser.add_argument("--observable_mask", type=str, default=None,
+                    help="sweep이 저장한 observable_mask.npy — 분모(GT_surf_voxels)가 관측 가능 표면으로")
 parser.add_argument("--camera_path", type=str, default="tiled",
                     choices=("tiled", "per_env"),
                     help="렌더 경로. tiled=TiledCamera(env 수 확장), "
@@ -46,6 +52,10 @@ cfg.use_tiled_camera = (args.camera_path == "tiled")
 if args.mesh_pool:
     cfg.mesh_pool_manifest = args.mesh_pool
     cfg.mesh_pool_limit = args.mesh_pool_limit
+    cfg.mesh_pool_require_texture = not args.no_require_texture
+    cfg.mesh_pool_split = "all"
+cfg.randomize_object_pose = not args.fixed_object_pose
+cfg.observable_mask_path = args.observable_mask
 
 
 def report_cameras(env) -> int:

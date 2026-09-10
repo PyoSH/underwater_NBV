@@ -9,6 +9,8 @@ from __future__ import annotations
 import math
 import torch
 
+from . import tsdf_fusion
+
 
 class EnvRewardMixin:
     # ②a 이중 스트림 ────────────────────────────────────────────────────
@@ -36,102 +38,39 @@ class EnvRewardMixin:
 
     def _fuse_depth(self, depth_img: torch.Tensor, cam_pose: torch.Tensor,
                     tsdf_vol: torch.Tensor, weight_vol: torch.Tensor):
-        """
-        Fuses current depth maps from all envs into the batched TSDF volume.
-        Fully vectorized — no Python loops over envs or voxels.
-        Returns (tsdf_vol, weight_vol) — 입력 볼륨은 바꾸지 않는다.
+        """TSDF 융합 — 구현은 `envs/tsdf_fusion.py` 에 있다.
 
-        Shapes:
-            vox_world:  (num_envs, Nx*Ny*Nz, 3)
-            vox_cam:    (num_envs, Nx*Ny*Nz, 3)
-            proj_u/v:   (num_envs, Nx*Ny*Nz)
-            sdf:        (num_envs, Nx*Ny*Nz)
+        2026-09-10 분리: 배포 ROS 노드가 **같은 코드**를 import 하게 하기 위함이다
+        (DEPLOY_3WEEK_PLAN §6: "복사하지 말고 import"). 여기서는 self 에서 인자를
+        모아 넘기기만 한다. 수치 동일성은 `deploy/test_tsdf_fusion.py` 가 원본
+        구현을 참조로 들고 비교해 고정한다.
         """
         cfg = self.cfg.tsdf
-        vox = cfg.voxel_size
-        trunc = cfg.trunc_margin
-        Nx, Ny, Nz = cfg.vol_dim
-        N_vox = Nx * Ny * Nz
-        E = self.num_envs
+        k = self._camera.data.intrinsic_matrices
+        if not hasattr(self, "_vox_local"):
+            self._vox_local = tsdf_fusion.build_voxel_grid(
+                cfg.vol_dim, cfg.voxel_size, device=self.device)
 
-        K = self._camera.data.intrinsic_matrices
-        fx = K[:, 0, 0].unsqueeze(1)
-        fy = K[:, 1, 1].unsqueeze(1)
-        cx = K[:, 0, 2].unsqueeze(1)
-        cy = K[:, 1, 2].unsqueeze(1)
+        # 유클리드 -> z-depth (2026-09-10 수정).
+        # 카메라가 내는 `distance_to_camera` 는 **광학중심까지의 슬랜트 거리**인데
+        # 융합식 `sdf = depth - vox_z` 는 **광축 방향 거리**를 요구한다. 그대로 넣으면
+        # 광축에서 theta 벗어난 화소가 1/cos(theta) 배 과대 측정된다 — psi=1.7 m 에서
+        # 수평 가장자리 15.5 cm(1.55 voxel), 모서리 23.7 cm(2.37 voxel)로 trunc_margin
+        # 0.10 m 를 넘는다. 물체 반폭 0.7 m 도 22.4 도를 차지해 1.38 voxel 이 틀어진다.
+        #
+        # annotator 를 추가하지 않고 화소별로 변환한다 — 렌더 비용 0.
+        # `distance_to_camera` 자체는 **UW 렌더에서 계속 옳다**(감쇠의 광로 길이는
+        # 유클리드다). 즉 키를 바꾸는 게 아니라 융합 직전에만 변환한다.
+        if not hasattr(self, "_z_depth_scale"):
+            hw = depth_img.shape[1], depth_img.shape[2]
+            self._z_depth_scale = tsdf_fusion.z_depth_scale(hw[0], hw[1], k)
+        depth_z = tsdf_fusion.euclidean_to_z_depth(depth_img, k, self._z_depth_scale)
 
-        if not hasattr(self, '_vox_local'):
-            xi = torch.arange(Nx, device=self.device)
-            yi = torch.arange(Ny, device=self.device)
-            zi = torch.arange(Nz, device=self.device)
-
-            gx, gy, gz = torch.meshgrid(xi, yi, zi, indexing='ij')
-            self._vox_local = torch.stack([
-                gx.flatten().float() * vox + vox / 2.0,
-                gy.flatten().float() * vox + vox / 2.0,
-                gz.flatten().float() * vox + vox / 2.0,
-            ], dim=-1)   # (N_vox, 3)
-
-        vox_world = self._vox_local.unsqueeze(0) + \
-            self._vol_origin.unsqueeze(1)   # (E, N_vox, 3)
-
-        R = cam_pose[:, :3, :3]
-        t = cam_pose[:, :3, 3]
-
-        vox_cam = torch.bmm(R, vox_world.permute(0, 2, 1))
-        vox_cam = vox_cam + t.unsqueeze(-1)
-        vox_cam = vox_cam.permute(0, 2, 1)   # (E, N_vox, 3)
-
-        vox_z = vox_cam[..., 2]
-        vox_x = vox_cam[..., 0]
-        vox_y = vox_cam[..., 1]
-
-        valid_z = vox_z > 1e-4
-
-        proj_u = (fx * vox_x / vox_z.clamp(min=1e-4) + cx)
-        proj_v = (fy * vox_y / vox_z.clamp(min=1e-4) + cy)
-
-        H = self._camera.data.output["distance_to_camera"].shape[1]
-        W = self._camera.data.output["distance_to_camera"].shape[2]
-
-        proj_u_int = proj_u.long()
-        proj_v_int = proj_v.long()
-
-        in_bounds = (
-            valid_z &
-            (proj_u_int >= 0) &
-            (proj_u_int < W) &
-            (proj_v_int >= 0) &
-            (proj_v_int < H)
-        )
-
-        if depth_img.dim() == 4:
-            depth_img = depth_img.squeeze(-1)
-        H, W = depth_img.shape[1], depth_img.shape[2]
-        depth_flat = depth_img.reshape(E, -1)
-
-        safe_u = proj_u_int.clamp(0, W - 1)
-        safe_v = proj_v_int.clamp(0, H - 1)
-        pixel_idx = safe_v * W + safe_u
-
-        sampled_depth = torch.gather(depth_flat, 1, pixel_idx)
-
-        sdf = sampled_depth - vox_z
-        tsdf = (sdf / trunc).clamp(-1.0, 1.0)
-
-        update_mask = in_bounds & (sdf >= -trunc) & (sdf <= trunc)
-
-        w_old = weight_vol.reshape(E, N_vox)
-        t_old = tsdf_vol.reshape(E, N_vox)
-
-        w_new = w_old + update_mask.float()
-        t_new = torch.where(
-            update_mask,
-            (t_old * w_old + tsdf) / w_new.clamp(min=1e-8),
-            t_old
-        )
-
-        return t_new.reshape(E, Nx, Ny, Nz), w_new.reshape(E, Nx, Ny, Nz)
+        return tsdf_fusion.fuse_depth(
+            depth_z, cam_pose, tsdf_vol, weight_vol,
+            intrinsics=k, vol_origin=self._vol_origin,
+            voxel_size=cfg.voxel_size, trunc_margin=cfg.trunc_margin,
+            vol_dim=cfg.vol_dim, vox_local=self._vox_local)
 
     def _compute_patch_contrast(self, img: torch.Tensor) -> torch.Tensor:
         patches = img.unfold(1, 14, 14).unfold(2, 14, 14)

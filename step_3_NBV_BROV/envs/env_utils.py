@@ -251,6 +251,9 @@ class EnvUtilsMixin:
 
             self._surf_normal[env_id] = acc / acc.norm(dim=-1, keepdim=True).clamp(min=1e-8)
 
+            if self._observable_mask is not None:
+                # 못 보는 표면은 분모·분자 모두에서 뺀다 (cfg.observable_mask_path 참조)
+                surf_vol = surf_vol & self._observable_mask
             self._total_surf_voxels[env_id] = surf_vol.sum().float().clamp(min=1.0)
             self._tsdf_vol[env_id] = torch.zeros(Nx, Ny, Nz, device=self.device)
             self._weight_vol[env_id] = torch.zeros(Nx, Ny, Nz, device=self.device)

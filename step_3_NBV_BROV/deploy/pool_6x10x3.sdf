@@ -1,0 +1,153 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- 실수조 모사 world: 6(Y) x 10(X) x 3 m, 수면 2.7 m.  2026-09-10.
+     stage2_bluerov2_heavy_underwater_8p5m.sdf 의 플러그인/부력 설정을 계승하고
+     지형만 교체한다.  기하 상수는 DEPLOY_3WEEK_PLAN.md §12.0 참조.
+
+     수면은 z=0 으로 고정한다 — graded_buoyancy 의 above_depth 0 이 그 정의이고,
+     바닥을 -2.7 로 내려 "수심 2.7 m" 를 만든다. 수조 구조물은 +0.3 까지.
+     NBV 구면 중심 = plaster_mold 모델 원점 = (0, 0, -2.7). -->
+<sdf version="1.6">
+  <world name="pool_6x10x3">
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system"           name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-sensors-system"           name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-user-commands-system"     name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-imu-system"               name="gz::sim::systems::Imu"/>
+
+    <plugin filename="gz-sim-buoyancy-system" name="gz::sim::systems::Buoyancy">
+      <graded_buoyancy>
+        <default_density>1000</default_density>
+        <density_change>
+          <above_depth>0</above_depth>
+          <density>1.225</density>
+        </density_change>
+      </graded_buoyancy>
+      <enable>bluerov2_heavy</enable>
+    </plugin>
+
+    <scene>
+      <ambient>0.65 0.68 0.72 1</ambient>
+      <background>0.08 0.16 0.24 1</background>
+      <grid>false</grid>
+    </scene>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.4 0.4 0.4 1</specular>
+      <direction>-0.3 0.2 -0.93</direction>
+    </light>
+
+    <!-- ── 수조 구조물: 바닥 상면 z=-2.7, 벽 내부 6(Y) x 10(X), 벽 상단 z=+0.3 ── -->
+    <model name="pool">
+      <static>true</static>
+      <link name="link">
+        <collision name="floor">
+          <pose>0 0 -2.8 0 0 0</pose>
+          <geometry><box><size>10.4 6.4 0.2</size></box></geometry>
+        </collision>
+        <visual name="floor">
+          <pose>0 0 -2.8 0 0 0</pose>
+          <geometry><box><size>10.4 6.4 0.2</size></box></geometry>
+          <material>
+            <ambient>0.55 0.58 0.60 1</ambient>
+            <diffuse>0.62 0.66 0.68 1</diffuse>
+          </material>
+        </visual>
+
+        <collision name="wall_xp"><pose>5.1 0 -1.2 0 0 0</pose>
+          <geometry><box><size>0.2 6.4 3.0</size></box></geometry></collision>
+        <visual name="wall_xp"><pose>5.1 0 -1.2 0 0 0</pose>
+          <geometry><box><size>0.2 6.4 3.0</size></box></geometry>
+          <material><ambient>0.70 0.74 0.76 1</ambient><diffuse>0.78 0.82 0.84 1</diffuse></material></visual>
+
+        <collision name="wall_xn"><pose>-5.1 0 -1.2 0 0 0</pose>
+          <geometry><box><size>0.2 6.4 3.0</size></box></geometry></collision>
+        <visual name="wall_xn"><pose>-5.1 0 -1.2 0 0 0</pose>
+          <geometry><box><size>0.2 6.4 3.0</size></box></geometry>
+          <material><ambient>0.70 0.74 0.76 1</ambient><diffuse>0.78 0.82 0.84 1</diffuse></material></visual>
+
+        <collision name="wall_yp"><pose>0 3.1 -1.2 0 0 0</pose>
+          <geometry><box><size>10.0 0.2 3.0</size></box></geometry></collision>
+        <visual name="wall_yp"><pose>0 3.1 -1.2 0 0 0</pose>
+          <geometry><box><size>10.0 0.2 3.0</size></box></geometry>
+          <material><ambient>0.70 0.74 0.76 1</ambient><diffuse>0.78 0.82 0.84 1</diffuse></material></visual>
+
+        <collision name="wall_yn"><pose>0 -3.1 -1.2 0 0 0</pose>
+          <geometry><box><size>10.0 0.2 3.0</size></box></geometry></collision>
+        <visual name="wall_yn"><pose>0 -3.1 -1.2 0 0 0</pose>
+          <geometry><box><size>10.0 0.2 3.0</size></box></geometry>
+          <material><ambient>0.70 0.74 0.76 1</ambient><diffuse>0.78 0.82 0.84 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="water_surface">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>10 6</size></plane></geometry>
+          <material>
+            <ambient>0.10 0.30 0.45 0.5</ambient>
+            <diffuse>0.10 0.30 0.45 0.5</diffuse>
+          </material>
+          <transparency>0.5</transparency>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ── 표적: 바닥 중앙 접지, yaw 45 deg (Isaac _ROT_45Z 재현) ──
+         NBV 구면 중심 = 이 모델 원점 = (0, 0, -2.7). -->
+    <include>
+      <name>plaster_mold</name>
+      <pose degrees="true">0 0 -2.7 0 0 45</pose>
+      <uri>model://plaster_mold</uri>
+    </include>
+
+    <!-- ── 마커: rim 상단(로컬 z=0.933) 위, 물체와 같은 yaw ──
+         모델 원점 z = -2.7 + 0.933 = -1.767, 태그면 z = -1.7585
+         (= 물체 로컬 0.9415). -->
+    <include>
+      <name>apriltag_16h5_id2</name>
+      <pose degrees="true">0 0 -1.767 0 0 45</pose>
+      <uri>model://apriltag_16h5_id2</uri>
+    </include>
+
+    <!-- 스폰 깊이 0.6 m.  미션 시작 깊이(0.2 m)보다 깊게 두는 이유는 실측이다:
+         제어가 붙기 전 자유부유 상승률이 **0.00216 m/s** (2026-09-10, 51.7 s 측정)라
+         MAVProxy/EKF/ARM 설정 구간 30~60 s 동안 0.06~0.13 m 떠오른다.  -0.2 에서
+         시작하면 선체 상단(base_link +0.127)이 수면을 뚫고, graded buoyancy 경계를
+         넘으면서 부력이 바뀐다.  -0.6 이면 60 s 후에도 상단이 -0.34 로 안전하다.
+         DVL 고도는 2.1 m 로 Water Linked mode-1 밴드(0.3~3.0 m) 안이다.
+         무작위 XY 와 0.2 m 로의 하강은 Phase 5 러너/미션이 담당한다. -->
+    <include>
+      <pose degrees="true">2.2 0 -0.6 0 0 180</pose>
+      <uri>model://bluerov2_heavy</uri>
+    </include>
+
+    <model name="observer_camera">
+      <static>true</static>
+      <pose degrees="true">-4.0 -3.0 -0.9 0 12 22</pose>
+      <link name="link">
+        <sensor name="camera" type="camera">
+          <camera>
+            <horizontal_fov>1.4</horizontal_fov>
+            <image><width>640</width><height>480</height></image>
+            <clip><near>0.05</near><far>30</far></clip>
+          </camera>
+          <always_on>1</always_on>
+          <update_rate>10</update_rate>
+          <topic>observer_camera_c</topic>
+        </sensor>
+      </link>
+    </model>
+  </world>
+</sdf>

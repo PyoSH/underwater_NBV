@@ -25,6 +25,7 @@ import os
 import sys
 from typing import Sequence
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import omni.usd
@@ -167,7 +168,9 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         self._sph_psi = torch.zeros(self.num_envs, device=self.device)
         self._actions = torch.zeros(self.num_envs, cfg.action_space, device=self.device)
 
-        rock_local = torch.tensor([0.0, 0.0, -3.0], device=self.device)
+        # 구면 중심 = 물체 prim 원점 = 물체 바닥면. scene_cfg 의 물체 z 와 **항상 같아야**
+        # 한다 (2026-09-10: -3.0 -> -3.125 로 물체를 seafloor 에 접지시키며 함께 이동).
+        rock_local = torch.tensor([0.0, 0.0, -3.125], device=self.device)
         self.rock_pos = self.scene.env_origins + rock_local
 
         # 차량 조명 단계 (step_1과 동일 구조) — scene_cfg는 intensity=0.0으로
@@ -198,6 +201,14 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
         self._vol_origin = torch.zeros(self.num_envs, 3, device=self.device)
         self._total_surf_voxels = torch.ones(self.num_envs, device=self.device)
         self._surf_vol = torch.zeros(self.num_envs, Nx, Ny, Nz, dtype=torch.bool, device=self.device)
+        self._observable_mask = None
+        if cfg.observable_mask_path:
+            assert not cfg.randomize_object_pose, \
+                "observable_mask는 고정 자세 단일 물체 전용 — randomize_object_pose=False 필요"
+            m = torch.from_numpy(np.load(cfg.observable_mask_path)).to(self.device, torch.bool)
+            assert tuple(m.shape) == (Nx, Ny, Nz), f"mask {tuple(m.shape)} ≠ vol_dim {(Nx, Ny, Nz)}"
+            self._observable_mask = m
+            print(f"[env] 관측 가능 표면 마스크 적용: {int(m.sum())} voxel ({cfg.observable_mask_path})")
 
         self.curr_coverage = torch.zeros(self.num_envs, device=self.device)
         # ── 적응형 커리큘럼 상태 ──
@@ -822,7 +833,8 @@ class NBVBROVEnv(EnvUtilsMixin, EnvRewardMixin, DirectRLEnv):
             self._sph_phi[env_ids_t] = cfg.eval_phi
             self._sph_psi[env_ids_t] = cfg.eval_psi
         else:
-            self._randomize_rock_pose(env_ids)
+            if cfg.randomize_object_pose:
+                self._randomize_rock_pose(env_ids)
             self._sph_theta[env_ids_t] = torch.rand(n, device=self.device) * 2.0 * math.pi
             self._sph_phi[env_ids_t] = torch.rand(n, device=self.device) * (cfg.phi_max - cfg.phi_min) + cfg.phi_min
             self._sph_psi[env_ids_t] = torch.rand(n, device=self.device) * (cfg.psi_max - cfg.psi_min) + cfg.psi_min

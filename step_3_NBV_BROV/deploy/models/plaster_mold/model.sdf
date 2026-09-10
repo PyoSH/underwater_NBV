@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="plaster_mold">
+    <static>true</static>
+    <!-- 모델 원점 = STEP 원점 = 물체 바닥면. Isaac 의 NBV 구면 중심과 같은 점.
+         로컬 bbox x[-0.7575, 0.6425]  y[+-0.6045]  z[0, 0.933]. -->
+    <link name="link">
+      <visual name="visual">
+        <geometry>
+          <mesh><uri>model://plaster_mold/meshes/plaster_mold.obj</uri></mesh>
+        </geometry>
+        <material>
+          <ambient>0.72 0.70 0.66 1</ambient>
+          <diffuse>0.80 0.78 0.74 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+        </material>
+      </visual>
+      <!-- 충돌은 124k 면 메쉬 대신 보수적 박스. bbox 중심 (-0.0575, 0, 0.4665). -->
+      <collision name="collision">
+        <pose>-0.0575 0 0.4665 0 0 0</pose>
+        <geometry><box><size>1.400 1.209 0.933</size></box></geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>

@@ -138,7 +138,10 @@ class NBVBROVSceneCfg(InteractiveSceneCfg):
     rock: AssetBaseCfg = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Object",
         spawn=sim_utils.UsdFileCfg(usd_path=ROCK_USD),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -3.0), rot=_ROT_45Z),
+        # seafloor 상면은 _FLOOR_DEPTH + 0.125 = -3.125 다. -3.0 이면 물체가 바닥 위
+        # 0.125 m 떠 있어 실기(접지)와 다르다 (계획서 §12.0). 이 값을 바꾸면
+        # `env.py::rock_local`(구면 중심)도 **같이** 바꿔야 한다.
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -3.125), rot=_ROT_45Z),
     )
 
     def use_camera_path(self, tiled: bool) -> None:
@@ -198,9 +201,18 @@ class NBVBROVSceneCfg(InteractiveSceneCfg):
     camera: UWTiledCameraCfg = UWTiledCameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/Camera",
         update_period=0,
-        height=240,
-        width=320,
-        spawn=sim_utils.PinholeCameraCfg(focal_length=24.0, clipping_range=(0.1, 20.0)),
+        # 2026-09-10: 실기 카메라와 **완전 일치**시킨다 (사용자 결정 "(나)").
+        #   brov_ros2 runtime/calibration/camera_intrinsics.yaml (수중 캘리브, 돔 포트)
+        #   fx = width * focal / aperture = 640 * 24 / 32.9955 = 465.518  (실측 465.518)
+        #   HFOV 69.0 / VFOV 54.6 도  -> 배포에서 crop 이 필요 없다.
+        # 이전 320x240 / aperture 20.955 는 fx 366.5 / HFOV 47.2 도였다 — FOV 는 맞고
+        # **각분해능이 27% 낮았다**. crop 은 화소를 버릴 뿐 fx 를 바꾸지 않으므로
+        # 배포와 학습의 fx 불일치는 crop 으로 못 고친다(계획서 §15.3~15.5).
+        height=480,
+        width=640,
+        spawn=sim_utils.PinholeCameraCfg(focal_length=24.0,
+                                         horizontal_aperture=32.9955,
+                                         clipping_range=(0.1, 20.0)),
         # decimation=500이라 `update()`마다 수중 렌더를 돌리면 같은 프레임을
         # 499번 더 계산한다. `env.py::_get_rewards()`가 결정당 1회
         # `refresh_uw()`를 부른다 (2026-09-03: 결정당 8.31초 → 1.71초).

@@ -36,6 +36,10 @@ parser.add_argument("--quality_model", type=str, default="exp",
 parser.add_argument("--psi_list", type=str, default="1.0,1.3,1.6,2.0,2.5")
 parser.add_argument("--n_view", type=int, default=8,
                     help="거리마다 볼 방위 수 (theta 균등)")
+parser.add_argument("--resolution", type=str, default=None,
+                    help="WxH 로 카메라 해상도 override (예: 320x240). 미지정이면 cfg 값")
+parser.add_argument("--fx", type=float, default=None,
+                    help="목표 초점거리[px]. aperture 를 역산해 맞춘다. 신/구 카메라 대조용")
 AppLauncher.add_app_launcher_args(parser)
 if "--enable_cameras" not in sys.argv:
     sys.argv.append("--enable_cameras")
@@ -63,12 +67,49 @@ def main() -> int:
     # env가 리셋되면 평균이 떨어져 "누적이 줄어드는" 착시가 난다(2026-09-08
     # nbuv 측정에서 1.6 m 6방위 0.636→0.628). 도달 불가 값으로 끈다.
     cfg.coverage_terminal = 1.1
+
+    # 카메라 override — 신/구 카메라를 **같은 조건**으로 비교하기 위한 대조군용.
+    # fx 가 바뀌면 NBUV 해상도 항 gamma = R/R_min 이 통째로 이동하므로, 이 측정의
+    # 결론(물러남이 이득인가)이 카메라 탓인지 다른 탓인지 가르려면 둘 다 재야 한다.
+    if args.resolution:
+        w, h = (int(v) for v in args.resolution.lower().split("x"))
+        cfg.scene.camera.width, cfg.scene.camera.height = w, h
+    if args.fx:
+        w = cfg.scene.camera.width
+        cfg.scene.camera.spawn.horizontal_aperture = w * cfg.scene.camera.spawn.focal_length / args.fx
+    _w, _h = cfg.scene.camera.width, cfg.scene.camera.height
+    _fx = _w * cfg.scene.camera.spawn.focal_length / cfg.scene.camera.spawn.horizontal_aperture
+    print(f"[tradeoff] 카메라 {_w}x{_h}  fx {_fx:.1f}  "
+          f"HFOV {2*math.degrees(math.atan(_w/2/_fx)):.1f}도  "
+          f"px_per_voxel {cfg.nbuv_px_per_voxel_edge}  "
+          f"-> gamma=1 거리 {_fx*cfg.tsdf.voxel_size/cfg.nbuv_px_per_voxel_edge:.2f} m")
+
     env = NBVBROVEnv(cfg)
 
     psis = [float(x) for x in args.psi_list.split(",")]
     mu = float(env._quality_mu.mean())
     env.reset()          # mu는 리셋에서 확정된다(생성 직후는 플레이스홀더 0.1)
     mu = float(env._quality_mu.mean())
+
+    # 렌더 건전성 관문 — 이 도구는 per-env Camera 경로(use_tiled_camera=False)를 쓴다.
+    # 계획서 §3: 렌더러는 자원 할당에 실패해도 **크래시 없이 계속 간다**(128 env 에서
+    # descriptor set 920건 실패인데 씬 생성은 성공). 죽은 카메라가 섞이면 이 측정의
+    # voxel 수가 조용히 낮아져 "물러남 손익" 결론이 통째로 틀린다.
+    _rgb = env._camera.data.output["uw_rgb"][..., :3].float()
+    _d = env._camera.data.output["distance_to_camera"].float()
+    if _d.dim() == 4:
+        _d = _d.squeeze(-1)
+    _std = _rgb.std(dim=(1, 2, 3))
+    _fin = (torch.isfinite(_d) & (_d > 0)).float().mean(dim=(1, 2))
+    _dead = ((_std < 1e-3) | (_fin < 1e-3))
+    if bool(_dead.any()):
+        ids = _dead.nonzero(as_tuple=True)[0].tolist()
+        raise SystemExit(
+            f"[tradeoff] ✗ 죽은 카메라 {len(ids)}개 (env {ids[:20]}) — 이 해상도/env 수에서는\n"
+            f"           렌더러가 일부 파이프라인을 만들지 못했다. 측정을 신뢰할 수 없으므로 중단한다.\n"
+            f"           --num_envs 를 줄이거나 --kit_args 로 descriptorSets 를 올릴 것.")
+    print(f"[tradeoff] 렌더 건전성 OK — 죽은 카메라 0개 "
+          f"(이미지 std 최소 {float(_std.min()):.2f}, depth 유효 최소 {float(_fin.min())*100:.1f}%)")
     print(f"\n[tradeoff] model={cfg.quality_model} mu={mu:.3f}  물체 {getattr(env,'_n_mesh_objects',1)}종  "
           f"env {env.num_envs}개  방위 {args.n_view}개/거리")
     print(f"\n{'psi[m]':>7}{'관측voxel':>11}{'표면대비':>9}{'평균품질':>10}"

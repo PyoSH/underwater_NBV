@@ -402,3 +402,1172 @@ import**할 것 — 융합부를 순수 함수로 분리하는 소규모 리팩�
       동일함을 확인(동작 중립). 기본값 False라 step_1_NBV는 영향 없음
 - [ ] calib 런 → **서버 재학습** (수질 DR은 off로 시작 — 사용자 확정)
 - [ ] ②a 오염 스윕 하네스 (= distillation 인프라 절반)
+
+---
+
+## 11. 실수조 배포 설계 (2026-09-09~10 문제 진술 · 조사 · 실측)
+
+### 11.0 문제 진술 (사용자, 09-09)
+
+3 m 수심 대형 수조 · 표적 = 복합형상 석고틀(**STEP 보유**, 수조 내 **고정**, 벽까지
+~2.5 m) · 매 미션 시작 pose 상이 · BlueROV2 Heavy + 640×480@15 Hz 카메라(brov_ros2) ·
+NBV 정책 + PID 위치/자세 제어 · 마커는 **물체 상단에만** 부착 가능(물체가 이미 수중).
+
+이 진술이 §0의 전제 셋을 바꾼다:
+
+| §0 전제 | 새 사실 | 결과 |
+|---|---|---|
+| 표적 미지 → 700종 일반화가 요건 | STEP 보유 | 실물체를 sim에 넣어 **수조 전 검증** 가능. 홀드아웃은 보험으로 격하 |
+| 실수조 GT 없음 → 센싱 depth가 임계 경로 | 형상·위치를 앎 | pose만 있으면 "무엇이 보이는가"는 모델에서 계산 가능 |
+| DVL 추측항법 = 최대 리스크 | 마커 가능 | 절대 고정점 확보. 단 **정책 카메라 시야 안**이어야 함 |
+
+### 11.1 실측 사실
+
+**실기 카메라** (`brov_ros2 runtime/calibration/camera_intrinsics.yaml`): 640×480,
+fx 465.5 → **HFOV 69.0° / VFOV 54.6°** (sim 47.2° / 36.3°). sim 화각으로 crop하면
+중앙 407×305 px. 정책 입력은 84×84 그레이스케일이므로 crop 후 리사이즈로 정합.
+
+**표적 물체** (`~/Downloads/20220811-석고틀.stp`, FreeCAD 0.19로 읽음):
+- bbox **1.40 × 1.21 × 0.93 m**, STEP 원점 = 바닥면. bbox 중심 z = 0.467 m
+- 구조: 피라미드형 몸체(z 0~0.745, 바닥 ~0.9 m → 상단 0.39 m) 위에 **8 mm 두께
+  1.4×1.0 m 판**(z 0.745~0.753)이 넓게 걸쳐 있고, 그 위 1.0×0.6 m **트레이**
+  (바닥 z 0.833, rim 상단 0.933, 깊이 100 mm), 모서리 기둥 60×155 mm
+- 표면적 14.0 m²(내부·하향 면 포함). 법선 하향 면적 **30%** — φ≤80°(수평 위)에서
+  원리적으로 관측 불가 → 이 물체의 coverage 상한은 구조적으로 낮다
+- GT surface voxel: 10 cm에서 **455~475**(sim 실측), 5 cm 2,733
+- sim 자산: `robots/data/real_object/usd/plaster_mold.usd` (실제 크기, 무텍스처).
+  `tools/convert_obj_to_usd.py`. 평가는 `--fixed_object_pose --no_require_texture`
+
+**시점 상자의 수조 제약** (물체 중심 h=0.467 m, 수심 3 m, ROV 수면 여유 0.5 m):
+시점 높이 h + ψ·cosφ ≤ 2.5 → **ψ·cosφ ≤ 2.03 m** (ψ≤2.0이면 모든 φ 가능).
+ψ_max: 벽까지 2.5 m − ROV 반길이·여유 → **≈2.0 m**. ψ_min: 판 가장자리가 중심에서
+0.76 m → 1.0 m면 카메라가 판에서 0.24 m → **≥1.4 m**. 즉 feasible box ≈
+ψ [1.4, 2.0] × φ [10°, 80°]. 학습 [1.0, 2.5]보다 좁다 — sim에서 이 상자로 평가해야 한다.
+
+**마커 가시성** (상단 수평 마커, 실기 FOV, 법선각 >65° 또는 rim 가림이면 불가):
+
+| 위치 | 가능한 φ | 비고 |
+|---|---|---|
+| 트레이 바닥 중앙 (1.0×0.6 m) | **≤ 45~60°** | rim 100 mm가 낮은 앙각을 가림 |
+| −X 판 선반 (220 mm 폭) | ≤ 30~45° | 프레임 벽 180 mm가 가림 |
+| ±Y 판 선반 (160 mm 폭) | ≤ 30° | |
+| 프레임 외측 수직면 (140 mm 높이) | φ 45~80° | **미검토 옵션** — 낮은 시점에서 유일한 후보 |
+
+12 cm 마커가 ψ 1.5~2.0 m에서 28~70 px(16h5 하한 ~20 px) → **12~15 cm, 여러 장**.
+결론: 상단 마커만으로는 **φ > 60°(수평에 가까운 시점)에서 고정점이 없다.** 그 구간은
+추측항법으로 잇거나 프레임 측면 수직 마커를 추가해야 한다.
+
+**look-at 자세의 운동학 불일치** (§2-C, 이 조사에서 새로 발견): sim은 카메라를 body
++X에 고정하고 `q_target = look_at(p → 물체중심)`이라 φ=10°면 **차체가 80° 기수를
+숙인다**. 실기 DVL(하향 4빔, 빔각 ~22.5°)은 pitch가 커지면 바닥 lock을 잃는다 —
+09-03 수조 발산의 기전과 같은 계열이며 sim의 이상 DVL 주입으로는 **재현되지 않는다**.
+실기 tilt 서보는 ±45°(`vehicle_sitl.yaml`). 사용자 결정: 우선 차체 pitch 유지, tilt 무시.
+
+### 11.2 SITL 실측 — pitch −80° 유지 (2026-09-10)
+
+model-based PID(`attitude_kp 3, ki 0, kd 1.5, torque_limit 3 N·m`), 1 m 직진 후 종점
+유지 60 s. 러너 `step_2_BROV/run_attitude_hold_model_based_host.sh`, 분석
+`brov_ros2 runtime/analysis/attitude_hold_from_bag.py`.
+
+| 피드백 | 정착 pitch | 오차각(끝 3 s) | 전이 | 위치 유지 std N/E/D (끝 15 s) | EKF−GT |
+|---|---|---|---|---|---|
+| Gazebo truth | **−77°** | 3.1° | ~10 s, \|ω\|max 1.85 rad/s | 1 / 3 / 7 mm, 표류 2.3 cm | — |
+| DVL/EKF | −74~−77° | 3~9° | ~10 s | 5 / 4 / 5 mm | 위치 4~5 mm, 자세 1.1° |
+
+**예측은 틀렸다**: kp·(θ_c−θ_a) = M_r(θ_a)에 Gazebo 명목 기하(CoG z .011 / CoB z .021
+→ BG 1 cm, M_r(80°)=1.42 N·m)를 넣으면 57°에서 굳어야 했다. 실제 잔차 3° →
+**Gazebo의 실효 복원모멘트는 ~0.16 N·m(BG_eff ≈ 1 mm)**, 명목의 1/9. 즉 이 SITL
+결과는 "PID 루프는 큰 자세도 다룬다"까지만 말하고, **실기 Heavy의 복원모멘트를 모르는
+한 실기에 적용할 수 없다.** BG 3 cm면 M_r 4.2 N·m > torque_limit 3 N·m로 이득과
+무관하게 불가. **실기 BG 측정이 선행 조건**(기울여 놓고 복원 토크/주기 측정).
+
+부수 발견: 현재 Gazebo 기체는 거의 중성부력(자유 상승 0.004 m/s; 8-17 런 0.1 m/s)이라
+case A/C의 GT 상승 배리어(−6.2 m 대기)가 8 s ARM→START 창에 맞지 않는다 — 자세유지
+러너에서 제거.
+
+### 11.3 결정 (사용자 09-10 답변 반영)
+
+- **A 믿음의 출처**: ②(모델기반)도 pose가 틀리면 부정확 — 맞다. 따라서 A는 B에
+  종속된다: **물체 기준 pose의 정확도**가 ②·③ 공통의 급소. 채점(GT mesh 대비)은 별개
+- **B 좌표계·마커**: 물체에 마커 → **물체 프레임에서 행동**, 수조는 안전거리 박스만
+  확인. pool 통합은 `T_pool_obj` 측량 상수 하나(물체 고정)로 끝난다
+- **C look-at**: 우선 유지. SITL은 통과했으나 위 단서(BG, DVL lock)로 **실기 검증 전엔
+  φ를 60~80°(pitch ≤ 30°) 범위로 제한**해 시작하는 것을 권고 — sim에서 그 범위로
+  평가한 뒤 결정
+- **D 접근·정렬 단계**: 필요(동의). 현재 pose → 가장 가까운 feasible (θ,φ,ψ) → 기존
+  position 미션으로 이동 → look-at 정렬 → 정책 관측 버퍼 시딩
+- **E**: 캘리브레이션은 brov_ros2 실측 사용(위), 조명은 실기에서 작동
+
+### 11.4 waypoint를 어떻게 내놓는가 (물체 프레임)
+
+```
+정책: a=(Δθ,Δφ,Δψ)∈[−1,1]³, 5 s마다
+  (θ,φ,ψ) ← 현재 **실제** pose의 역산 + a·(30°,30°,0.5 m)     ← sim `_pre_physics_step`와 동일
+  clamp: φ∈[φ_min,φ_max], ψ∈[1.4,2.0], ψcosφ ≤ 2.03 (수심), 벽 박스(pool)
+  p_obj = ψ[sinφcosθ, sinφsinθ, cosφ],  q_obj = look_at(p_obj → 0)
+  p_pool = T_pool_obj · p_obj,  q_pool = R_pool_obj · q_obj
+  → 미션 계약: 목표 1개(pose) + dwell → PREPARE/검증(geofence·swept volume·최대 step)
+  → guidance: 위치는 기존 LOS/terminal-hold, 자세는 **look_at 모드(신규)** = q_pool 고정
+  → dwell 정착(~3 s) → 프레임 캡처 + 마커 재정렬(정지 샘플) → TSDF 갱신 → 다음 결정
+```
+
+기존 `random_at_waypoint`가 구조적으로 같다(waypoint 도달 후 자세 목표 유지 + dwell).
+NBV = "waypoint 1개짜리 미션의 연속"이며 자세 목표만 난수→look_at으로 바뀐다.
+immutable-mission 안전 의미는 **결정마다 validate→commit 1회**로 유지한다.
+`fixed_attitude_rpy_rad`(이번에 넣은 시험용 훅)가 그 look_at 모드의 원형이다.
+
+### 11.5 brov_ros2 위에 얹을 것
+
+| 요소 | 상태 |
+|---|---|
+| 카메라·ArUco·one-shot localization·PREPARE/ARM/START·PID | 재사용 |
+| 다중 마커 + **dwell마다 재정렬**(현 one-shot 정렬기의 정지 조건이 NBV dwell과 일치) | 신규(확장) |
+| `look_at` heading mode + pose 목표 계약(v3) | 신규 — 컨트롤러는 이미 q_error를 받으므로 guidance 수준 |
+| 접근·정렬 스크립트(Phase 2) | 신규 |
+| NBV 정책 노드(0.2 Hz): `_get_observations`/`_get_vox_actor` 재현, TorchScript | 신규 |
+| 믿음 노드: TSDF(`env_reward` 융합을 import — 복사 금지) + 모델 depth 렌더(②) + TRIDENT(③, shadow) | 신규 |
+| 시점 유효성·geofence 사영 | 신규 |
+
+### 11.6 sim 실측 — 실물체 ceiling (ψ 1.4~2.0, 고정 pose, GT depth)
+
+15결정: random cov_q **0.495**(bin 0.516) / orbit 0.353 — GSO 풀 random@15 0.713.
+40결정(16 env × 32 ep, 조기종료 off):
+
+```
+결정          @3    @5    @10   @15   @20   @25   @30   @39 
+random      0.227 0.304 0.442 0.530 0.591 0.633 0.668 0.724
+orbit       0.188 0.239 0.337 0.368 0.371 0.372 0.372 0.373
+approach    0.066 0.069 0.070 0.070 0.070 0.070 0.070 0.070
+```
+
+에피소드 분포(40결정): random 평균 **0.724** / 최소 0.608 / 중앙 0.717 / 최대 0.838 (cov_bin 0.742),
+orbit 0.373, approach 0.070. GSO 풀(random@39 0.850)보다 **0.13 낮은 상한**.
+`random−orbit` 0.35는 GSO의 0.25보다 커서 시점 선택의 가치는 이 물체에서 오히려 더 크다.
+
+**φ [30°,60°]** (사용자 지정 범위, 같은 조건 40결정):
+
+```
+결정          @3    @5    @10   @15   @20   @25   @30   @39
+random      0.236 0.309 0.438 0.505 0.551 0.592 0.619 0.670
+orbit       0.206 0.281 0.437 0.482 0.486 0.489 0.489 0.489
+approach    0.068 0.072 0.074 0.074 0.074 0.074 0.074 0.074
+```
+
+random 평균 0.670 / 최대 0.797 — [10,80] 대비 **−0.054**. orbit은 0.489로 오히려 높다
+(중간 앙각 고리 하나가 [10,80]의 시작 φ 랜덤 고리보다 많이 본다). random−orbit 0.18.
+
+**관측 가능 표면 — 처음 추정("하향 면 30% 관측 불가")은 voxel 수준에서 틀렸다** (09-10 실측):
+`sweep` 베이스라인(결정론적 (θ,φ,ψ) 격자 훑기, 100결정 × 16 env 합집합)이 저장한
+`observable_mask.npy`를 env별 GT 표면과 교차하면
+
+| feasible box | 관측 가능 비율(env별 mask∧surf/surf) | sweep 1회(100결정) cov_bin |
+|---|---|---|
+| φ[10,80] ψ[1.4,2.0] | **0.988** (0.958~1.013) | 0.937 |
+| φ[30,60] ψ[1.4,2.0] | **0.976** (0.949~1.017) | 0.898 |
+
+이유: voxel 10 cm·trunc 10 cm에서 8 mm 판의 윗면과 밑면은 **같은 voxel**이고, TSDF 절단 띠가
+판 아래 voxel까지 갱신한다 → 면적 기준 30%였던 하향 면이 voxel 기준으로는 1~2%다. 다리·판
+밑면 voxel도 φ≤60°에서 대부분 "본 것"으로 잡힌다(비율 차이 1.2%p가 그 대가).
+따라서 (1) 분모 재정의(`--observable_mask`, env `observable_mask_path`, 배선 완료)는 **눈금을
+거의 안 바꾼다** — GSO와의 0.13 격차는 관측 불가가 아니라 **도달 난이도**(1.4 m 물체가 ψ 1.7의
+화각 폭 1.49 m를 넘쳐 한 시점에 일부만 보임 + 큰 평면의 사각)다. (2) sweep 1회가 100결정에
+0.94뿐이라 40결정 정책의 현실적 목표는 random 0.72~0.74 위, ~0.80 안팎이다. 성공 임계값
+0.85는 이 물체에서 "random보다 10 pt 이상"이라는 뜻이며, 동일 결정 수 random 대비 비교가
+정직한 지표다. (3) GT 표면 voxel이 env마다 454~471로 다르다 — CAD의 평면이 voxel 경계에
+놓여 float 잡음으로 뒤집힘(±2%). 실물체 채점 분모의 자연 잡음이므로 기록만 한다.
+
+### 11.7 남은 결정·측정 (우선순위) — 09-10 사용자 답변 반영
+
+1. **실기 Heavy 복원모멘트(BG)** — CAD로는 불가: USD엔 CoM (0.001,0,0.003)·관성만 있고 CoB는
+   배수 체적(내압통·폼)의 도심이라 개방 프레임 메쉬로 계산 못 함. `brov2_heavy.yaml` `coBM
+   [0,0,0.010]`은 "실측 안 됨" 가정값. 세 plant가 다르다: Isaac BG 10 mm(M_r(80°)=1.42 N·m) /
+   Gazebo 유효 ≈1 mm(잔차 3.1°·kp 3에서 역산) / 실기 미지. 조건: `torque_limit 3 N·m` ↔ BG ≤ ~15 mm.
+   **측정법(수조, ~20분, 코드 변경 없음)**: `diag_excite_node` `axis:=pitch kind:=square amplitude:=0
+   bias:=τ`(depth_hold 켬), τ = 0.1→0.2→0.5→1.0 N·m 각 20 s, IMU 정착 pitch θ → **BG = τ/(W·sinθ)**,
+   W=143.5 N. 감(τ=0.2): BG 20 mm→4°, 10 mm→8°, 1 mm→뒤집힘. pitch 45° 넘으면 중단. 교차검증:
+   알려진 추(0.2 kg×0.3 m=0.59 N·m). 스러스터 모델 오차 10~15%는 자릿수 판별엔 무관.
+2. **φ [30,60] 정책 평가** — 베이스라인은 위(§11.6). 정책은 서버 체크포인트 필요:
+   실물체 자산 `robots/data/real_object/`(gitignored)과 `eval_out/real_object_sweep_phi30_60/
+   observable_mask.npy`를 서버로 rsync 후
+   `evaluate_nbv.py --headless --enable_cameras --policies <ckpt>,random,orbit --num_envs <학습 env 수>
+   --num_episodes 32 --max_decisions 40 --mesh_pool .../real_object/usd/manifest.json --mesh_pool_split all
+   --no_require_texture --fixed_object_pose --psi_min 1.4 --psi_max 2.0 --phi_min_deg 30 --phi_max_deg 60
+   --observable_mask <mask> --camera_path tiled`. 판정: 동일 결정 수 random 대비.
+   다리: φ=80°·ψ=1.4에서 카메라 z 0.71 m(판 0.745 아래)라 다리·판 밑면이 보이지만 φ≤60°에선 항상
+   판 위(≥1.17 m) — voxel 수준 대가는 1.2%p뿐(위 표).
+3. **마커 = 기존 AprilTag 16h5 ID 2(0.42 m 판)**, 수면에서 내려 트레이에. 트레이 바닥(z 0.833)이면
+   rim 100 mm 가림이 **방위 의존**: ±X 접근 앙각≥19°(φ≤71°), ±Y 접근 **앙각≥48°(φ≤42°)**(태그
+   가장자리~rim 9 cm). **권장: 개구(1.0×0.6)보다 큰 1.1×0.7 m 판에 태그 고정, 추+줄로 내려 rim
+   위에 걸침(z≈0.94)** → 가림 없음, 법선각 65° 한계만(앙각≥25°, φ≤65°), 방위 무관. 화소 폭
+   d 1.4~2.5 m에서 140~78 px(하한 20). 트레이 중앙이면 물체 프레임 오프셋 (0,0,0.94) 확정.
+4. 채점 분모 = 관측 가능 표면: **구현 완료**(`sweep` 베이스라인 → `observable_mask.npy` →
+   `--observable_mask`). 단 §11.6대로 이 해상도에선 1~2% 효과.
+5. 수조 첫 세션(캘리브레이션 완료됨): **PID 스텝응답(0.5 m, 30°) → dwell 재정렬 반복성 →
+   접근 단계 → NBV(승인 모드) → 자율**. "dwell 재정렬 반복성" = NBV 시점마다 정지(dwell ~3 s)하는
+   구간에 정렬기(정지 샘플 기반 pool→odom one-shot)를 다시 돌려 (a) 같은 시점에서 N회 반복한
+   fix의 위치·자세 표준편차(탁도·조명·거리에서의 마커 잡음), (b) 시점 A→B 이동 후 마커 fix와
+   DVL 적분값의 차(시점 간 표류)를 재는 것. (a)(b)가 ②(모델 기반 belief)의 성립과, 마커가 안
+   보이는 φ>65° 구간을 DVL로 버틸 수 있는 시간을 정한다.
+6. SITL 컨테이너 `bluerov2_sitl`: PID 1이 `sleep infinity`(init 없음)라 좀비가 안 사라짐 —
+   `docker restart`로 충분(bind mount·`install_mk2` 유지). 영구 해결은 `--init` 재생성.
+
+---
+
+## 12. Gazebo SITL 배포 트랙 (2026-09-10 승인)
+
+목적: NBV 정책을 ROS2 + Gazebo SITL에서 구동해 실수조 전 리허설을 만든다.
+수조는 **6(Y) × 10(X) × 3 m, 수면 2.7 m**(§11의 4 m 수조·2.5 m 벽 제약은 폐기).
+
+### 12.0 Phase 0 — 확정 상수 (실측·코드 대조 완료)
+
+**기준점 정정.** NBV 구면 중심은 bbox 중심이 아니라 **물체 prim 원점 = STEP 원점 =
+물체 바닥면**이다. 근거: `env.py:171` `rock_local = (0,0,-3.0)`, 물체 prim도
+`scene_cfg.py:141` `pos=(0,0,-3.0)`, 그리고 `convert_obj_to_usd.py`는 **재중심화를
+하지 않는다**. 따라서 카메라 높이 = `psi*cos(phi)`이며, §11.1이 쓴
+`h(0.467) + psi*cos(phi)`는 **틀렸다**(안전 방향 오차라 결론은 안 바뀜).
+
+```
+물체 로컬 bbox      x[-0.7575, 0.6425]  y[-0.6045, 0.6045]  z[0, 0.9330]
+자세                yaw +45 deg (_ROT_45Z), 바닥면이 z=0
+world AABB(yaw45)   1.5974 x 1.5974 x 0.9330      (bbox 직사각형 가정의 1.845가 아님)
+TSDF 볼륨 20^3 x 0.10 = 2.0 m, XY 여유 0.403 m  → 넉넉
+bbox 중심(구면중심 기준)   ( -0.0007, -0.0002, 0.4665 )
+_vol_origin(구면중심 기준) ( -1.0007, -1.0002, -0.5335 )   volume z ∈ [-0.534, +1.467]
+  → 볼륨이 물체 바닥 아래 0.53 m를 포함한다 = 바닥면 voxel이 TSDF에 들어온다
+발자국 지지반경(yaw45)  최소 0.605 / 중앙 0.760 / 최대 0.801 m
+트레이 개구           정확히 1.000 x 0.600 m, 중심 (0,0), 바닥 z=0.833
+rim 상단             z=0.933, x[-0.6425,0.5375] y[-0.4975,0.4975] (1.18 x 0.995 m)
+```
+
+**시점 geofence** — 정정된 모델 (2026-09-10, Phase 1에서 두 번 고침)
+
+두 가지를 틀렸다가 단위시험/실측으로 잡았다:
+1. (theta, phi, psi)가 가리키는 점은 **카메라가 아니라 base_link**다
+   (`env.py:354` p_target -> guidance(root), `env.py:851` spawn_pos도 root,
+   관측 psi_actual도 `root_pos_w`). 카메라는 물체 쪽으로 0.157 m 더 앞이다.
+2. "위로 넘거나 옆으로 비켜라"는 OR 근사가 상단 모서리에서 과도하게 보수적이었다.
+   정확한 **점-원기둥 거리**를 쓰면 대각 방향 여유가 살아난다.
+
+```
+물체 포락   원기둥 R=0.801 m (발자국 지지반경 최댓값), H=0.933 m
+선체 포락   BlueROV2 Heavy 제조사 외형 457 x 338 x 254 mm
+            (Gazebo 모델의 collision box 0.457x0.575x0.05581 은 부력용 **배수체적**
+             상자라 형상이 아니다 — 모델 주석이 그렇게 밝힌다)
+물체 쪽 구속  look_at 이라 앞면이 물체를 향함 -> dist(base_link, 물체) >= 0.2285 + 0.15
+바닥 구속     기울어진 선체 최하점 = 0.127 cos(p) + 0.2285 sin(p),  p = |90 - phi|
+              z >= 그 값 + 0.10
+사영          theta/phi 보존, psi만 민다 (두 구속 모두 psi에 단조)
+```
+
+| phi | 10 | 20 | 30 | 41 | 50 | 60 | 70 | 80 |
+|---|---|---|---|---|---|---|---|---|
+| psi_min_safe [m] | 1.332 | 1.396 | 1.514 | **1.608** | 1.535 | 1.362 | 1.255 | 1.525 |
+
+최악 1.608 m(phi=41 deg) < psi_max 2.0 -> **사영은 항상 해가 있다**.
+phi=80 deg만 물체가 아니라 **바닥**이 구속(1.525 m). psi_min=1.4 위반 대역은
+phi [21, 57] (물체) 와 [79, 80] (바닥).
+
+기존 평가 로그 재판정: **random 3.8% / 최대 밀어냄 0.033 m**, orbit 0.0%,
+approach 97.4% / 0.208 m. approach가 거의 항상 걸리는 것은 psi 하한으로 밀어붙이는
+퇴화 베이스라인이라 의도된 결과다(상설 회귀 지표로서의 의미는 그대로).
+
+**주의: Isaac은 물체 충돌이 꺼져 있다**(`tools/convert_obj_to_usd.py:61`
+`collision_enabled=False`) — 정책은 관통 시점에 벌을 받은 적이 없다. 배포는 사영 필요.
+
+**수조 기하 (Gazebo world 좌표, 수면 z=0 유지 = 부력 플러그인 `above_depth 0` 불변)**
+
+```
+바닥 상면 z = -2.7     벽 내부 6(Y) x 10(X), 벽 상단 z = +0.3
+물체        바닥 중앙 접지, base at z = -2.7, yaw 45 deg
+구면 중심   (0, 0, -2.7)
+시점 상자   phi ∈ [10, 80] deg, psi ∈ [1.4, 2.0] m + 위 geofence
+  최고 카메라 z = -2.7 + 2.0*cos(10) = -0.730  → 수면 여유 0.73 m   OK
+  최대 수평 r = 2.0*sin(80) = 1.970 m          → 벽 여유 최소 1.03 m OK
+  → 이 수조에서는 천장/벽 제약이 시점 상자를 구속하지 않는다
+시작 pose   깊이 0.2 m (z = -0.2), 수평 r ∈ [1.5, 3.3] m 환형 ∩ 안전상자(|x|<=4.4, |y|<=2.4)
+```
+
+**알려진 sim/실기 불일치 (기록).** Isaac은 seafloor 상면 -3.125, 물체 바닥 -3.0 →
+**물체가 바닥 위 0.125 m 떠 있다**. Gazebo/실기는 접지. 영향은 고-phi에서 바닥 voxel의
+free/occupied 채널뿐이며 채점(GT 표면)에는 무관. **권장: 다음 학습 전에
+`scene_cfg.py`의 물체 z를 -3.125로 정정**(1줄) — 학습이 아직 시작 전이라 지금이 무료.
+정정하면 실물체 베이스라인만 재측정(평가 1회).
+
+**마커 (AprilTag 16h5 ID 2)** — 치수는 `brov_perception/config/aruco.yaml` 준수:
+
+```
+dictionary DICT_APRILTAG_16h5 · id 2 · 검은 외곽 테두리 한 변 0.420 m
+  = 6 cell x 0.070 m (payload 4 + border 1, 양변)
+quiet zone 1 cell(0.070 m) 필수, 위 길이에 불포함 → 인쇄 영역 0.560 m x 0.560 m
+거치판 1.15 x 0.75 m x 8 mm (rim 1.18 x 0.995 위에 사방 0.075 m 걸침), 추+줄로 하강
+마커 중심 = 물체 로컬 (0, 0, 0.941)   법선 +Z (수면 방향)
+marker frame 축은 Phase 2에서 drawFrameAxes로 실측 확정 (가정 금지 — 기존 config 규율)
+```
+
+**카메라 (실기 intrinsics 재현)**
+
+```
+실기  640x480, fx 465.518 fy 465.319 cx 324.671 cy 243.114  → HFOV 69.0 / VFOV 54.6 deg
+sim   320x240, focal 24 mm, aperture 20.955 mm             → HFOV 47.2 / VFOV 36.3 deg
+정책 입력 정합: 중앙 crop 407 x 305 px → 84 x 84 grayscale
+ArUco 검출은 crop 하지 않은 640x480 원본으로 (가시 범위 확보)
+base -> camera  xyz (0.15751, 0.00529, 0.06784)  rpy (-90, 0, -90) deg
+  = step_3 `_CAMERA_FRAME_POS`와 소수점까지 동일 (마운트 이미 정합)
+UW 렌더 재현: UW_RGB = RGB*exp(-d*ac) + bv*255*(1-exp(-d*bc))   (Jerlov IB)
+  출처 `sensors/UWCamera/UWrenderer_parallel_utils.py:34` — Gazebo에 depth가 있어 동일 재현 가능
+```
+
+### 12.1 pose feedback 가용률 — 측정 대상 (임계 경로)
+
+look-at은 차체 pitch = -(90 - phi)이므로 **마커가 잘 보이는 저-phi가 DVL이 가장 위험한
+자세**다. 두 센서가 상보적이지 않다. phi[10,80] random 78결정 실측:
+
+| 마커 입사각 한계 | fix 가용 | | DVL 틸트 한계 | lock 가용 |
+|---|---|---|---|---|
+| <=65 deg | 7.7% | | <=30 deg | 0.0% |
+| <=70 deg | 14.1% | | <=40 deg | 19.2% |
+| <=75 deg | 32.1% | | <=50 deg | 76.9% |
+
+둘 다 없는 비율이 가정에 따라 **92% ~ 0%**로 흔들린다. 두 한계값은 계획 전체에서 가장
+결과를 좌우하는데 측정된 적이 없다 → Phase 2(마커)·Phase 3(DVL)에서 **실측으로 대체**.
+
+**사용자 결정 (09-10)**: 공백 구간은 **INS 추측항법**으로 간다. 재정렬 시점 삽입 ·
+tilt 서보 · 측면 마커는 채택하지 않는다. 따라서 **INS 표류율이 미션 길이 상한을 정하는
+값**이며 Phase 3의 1급 산출물이다.
+
+주의: DVL dropout 주입 시 ArduSub EKF3가 수평 해를 포기하면 `brov_base` odom이 invalid가
+되어 컨트롤러 `observation_timeout_s 0.25` 게이트가 제어를 멈춘다. 이는 실기에서 실제로
+벌어질 일이므로 **버그가 아니라 측정 대상**이다. Phase 3 통과 기준에 명시.
+
+### 12.2 사용자 결정 (09-10)
+
+1. **phi 대역 [10, 80] 복귀** (psi [1.4, 2.0] 유지) — 베이스라인 실측 기존재
+2. **시작 위치는 단계적** — 한정 환형 구역 먼저, 전역 무작위 탐색은 Phase 6 이후
+3. **DVL 자세 의존 dropout 주입** — 틸트 한계는 인자화(25/30/40/50 deg 스윕), 추정치 고정 금지
+4. **depth는 Gazebo GT 우선** — TRIDENT는 Phase 6 이후 shadow
+5. **pose 공백은 INS 추측항법**
+
+### 12.3 Phase 구성 (총 13.5일, 정책 학습과 병렬)
+
+| # | 내용 | 기간 | 통과 기준 |
+|---|---|---|---|
+| 0 | 기준점·상수 정합 | 0.5일 | **완료** (본 절) |
+| 1 | Gazebo 수조 world + 물체 + AprilTag, geofence 사영 | 1.5일 | 단독 실행 스크린샷, 부력 정상, geofence 단위시험 |
+| 2 | rgbd_camera · ros_gz_bridge · UW 렌더 · crop/resize + **마커 입사각 한계 실측** | 2일 | Gazebo 이미지에서 검출, drawFrameAxes 축 확정, 입사각 vs 검출률/pose오차 곡선 |
+| 3 | pool frame · dwell 재정렬 서비스 · **DVL 틸트 dropout 스윕** | 2.5일 | fix 재현성 sigma, **INS 표류율**, EKF3 해 포기 시점, **미션 길이 상한** |
+| 4 | `nbv_belief_node`(TSDF) · `nbv_policy_node` 0.2 Hz · `look_at` heading mode | 4일 | 15결정 완주, 위치오차 < 0.15 m / 자세오차 < 5 deg |
+| 5 | 접근·정렬·관측버퍼 시딩 (한정 구역) | 1일 | 무작위 시작 20회 획득 성공률·소요시간 |
+| 6 | Isaac 대조 | 2일 | coverage@N vs random/orbit, 마커·DVL 가용률, 누적 표류 |
+
+**정책 아티팩트가 아직 없다** (`checkpoints/run01`, `run02` 비어 있음). Phase 1~5는
+`eval_core.Policy`의 random/orbit/sweep 베이스라인으로 배선을 검증하고, 서버 재학습
+체크포인트가 나오면 TorchScript로 교체한다. 배선 버그와 정책 성능을 분리하는 순서다.
+
+### 12.4 산출물
+
+```
+step_3_NBV_BROV/deploy/
+  pool_6x10x3.sdf                 수조 world
+  models/plaster_mold/            물체 (visual OBJ + box collision)
+  models/apriltag_16h5_id2/       0.420 m 태그 + 1.15 x 0.75 m 거치판
+  make_apriltag_texture.py        cv2 DICT_APRILTAG_16h5 -> PNG
+  viewpoint_geofence.py           시점 유효성·사영 (순수 함수 + 단위시험)
+  run_nbv_sitl.sh                 run_attitude_hold_model_based.sh 골격 계승
+brov_ros2-main/brov_nbv/          신규 패키지 (belief · policy · uw_render · crop)
+```
+
+**기존 파일 수정은 5개뿐**: `bluerov2_heavy/model.sdf`(카메라),
+`stage2_sitl_dvl_injector.py`(dropout), `brov_localization`(재정렬 서비스),
+`brov_base/guidance.py`(look_at mode), `envs/env_reward.py`(융합 로직 순수함수 분리 —
+**복사 금지, import**; `sync_vendor.sh` 드리프트 전례).
+
+### 12.5 Phase 1 완료 기록 (2026-09-10)
+
+산출물: `deploy/pool_6x10x3.sdf`, `deploy/models/{plaster_mold, apriltag_16h5_id2}`,
+`deploy/make_apriltag_texture.py`, `deploy/viewpoint_geofence.py` (+단위시험 12개).
+
+**통과 기준 결과**
+
+| 항목 | 결과 |
+|---|---|
+| world 로드 | 6개 모델 전부 로드, gz-sim 오류 0 (`libGL`/`libEGL` 2줄은 기존 world도 쓰는 Mesa 소프트웨어 폴백) |
+| 렌더 | observer(std 15.85) · probe(std 11.45) 프레임 획득, 빈 화면 아님 |
+| 마커 왕복 | 텍스처 800/200/60 px 전부 ID 2 검출 (거울상 아님) |
+| **마커 렌더 축척** | Gazebo 렌더에서 검은 테두리 **77.6 px vs 예측 78.2 px** (fx·0.420/2.5 m) = **0.8% 일치** -> 실제 크기 0.420 m 확인 |
+| geofence 단위시험 | 12/12 통과 |
+
+**부력 실측 (제어 미연결 자유부유)**
+
+```
+깊은 곳(-0.6 부근)  +0.00420 m/s      <- 11.2절의 "0.004 m/s" 와 일치
+수면 근처(-0.2 부근) +0.00216 m/s      <- graded buoyancy 경계에서 순부력 감소
+```
+
+-> **스폰 깊이를 -0.6 m로 내렸다.** 이유: 제어가 붙기 전 설정 구간(MAVProxy 온라인,
+파라미터 스냅샷, EKF origin, bringup, ARM)이 30~60 s인데 -0.2 에서 시작하면 그 사이
+선체 상단(base_link +0.127)이 수면을 뚫는다. 실측으로 확인: -0.2 시작 시 51.7 s 후
+상단이 수면 위 +0.078 m. -0.6 시작이면 47.5 s 후에도 상단 -0.233 m(여유 0.233 m),
+DVL 고도 2.34 m로 Water Linked mode-1 밴드(0.3~3.0 m) 안.
+**사용자 요구의 "깊이 0.2 m 시작"은 미션(제어) 시작 깊이로 유지**되며, 하강과 무작위
+XY는 Phase 5 러너가 담당한다.
+
+**Gazebo 자산 주의**
+- `plaster_mold` 메쉬는 `robots/data/real_object/plaster_mold.obj`로의 **심볼릭 링크**다
+  (10.8 MB 중복 회피). 컨테이너로 옮길 때 `tar -ch`로 **역참조**할 것 — `docker cp`는
+  링크를 그대로 복사한다.
+- OBJ에 MTL이 없어 `Missing material for shape` 경고가 뜬다(무텍스처 석고라 정상).
+  SDF `<material>`이 색을 준다.
+- 태그는 box 프리미티브 + albedo_map이 아니라 **UV를 직접 쓴 평면 메쉬**다. box UV
+  규약이 렌더러 구현에 달려 있고 V가 뒤집히면 거울상이 되어 검출 자체가 실패하기 때문.
+  `make_apriltag_texture.py --flip-v`가 그 경우의 1줄 대응이다.
+
+### 12.6 Phase 2 중간 기록 (2026-09-10)
+
+산출물: `deploy/make_rov_with_camera.py`, `deploy/uw_render.py`,
+`deploy/nbv_camera_pipeline.py`, `deploy/models/nbv_probe_camera/`,
+`deploy/make_sweep_world.py`, `deploy/sweep_marker_visibility.py`,
+`deploy/analyze_marker_sweep.py`.
+
+**카메라 배선**
+- `bluerov2_heavy` 에 `rgbd_camera` 를 base_link 안 sensor 로 주입. **상류를 고치지 않고
+  런타임 파생**한다(SITL_Models 는 다른 프로젝트와 공유하는 bind mount). 새 link 가 아니라
+  link 안 sensor 인 이유: `<inertial>` 없는 link 는 gz 에서 기본 질량 1 kg 을 얻어 14.635 kg
+  차체의 동역학을 바꾼다.
+- HFOV 69.010 deg 로 실기 **fx 465.518 을 정확히 재현**.
+- **⚠ gz `rgbd_camera` 의 CameraInfo 는 SDF 를 반영하지 않는다**: 이미지는 640x480 인데
+  intrinsics 는 기본값 fx=277, cx=160, cy=120 (320x240 기준) 으로 남는다.
+  `aruco_pose_node` 가 이걸로 pose 를 풀면 크게 틀어진다 → `nbv_camera_pipeline` 이
+  **직접 camera_info 를 낸다**.
+- **fx 교정 (태그를 자로 씀, 1.0~4.0 m 5점)**: 잔차가 거리와 무관한 **-0.626 +- 0.058 px**
+  (상대변동 9%) 인 반면 비율은 0.9973~0.9868 로 크게 변한다(상대변동 48%)
+  -> 초점거리 오차가 아니라 **코너 검출의 고정 서브픽셀 편향(변당 0.31 px)**.
+  실효 fx = 465.518 확정. 거리 추정 편향은 +0.32%/m (psi<=2.0 구간에서 <=13 mm).
+- **⚠ 상류 `model.sdf` 는 XML 주석 안에 `--` 가 있어**(L51, 이전 세션의 한글 주석)
+  엄격한 파서(expat)가 거부한다. gz 의 TinyXML2 는 관대해 지금까지 드러나지 않았다.
+
+**수중 렌더** `uw_render.py` — Isaac 과 같은 식
+`UW = RGB*exp(-d*ac) + bv*255*(1-exp(-d*bc))` (Jerlov IB). Gazebo 는 수중 광학을 모사하지
+않으므로 그대로 두면 정책이 학습 때 본 적 없는 이미지를 받는다. **ArUco 도 이 감쇠된
+이미지를 쓴다** — 감쇠로 줄어든 대비가 검출률에 반영돼야 측정이 정직하다.
+sim FOV crop 407x305 검증 완료.
+
+**⚠ 측정 버그 1건 (렌더 파이프라인 지연)**: set_pose 후 "N 프레임 대기"로는 부족하다.
+4.0 m 로 옮긴 뒤 받은 프레임의 태그 크기가 직전 3.0 m 시점 값이었다. **변화 감지 +
+연속 두 프레임 동일**(정적 장면은 gz 에서 픽셀 동일) 으로 교체해 해결.
+
+### 12.6.1 마커 가시성 실측 — 계획을 바꾸는 결과
+
+360 시점 (theta 8 x phi 15 x psi 3), Jerlov IB 감쇠 적용, 실기 FOV:
+
+```
+검출  32/360 = 8.9%   (set_pose 서비스 타임아웃으로 9개 표본 유실, 유효 32/351 = 9.1%)
+
+(psi, phi) 격자 검출률 [%]
+ psi\phi   10   15   20   25   30 ... 80
+  1.40      0    0    0    0    0 ...  0
+  1.70     50    0    0    0    0 ...  0
+  2.00    100  100  100   50    0 ...  0
+
+입사각 구간별:  [0,45) 44.4%   [45,60) 0%   [60,90) 0%   [90,180) 0%
+```
+
+**구속은 입사각이 아니라 화각이다.** 입사각이 좋은 [0,45) 구간에서도 44%만 검출된다.
+원인: look-at 이 **물체 바닥(구면 중심)** 을 겨냥하는데 마커는 그보다 **0.94 m 위**에 있어
+화면 위로 잘려나간다. psi 가 작으면 태그가 프레임을 넘치고, phi 가 크면 태그 중심이
+위쪽 화면 밖으로 나간다. phi>=50 에서는 카메라가 마커 평면보다 **아래**라 입사각이
+90 deg 를 넘어 물리적으로 못 본다.
+
+렌더 24점과 해석적 예측이 **24/24 일치**했으므로 해석 모델로 대안을 정량화했다
+(전 상자, theta 24 x phi 36 x psi 13):
+
+| 안 | 가용률 |
+|---|---|
+| (A) 0.420 m 1장, 트레이 위 z=0.9415  [현재] | **5.4%** (렌더 실측 8.9%) |
+| (B) 0.210 m 1장, 같은 위치 | 15.0% |
+| (C) 0.150 m 1장, 같은 위치 | 18.5% |
+| (D) 0.150 m 4장, 거치판 네 모서리 | 32.0% |
+| (E) 0.420 m 1장, **판 윗면 z=0.753** | 34.1% |
+| (F) 0.150 m 1장, 판 윗면 z=0.753 | **49.6%** |
+
+**검출됐을 때의 fix 품질은 매우 좋다**: 위치 오차 중앙 **3.2 mm** / 최대 4.3 mm,
+자세 오차 중앙 **0.14 deg** / 최대 0.19 deg. 즉 문제는 정확도가 아니라 **가용성**이다.
+
+**접근 단계(Phase 5)는 문제없다**: 깊이 0.2 m, 물체 향해 yaw 정렬, pitch 하향 20~30 deg,
+수평 1.5~4.0 m 에서 **100% 획득**. 0.420 m 태그는 이 용도에 정확히 맞는다.
+즉 사용자 요구("시작 시 상대 위치·자세 확인")는 현재 구성으로 충족된다.
+
+**marker frame 축 확정 (실측, 32 표본)**:
+```
+world <- marker  quaternion xyzw = [0.00000, -0.00000, 0.38284, 0.92381]   (표본편차 0.0015)
+  = Z축 순수 45 deg 회전.  즉 marker frame 은 거치판 축과 같고 +Z 가 수면을 향한다.
+pool 원점 = 수조 바닥 중앙, 축은 world 와 동일 -> 이 값이 곧
+  aruco.yaml 의 pool_to_marker_quaternion_xyzw,  pool_to_marker_xyz = [0, 0, 0.9415]
+```
+
+### 12.6 Phase 2 완료 기록 (2026-09-10)
+
+산출물: `deploy/make_rov_with_camera.py`(ROV 카메라 주입), `deploy/uw_render.py`(수중 렌더 +
+FOV crop), `deploy/nbv_camera_pipeline.py`(camera_info·UW·84x84 관측),
+`deploy/models/nbv_probe_camera`, `deploy/make_sweep_world.py`,
+`deploy/sweep_marker_visibility.py`, `deploy/analyze_marker_sweep.py`.
+
+**⚠ gz `rgbd_camera` 의 camera_info 는 믿을 수 없다.** 이미지는 SDF 대로 640x480 으로
+렌더되는데 CameraInfo intrinsics 는 기본값(fx=277, cx=160, cy=120 — 320x240 기준)으로
+남는다. `aruco_pose_node` 가 이걸로 pose 를 풀면 크게 틀어진다.
+-> `nbv_camera_pipeline` 이 camera_info 를 **직접 발행**한다.
+
+**렌더 실효 fx 교정 (태그를 자로 사용)**. 마커 법선 방향 1.0/1.5/2.0/3.0/4.0 m 에서 검은
+테두리 화소폭 측정:
+
+```
+거리   예측 px   측정 px   offset   ratio
+1.0    195.52    194.99   -0.53   0.9973
+1.5    130.35    129.64   -0.70   0.9946
+2.0     97.76     97.12   -0.64   0.9934
+3.0     65.17     64.55   -0.62   0.9905
+4.0     48.88     48.24   -0.64   0.9868
+offset 평균 -0.626 +- 0.058 px (상대변동 0.09)   ratio 변동폭 0.0105 (상대변동 0.48)
+```
+
+offset 이 거리와 무관하게 일정하다 -> **초점거리 오차가 아니라 코너 검출의 고정 서브픽셀
+편향**(변당 0.31 px). 실효 fx = **465.518** (SDF 의도값과 일치). 부수 효과는 거리
+과대추정 0.32%/m — 운용 대역(슬랜트 <= 2.2 m)에서 <= 13 mm 로 무시 가능. 이는 sim 렌더 +
+검출기의 성질이라 실기로 전이되지 않는다(실기는 블러/조명에서 다른 편향이 생긴다).
+
+**측정 방법론 함정 (한 번 틀렸다가 잡음)**: set_pose 후 "N 프레임 기다리기"로는 안 된다.
+4.0 m 로 옮긴 뒤 받은 프레임의 태그 크기가 직전 3.0 m 시점의 값이었다(렌더/브리지가 pose
+변경보다 몇 프레임 늦다). `ProbeGrabber.grab_settled()` 는 (1) 이동 전 프레임과 달라질
+때까지 (2) 그 뒤 연속 두 프레임이 같아질 때까지 기다린다. gz 렌더는 잡음이 없어 정적
+장면의 연속 프레임이 픽셀 단위로 동일하다는 성질을 쓴다.
+
+**마커 스윕 실측 (360 시점 = 8 theta x 15 phi x 3 psi, Jerlov IB 감쇠 적용)**
+
+```
+전체 검출 8.9% (32/360)
+
+(psi, phi) 검출률 [%]
+psi\phi   10   15   20   25   30 ... 80
+1.40       0    0    0    0    0 ...  0
+1.70      50    0    0    0    0 ...  0
+2.00     100  100  100   50    0 ...  0
+
+입사각 [0,45) 44.4% / [45,60) 0% / 그 이상 전부 0%
+검출 시 pose 오차: 위치 중앙 3.2 mm (최대 4.3) / 자세 중앙 0.14 deg (최대 0.19)
+```
+
+**구속은 입사각이 아니라 화각이었다** — §12.1 이 세운 가설(입사각 한계 65~75 deg)은
+**틀렸다**. 진짜 원인: look_at 이 구면 중심(= 물체 **바닥면**)을 겨냥하는데 마커는 그보다
+0.94 m 위에 있어, phi 가 커질수록 마커가 화면 위로 밀려 잘려나간다. psi 가 작으면 반대로
+너무 가까워 태그가 프레임을 넘친다. 해석 예측기(코너 4개 전부 in-frame + 입사각 + 최소
+화소)와 렌더가 24/24 일치해 이 설명이 확인됐다.
+
+배치 대안 정량화(해석, 실기 FOV, 전 상자):
+
+| 배치 | 가용률 |
+|---|---|
+| (A) 0.420 m 1장, 물체 상단 z=0.9415 [현재] | 5.4% |
+| (B) 0.210 m 1장, 같은 위치 | 15.0% |
+| (C) 0.150 m 1장, 같은 위치 | 18.5% |
+| (D) 0.150 m 4장, 거치판 네 모서리 | 32.0% |
+| (E) 0.420 m 1장, 판 윗면 z=0.753 | 34.1% |
+| (F) 0.150 m 1장, 판 윗면 z=0.753 | 49.6% |
+
+**접근 단계(Phase 5)는 문제없다** — 깊이 0.2 m, 물체 향해 yaw 정렬, pitch 하향:
+
+```
+        1.0m  1.5m  2.0m  2.5m  3.0m  3.5m  4.0m
+ 20도     0%    0%  100%  100%  100%  100%  100%
+ 30도     0%  100%  100%  100%  100%  100%  100%
+```
+
+즉 사용자 요구("수면 근처에서 시작했을 때 상대 위치·자세 확인")는 **0.420 m 태그 1장으로
+충족된다**. 부족한 것은 NBV 루프 **안**의 fix 다.
+
+**marker frame 실측 (가정 금지 규율대로 drawFrameAxes 대신 solvePnP 32점 평균)**
+
+```
+world <- marker  quaternion xyzw = [0.00000, -0.00000, 0.38284, 0.92381]   (표본편차 <= 0.0015)
+= +Z 축 45 deg 순수 yaw  ->  디코딩된 마커 프레임이 거치판 모델 프레임과 일치한다
+aruco.yaml:  pool_to_marker_xyz = [0, 0, 0.9415]
+             pool_to_marker_quaternion_xyzw = [0.0, 0.0, 0.38284, 0.92381]
+(pool 원점 = 수조 바닥 중앙, 축은 gz world 와 동일)
+```
+
+**잔여**: 스윕 중 `set_pose` 서비스 호출 9/360(2.5%) 실패. 전부 검출 가능 영역
+(psi=2.0, phi<=25) **밖**이라 결과에 편향은 없다. 스윕에 재시도를 넣을 것.
+
+**부수 발견**: 상류 `SITL_Models/.../bluerov2_heavy/model.sdf` L51 의 한글 주석에 XML 주석
+안에서 불법인 `--` 가 있다. gz 의 TinyXML2 는 관대해 통과하지만 엄격한 파서(Python expat)는
+거부한다. 지금 당장 막는 것은 없으나 XML 도구를 쓰는 순간 걸린다.
+
+### 12.7 마커 배치 결정 (2026-09-10, 사용자)
+
+**A 유지** — 거치판을 rim 상단(물체 로컬 z=0.933) 위에, 태그면 z=0.9415.
+world 는 이미 그 상태라 변경 없음.
+
+경위: Phase 2 에서 (E) 판 윗면 z=0.753 을 제안했다가 **렌더로 반증됐다** — 판 윗면 중앙은
+트레이(개구 1.0x0.6, 바닥 0.833, rim 0.933)가 덮고 있어 마커 정면 2.0 m 위에서조차 검출
+0% 다. 해석 비교표의 34.1% 는 **가림 모델이 없어서 나온 값**이며 존재하지 않는 배치다.
+실현 가능한 대안은 A'(트레이 바닥 z=0.8415, 21.4%)였으나 사용자가 A(8.9%)를 택했다.
+
+따라서 **NBV 루프 안의 마커 fix 는 psi=2.0 · phi<=25 도의 모서리에서만 나온다**.
+그 밖의 구간은 §12.2 결정대로 INS 추측항법이 메운다 — Phase 3 의 표류 실측이
+미션 길이 상한을 정한다.
+
+기록해 둘 것: 평면 표적 solvePnP 는 입사각이 큰 시점에서 두 갈래 해가 뒤집힌다
+(실측 최대 96.6 mm / 45.3 deg, 중앙값은 5.1 mm / 0.10 deg). 배포 정렬기는 재투영 오차와
+입사각으로 걸러야 한다 — 틀린 갈래를 한 번 받으면 pool_T_odom 이 통째로 오염된다.
+
+### 12.8 Phase 3 중간 — **"INS 추측항법" 전제가 실측으로 무너졌다** (2026-09-10)
+
+산출물: `deploy/run_nbv_sitl.sh`(NBV SITL 사이클), `deploy/mavlink_ekf_probe.py`(수신 전용
+EKF 프로브), `deploy/analyze_drift.py`, `brov_perception/config/aruco_pool_object.yaml`,
+`stage2_sitl_dvl_injector.py` 에 **자세 의존 bottom-lock 게이트**
+(`--bottom-lock-max-tilt-deg`, 기본 180=비활성이라 step_2 회귀 10/10 통과).
+
+**측정**: 수조 world 에서 gz + ArduSub + MAVProxy + DVL injector + 카메라 파이프라인을
+띄우고, injector 를 도중에 정지시켜 "DVL 상실" 을 만든 뒤 EKF 를 관찰했다.
+제어는 붙이지 않았다 — 재는 것이 표류이지 제어 성능이 아니기 때문.
+
+```
+run A: DVL 정지 t=57.8 s  ->  CONST_POS_MODE  t=+7.3 s
+run B: DVL 정지 t=22.2 s  ->  CONST_POS_MODE  t=+7.2 s     (dropout 종속 = 인과 확인)
+
+flags 전이:
+  ATTITUDE|VEL_HORIZ|VEL_VERT|POS_HORIZ_REL|POS_VERT_ABS|POS_VERT_AGL|PRED_POS_HORIZ_REL
+     -> ATTITUDE|VEL_HORIZ|VEL_VERT|POS_VERT_ABS|POS_VERT_AGL|**CONST_POS_MODE**
+LOCAL_POSITION_NED 발행도 그 시점에 멈춘다 (ekf_status 는 계속 흐름 = 프로브는 살아 있음)
+```
+
+**ArduSub EKF3 는 수평 추측항법을 하지 않는다.** 외부항법이 끊기면 약 7 초 버티다가
+위치를 얼린다(constant position mode). 소스에서 확인:
+
+```
+AP_NavEKF3.h:472   const uint16_t posRetryTimeNoVel_ms = 7000;   // 파라미터가 아니라 상수
+AP_NavEKF3.h:471   const uint16_t posRetryTimeUseVel_ms = 10000;
+AP_NavEKF3_Control.cpp:392  posAidLossCritical -> PV_AidingMode = AID_NONE
+```
+
+측정한 7.2~7.3 s 가 `posRetryTimeNoVel_ms` 와 정확히 일치한다. **`const` 라 파라미터로
+못 늘린다 — ArduPilot 재컴파일 외에는 방법이 없다.**
+
+얼기 전 7 초 동안의 표류(제어 없이 거의 정지 상태, 즉 **최선의 경우**):
+
+```
+run A  선형 +2.83 cm/s   2차 +0.404 cm/s^2   10 cm 도달 5 s
+run B  선형 +1.58 cm/s   2차 +0.238 cm/s^2   10 cm 도달 7 s
+2차 적합의 잔차가 선형의 1/10~1/16 -> 가속도 바이어스 적분의 **2차 발산**이다
+```
+
+**따라서 §12.2-5 의 "pose 공백은 INS 추측항법" 은 이 EKF 구성에서 성립하지 않는다.**
+버틸 수 있는 시간은 **7 초**이고 그동안 10 cm 가 쌓인다. NBV 결정 1회는 이동 5 s + dwell
+3 s = 8 s 라 **결정 한 번도 못 버틴다**.
+
+그리고 §12.7 결정(마커 A)은 루프 내 fix 를 psi=2.0 · phi<=25 도의 8.9% 로 제한한다.
+즉 나머지 91% 구간에서 DVL 이 유일한 위치원이고, DVL 이 자세로 끊기면 7 초 뒤 위치를 잃는다.
+
+**선택지 (측정으로 좁혀진 것)**
+
+| 안 | 내용 | 대가 |
+|---|---|---|
+| (1) 자체 추측항법 | ArduSub EKF 대신 우리가 소유하는 노드에서 DVL 속도 적분 + 마커 앵커. 얼지 않고 불확실도를 보고할 수 있다 | 신규 추정기 + 컨트롤러 피드백 배선 변경 |
+| (2) 7 초 규칙 | fix 없이 7 초를 넘지 않도록 시점열을 제약. look_at 은 tilt=90-phi 이므로 **실기 DVL 틸트 한계가 phi 하한을 정한다** | 실기 DVL 틸트 한계 측정이 선행. 한계가 30 도면 phi>=60 만 사용 가능 |
+| (3) 카메라 tilt 서보 | 차체는 수평 유지(DVL lock 보존), 카메라만 하향. 충돌 자체를 없앰 | §11.3-C 에서 보류한 것. look_at 운동학과 정책 재평가 |
+| (4) 상실 시 중단 | 위치 상실을 미션 abort/hold 조건으로 정의 | 자율성 포기 |
+
+**다음 측정 (코드 준비됨)**: `--dvl-restart-after-s` 로 DVL 복귀 시 EKF 가 회복하는지.
+짧은 dropout 이 견딜 만한지가 (2) 의 성립을 가른다.
+
+**운영 함정 (자책 기록)**: 녹화 중인 rosbag `.db3` 를 분석기로 열면 rosbag2 가
+`SqliteException: database is locked` 로 **죽는다**. 측정 하나를 그렇게 날렸다.
+녹화가 끝난 뒤에만 열 것.
+
+## 13. 자체 수평 추측항법 계획 (2026-09-10, §12.8 선택지 (1))
+
+센서: DVL(Water Linked A50) · INS/AHRS · Bar30 압력 · 마커(ArUco).
+
+### 13.0 문제는 생각보다 작다 — **수평 2자유도뿐**
+
+`/brov/state` 를 구성하는 세 채널을 나눠 보면:
+
+| 채널 | 현재 출처 | EKF 정지(CONST_POS_MODE) 때 | 판정 |
+|---|---|---|---|
+| 자세 | `ATTITUDE_QUATERNION` (AHRS) | **유지됨** (flags 에 ATTITUDE 남아 있음, 실측) | 손댈 것 없음 |
+| 깊이 z | `depth_source=pressure` (Bar30 직결) | **무관** — EKF 를 거치지 않는다 | 이미 해결됨 |
+| 수평 x,y | `LOCAL_POSITION_NED` (EKF) | **얼어붙음** | **여기만 만들면 된다** |
+
+깊이는 `docs/DEPTH_SOURCE.md` 가 이미 구현·검증했다(SITL 정적 5점: 상관 0.999993,
+RMS 0.060 m, 기울기 1.026). 논문(§5.2)도 깊이는 압력센서 전담, 자세는 INS 전담으로
+나눈다. 따라서 신규 작업은 **수평 위치 적분기 하나**다 — 완전한 INS/EKF 를 다시 만드는
+일이 아니다.
+
+### 13.1 왜 우리 적분기가 ArduSub EKF 보다 나은가 (그리고 어디까지만)
+
+ArduSub 가 7 초에 포기하는 것은 버그가 아니라 **옳은 판단**이다: VISO 가 끊기면
+가속도만 남고, 가속도 적분은 2차 발산한다(§12.8 실측 0.24~0.40 cm/s^2).
+
+우리가 다른 이유는 **속도를 측정하기 때문**이다. DVL body 속도를 적분한 위치는
+속도 오차에 **선형**으로만 흐른다. 이것이 유일하고 진짜인 우위다.
+
+그리고 구조적 이유가 하나 더 있다 — **지금 마커 fix 는 제어 루프에 들어갈 길이 없다.**
+`brov_localization` 은 `pool_T_odom` 을 구해 **미션 프레임 해석**에만 쓰고, 계약상
+"one-shot, 재획득으로 움직이지 않음" 이다. 컨트롤러는 그사이 EKF odometry 만 보고 난다.
+자체 추정기를 가져야 마커가 실제로 위치를 교정할 수 있다.
+
+**하지만 이것이 고치지 못하는 것**: DVL 이 자세로 끊기면 우리도 속도가 없다. 그때
+우리 적분기가 할 수 있는 것은 (a) 얼지 않고 (b) 공분산을 정직하게 키우고 (c) 미션이
+그 값을 보고 판단하게 하는 것뿐이다. **DVL 틸트 한계는 여전히 구속으로 남는다** —
+선택지 (1) 과 (2) 는 대안이 아니라 **함께 해야 하는 것**이다.
+
+### 13.2 오차 예산 — 요(yaw)가 전부다
+
+미션 경로 40 m 가정:
+
+```
+DVL 스케일 0.1%              ->    4.0 cm
+요 오차 0.2 deg              ->   14.0 cm
+요 오차 1.0 deg              ->   69.8 cm      <== 지배항
+요 오차 3.0 deg (철제 수조)   ->  209.4 cm
+레버암 미보정 (유계)          -> <= 57.1 cm 진동 (누적 아님)
+```
+
+교차오차 = yaw 오차(rad) x 경로길이다. 요는 EKF3 가 나침반으로 잡는데
+(`EK3_SRC1_YAW=1`) 수조는 철골·모터가 많아 신뢰할 수 없다. **DVL 장착 회전 오프셋도
+정확히 같은 형태로 들어온다**(`dvl_reader.py` 도크스트링: 그 값은 장비 설정에 있고
+코드는 모른다). 따라서 **요 바이어스를 상태로 추정**해야 하며, 절대 요를 주는 유일한
+관측이 마커다.
+
+### 13.3 ⚠ DVL 레버암은 선택이 아니다
+
+`robots/data/BROV2/brov2_custom_physics.usda` 의 `DVL_frame`:
+
+```
+r_dvl = (-0.1705, -0.0980, -0.2067) m,  |r| = 0.285 m
+  (카메라 (0.1575, 0.0053, 0.0678) 와 같은 USD 프레임이라 비교 가능:
+   카메라는 앞·위, DVL 은 뒤·아래 — 물리적으로 타당)
+```
+
+DVL 은 차체 회전 시 `w x r` 만큼의 **겉보기 속도**를 본다:
+
+```
+|w|=0.20 rad/s (완만한 look-at 선회) -> 0.057 m/s = 순항속도의 23%
+|w|=0.50 rad/s                      -> 0.143 m/s = 57%
+|w|=1.85 rad/s (11.2절 실측 전이)     -> 0.528 m/s = 209%
+```
+
+보정식은 `v_body = v_dvl - w x r_dvl` 이고 w 는 IMU 가 준다. 누적은 안 되지만
+매 dwell 의 위치를 오염시킨다. 또한 step_2 `DESIGN.md:151` 이 실기 **DVL dropout 을
+장착 위치 탓으로 이미 지목**했다 — 레버암은 오차원이자 dropout 원인 후보다.
+
+주의: `stage2_sitl_dvl_injector.py` 는 `VISO_POS_*=0`, 즉 **DVL 이 원점에 있다고
+가정**한다(러너 manifest `dvl_mount_assumption=base_link_origin_VISO_POS_zero`).
+SITL 은 레버암 오차를 재현하지 못하므로, 주입기에 레버암을 넣어야 시험이 성립한다.
+
+### 13.4 단계
+
+| # | 내용 | 통과 기준 |
+|---|---|---|
+| **N1** | **DVL 속도 계약 통일**. `/brov/dvl/velocity` (TwistWithCovarianceStamped, body FLU) 를 생산자 둘이 채운다: 실기 `DvlReader`(json_v3 :16171), SITL `stage2_sitl_dvl_injector`(레버암 주입 포함). 장착 회전·레버암은 설정 파라미터 | SITL 에서 주입 속도 == GT body 속도 (레버암 보정 후 잔차 < 1 cm/s) |
+| **N2** | **수평 적분기 노드** `brov_nav/dead_reckoning_node`. 상태 (p_N, p_E, b_yaw). 예측 `p += R(yaw - b_yaw)(v_dvl - w x r) dt`. 공분산은 이동거리에 선형 증가 | GT 대비 300 s 표류율. DVL 무효 시 **얼지 않고** 공분산만 증가, `/brov/nav/valid` 가 예산 초과에서 false |
+| **N3** | **마커 앵커 융합**. dwell 정지 fix 로 p 재설정 + b_yaw 갱신. 입사각·재투영오차 게이트(§12.7 의 두 갈래 해 뒤집힘 방어) | 두 fix 가 이동을 사이에 둘 때 b_yaw 관측 가능성 확인. 잘못된 갈래를 게이트가 100% 거른다 |
+| **N4** | **피드백 배선**. `brov_base` 에 `horizontal_source` 파라미터 추가 (`mavlink_ekf` 기본 / `nav_dead_reckoning`). `depth_source` 와 대칭 구조, `/brov/state` 가 선택된 출처를 보고 | 기존 회귀 전부 통과. 기본값에서 동작 불변 |
+| **N5** | **고장 모드 정의**. `/brov/nav/status` 의 공분산을 미션 게이트가 소비. NBV 결정은 공분산 임계 이하에서만 커밋, 초과 시 hold/abort | "조용히 얼기" 가 구조적으로 불가능함을 시험으로 보임 |
+| **N6** | **검증**. S1 DVL 상시유효 300 s 표류 / S2 틸트 게이트 켜고 NBV 자세열 / S3 마커 fix 재설정 정확도 / S4 **폐루프** 위치유지 | S4 판정 기준은 이미 프로젝트에 있다 — cmg 전례: MAVLink/EKF 경로 호버 실패(GT +3 m) vs GT-diagnostic max_drift 0.75 m / mean 0.27 m. 우리 추정기가 GT-diagnostic 급이어야 한다 |
+
+### 13.5 비용과 리스크
+
+**4~6일** — Phase 3 예산(2.5일) 초과다. 그리고 이것은 §7 리스크 대장이 "계획에서 가장
+얇은 지점" 으로 지목한 **pose 피드백 경로를 직접 건드리는** 작업이다. cmg 전례가
+그 위험을 이미 보여줬다(EKF 피드백 호버 발산).
+
+완화: N4 를 `depth_source` 와 **똑같은 형태**로 만들어 기본값에서 기존 동작이
+비트 단위로 같게 하고, 새 경로는 명시적 파라미터로만 켠다. 그러면 회귀는 기존
+시험으로 지켜지고, 새 경로의 위험은 그 파라미터를 켠 런에만 갇힌다.
+
+### 13.6 선행 측정 (코드 없이 먼저 할 것)
+
+1. **실기 DVL 틸트 한계** — (1)을 해도 남는 구속. 수조에서 기울여가며 A50 의
+   `velocity_valid` 가 꺼지는 각을 잰다. 이 값이 phi 하한을 정한다
+2. **DVL 재획득 시 EKF 회복** — `--dvl-restart-after-s` 로 SITL 측정(코드 준비됨).
+   짧은 dropout 이 견딜 만하면 (2) 만으로 갈 수도 있다
+3. **요 오차 실측** — 마커 fix 의 yaw 와 AHRS yaw 차. 1 deg 인지 3 deg 인지가
+   13.2 표에서 70 cm 와 210 cm 를 가른다
+
+## 14. A50 조사 결과와 자체 추정기 설계 (2026-09-10)
+
+### 14.0 ⚠ 정정 — TCP 단일 클라이언트는 사실이 아니다
+
+앞서 "A50 은 TCP 슬롯을 하나만 내준다"고 적었으나 **근거 없는 추론이었다**. Water Linked
+공식 문서:
+
+> "A TCP server is available on port 16171 which outputs the latest data to **all connected
+> clients**, and which listens to commands from **any of these connected clients**."
+
+내가 본 것은 BlueOS 확장 코드의 "포트를 바꿀 수 없다"는 주석이었고 그걸 단일 클라이언트로
+해석했다. 다만 2026-09-02 실기 사고(`dvl_record_node` 접속 -> extension 정지 -> 재부팅)는
+실제로 있었다. **문서와 현장이 어긋나므로 벤치 재시험으로 먼저 푼다**(사용자 결정).
+
+### 14.1 확정된 A50 사양 (공식 데이터시트 · 문서 · BlueOS 확장 소스)
+
+```
+배열            4-beam convex Janus,  빔각 22.5 deg
+고도            최소 5 cm / 최대 50 m,  ping 4~15 Hz (고도 적응)
+속도            최대 3.75 m/s, 분해능 0.1 mm/s
+장기 정확도      ±1.01 % (Standard) / ±0.1 % (Performance)      <- 보유 버전 미확인
+틸트 한계        **사양에 없음**  -> 기하 계산과 실측 외에 알 방법이 없다
+DR              DVL 속도 + 내장 IMU/AHRS 를 칼만 필터로 융합
+DR yaw 드리프트  0.1~0.3 deg/min  (**자이로 보정 후** 값. A50/A125 는 보정 필요)
+FOM             X-Y 평면 위치의 추정 표준편차. 속도 불가 시 상승
+bottom lock 상실 "속도·위치를 가속도만으로 예측 -> 상당한 오차"  = ArduPilot 과 같은 물리
+position_local  x, y, z, roll, pitch, yaw, ts
+velocity        vx, vy, vz, altitude, velocity_valid, fom, time
+BlueOS 확장     should_send = POSITION_DELTA(기본) / SPEED_ESTIMATE / POSITION_ESTIMATE
+                DVL 로 **명령을 전혀 보내지 않는다** -> DR 리셋도 자이로 보정도 한 적 없음
+```
+
+### 14.2 설계가 단순해진다 — 융합은 A50 이 이미 하고 있다
+
+`brov_control/dvl_reader.py:103` 은 `type != "velocity"` 를 버린다. 즉 **`position_local`
+이 이미 도착하고 있는데 우리가 폐기하고 있다.** §13 의 "우리가 속도를 적분한다"는 설계는
+장치가 이미 하는 일을 다시 하는 것이었다.
+
+오차 예산 (미션 320 s = 5.3 min, 경로 40 m):
+
+| 항목 | 오차 |
+|---|---|
+| DVL 장기정확도 ±1.01 % (Standard) | 40.4 cm |
+| DVL 장기정확도 ±0.1 % (Performance) | 4.0 cm |
+| A50 DR yaw 드리프트 0.1 deg/min | 18.6 cm |
+| A50 DR yaw 드리프트 0.3 deg/min | 55.9 cm |
+| 차체 AHRS yaw 바이어스 1 deg | 69.8 cm |
+| 차체 AHRS yaw 바이어스 3 deg (철제 수조) | 209.4 cm |
+
+**5 분 미션에서는 A50 자이로(드리프트)가 차체 나침반(바이어스)보다 유리하다.** 드리프트는
+시간에, 바이어스는 경로길이에 비례하므로 교차점은 0.3 deg/min 기준 **7 분** — 우리 미션이
+그 아래다. 미션이 길어지면 역전되므로 이 가정은 미션 길이에 묶어 둘 것.
+
+**우리가 만들 것은 INS 가 아니라 "앵커 + 프레임 정렬 + 건전성 판정" 계층이다.**
+
+```
+상태:  p_pool(N,E),  yaw_offset (A50 DR 프레임 -> pool)
+입력:  A50 position_local -> fix 사이 상대 변위,  FOM = sigma
+       A50 velocity/velocity_valid/fom -> 공백 감지
+       Bar30 -> z (이미 EKF 독립, 검증 완료)
+       차체 AHRS -> roll/pitch + yaw 교차검증(A50 yaw 와의 차 = 상대 드리프트 관측)
+       마커 pool_T_base -> 절대 위치 + yaw 앵커
+갱신:  fix 사이  p_pool += R(yaw_offset)·delta(position_local),  sigma 는 FOM 따라 증가
+       유효 fix  p_pool 재설정 + yaw_offset 재추정
+고장:  velocity_valid=false 또는 FOM 초과 -> sigma 증가, 예산 초과 시 /brov/nav/valid=false
+```
+
+### 14.3 사용자 결정 (2026-09-10)
+
+1. **A50 버전 미확인** -> 확인 전까지 **Standard(±1.01%) 로 보수적 가정**
+2. **자이로 보정을 매 세션 수행** -> 런북 절차에 고정 (정지 상태 보정 + DR 리셋).
+   BlueOS 확장이 명령을 안 보내므로 **우리가 보내거나 수동으로** 해야 한다
+3. **TCP 직접 접속은 벤치에서 조심스럽게 재시험** — 물 밖/안전 조건, extension 켠 채
+   읽기 전용, 펌웨어 버전과 함께 기록
+4. **섬도우(shadow) 먼저** — 추정기를 띄우되 제어에는 쓰지 않고 EKF/GT 와 나란히 기록.
+   SITL·실기 양쪽에서 숫자가 나온 뒤 전환. cmg 전례(EKF 피드백 호버 발산)를 감안한 순서
+
+### 14.4 구현 순서
+
+| # | 내용 | 위험 |
+|---|---|---|
+| **A-1** | `/brov/dvl/*` 메시지 계약 (velocity + position_local + fom + valid) | 없음 |
+| **A-2** | **SITL 생산자** — injector 가 A50 을 모사한다: 4빔 22.5 deg 기하로 `velocity_valid` 판정, 레버암, 장기정확도 스케일 오차, yaw 드리프트, FOM | 없음 (SITL 전용) |
+| **A-3** | **실기 생산자** — `dvl_reader.py` 가 `position_local` 을 살린다 (현재 폐기 중) | 없음 (파서만) |
+| **A-4** | **섬도우 추정기 노드** — 위 상태/갱신/고장 구조. 제어에 안 씀 | 없음 |
+| **A-5** | SITL 에서 GT 대비 검증, 실기에서 EKF 대비 기록 | 없음 |
+| **A-6** | (숫자가 나온 뒤) `brov_base` 에 `horizontal_source` 배선 | **높음** — pose 피드백 경로 |
+
+A-2 가 중요하다: **SITL 이 A50 의 오차 특성을 재현하지 못하면 섬도우 시험이 무의미하다.**
+그래서 기하(빔 유효성)와 오차 모델을 데이터시트 값으로 넣는다.
+
+
+### 14.5 ⚠ 정정 — "phi<=20 에서 DVL 불가" 는 틀렸다 (2026-09-10, 사용자 지적)
+
+사용자가 "고도각이 낮으면 바닥에 수직에 가까운데 왜 빔이 위를 향하냐" 고 물어 다시 셌다.
+둘을 갈라야 한다.
+
+**맞는 부분 — 카메라와 DVL 은 서로 수직이다.**
+카메라는 body +X, DVL 은 body -Z 다. look_at 은 카메라를 물체로 향하게 하므로 phi=10 deg
+에서 차체가 기수 80 deg 숙고, 카메라축에 수직인 DVL 축은 수직에서 80 deg = **거의 수평**이
+된다. 두 각은 모든 phi 에서 정확히 같다 — 둘 다 (90 - phi).
+
+```
+ phi   카메라 시선(수평아래)   DVL 축(수직이탈)   빔 4개의 수직이탈각
+  10          80.0             80.0        57.5  80.8  80.8  102.5
+  30          60.0             60.0        37.5  62.5  62.5   82.5
+  60          30.0             30.0         7.5  36.9  36.9   52.5
+  80          10.0             10.0        12.5  24.5  24.5   32.5
+```
+
+**틀린 부분 — 3빔이 남는다.**
+phi=10 deg 에서 수평을 넘는 빔은 4개 중 **1개**뿐이다. 4-beam Janus 는 **3빔이면 3-D 속도
+해가 나오므로** lock 이 사라지지 않는다. "바닥 반사가 없어 불가" 는 내가 4빔이 다 필요하다고
+잘못 센 결과다.
+
+```
+ phi   수평아래 빔   3빔 해   최악 유효빔   사거리(고도 1.5 m)
+  10        3      True     80.8 deg        9.3 m
+  20        3      True     71.6 deg        4.7 m
+  30        4      True     82.5 deg       11.5 m
+  80        4      True     32.5 deg        1.8 m
+```
+
+**실제 한계는 스치는 입사각·사거리이고, 그 값은 데이터시트에 없다.** phi=10 deg 에서 최악
+유효빔은 수직이탈 80.8 deg 로 바닥을 스치며 고도 1.5 m 에 사거리 9.3 m 다. 그 각의
+후방산란이 쓸 만한지는 재봐야 안다.
+
+**정정된 판정**
+
+| 확실 (기하) | DVL 축이 수직에서 정확히 (90 - phi) 기운다 |
+| 확실 (기하) | phi < 22.5 deg 에서 4빔 중 1개가 수평 위로 넘어간다 |
+| **미측정** | 남은 3개의 스치는 빔으로 bottom lock 이 되는가. **사양에 한계 없음** |
+
+실기 증거(순항 valid 82~88 %, 바닥 근처 실패)는 전부 **거의 수평 자세**에서 나온 것이다 —
+기울인 상태의 실기 데이터는 **아예 없다**. 따라서 §13.6 의 "실기 DVL 틸트 한계 측정" 은
+형식이 아니라 **이 설계의 결정적 실험**이다.
+
+`a50_model.py` 의 `max_beam_from_vertical_deg` 는 이 미측정 손잡이다. 기본값을 None(기하만,
+낙관적)으로 두어 추정치를 조용히 박지 않게 했고, 설계 판단은 이 값의 **스윕 민감도**로 한다.
+
+## 15. 트랙 A — Gazebo SITL NBV 파이프라인 (GT pose 위에서)
+
+§12.8 이 EKF 를 무너뜨린 뒤, 추정기 문제가 파이프라인 전체를 막지 않도록 두 트랙으로
+가른다(사용자 결정 2026-09-10). 트랙 A 는 **GT pose 위에서** NBV 루프를 세운다 —
+step_2 의 `gazebo_truth` 피드백과 같은 변수 격리다. 파이프라인이 서야 "추정기가 얼마나
+정확해야 하는가" 도 답할 수 있다.
+
+### 15.1 TSDF 융합 공유 모듈 (완료)
+
+`envs/tsdf_fusion.py` 신설 — `fuse_depth`, `camera_extrinsic`, `build_voxel_grid`,
+`vox_actor_channels`, `euclidean_to_z_depth`. **torch 만 의존**하므로 ROS 컨테이너
+(torch 2.13 CPU)에서 그대로 돈다. `env_reward._fuse_depth` 는 이제 여기에 위임한다.
+계획서 §6 의 "복사하지 말고 import" 를 실행한 것.
+
+동일성 시험(`deploy/test_tsdf_fusion.py`): 분리 직전 원본 구현을 참조로 들고 5개 시드에서
+`torch.equal`(weight) + `atol=0`(tsdf). **15/15 통과.**
+
+### 15.2 ⚠ 발견·수정 — 융합에 유클리드 거리를 넣고 있었다
+
+융합식은 `sdf = depth - vox_z` 라 **z-depth**(광축 방향 거리)를 요구하는데, 환경은
+`distance_to_camera`(광학중심까지의 **슬랜트 거리**)를 넣고 있었다. IsaacLab 문서:
+
+```
+"distance_to_camera"      : distance to camera optical center      <- 유클리드
+"distance_to_image_plane" : ... along camera's z-axis              <- z-depth
+```
+
+**오차**: 광축에서 theta 벗어난 화소가 1/cos(theta) 배 과대 측정. psi=1.7 m 에서
+
+| 위치 | theta | 오차 |
+|---|---|---|
+| 중심 | 0 | 0 |
+| 수직 가장자리 | 18.1 deg | 8.9 cm = 0.89 voxel |
+| 수평 가장자리 | 23.6 deg | 15.5 cm = 1.55 voxel |
+| 모서리 | 28.6 deg | 23.7 cm = **2.37 voxel** (trunc_margin 0.10 m 초과) |
+| 물체 가장자리(반폭 0.7 m) | 22.4 deg | 1.38 voxel |
+
+**경위 (git 이력)**: `f7478cb`(2026-04-17) 최초 구현은 `distance_to_image_plane` 로
+**옳았다**. `1cb684b`("dooomed :(", 2026-04-23)에서 바뀌었는데, 그 diff 를 보면 깊이 키
+변경이 `rgb -> uw_rgb` 전환과 **같은 hunk** 에 있다 — 즉 `UWCamera` 도입 커밋이고,
+새 센서의 `data_types` 가 `["rgba", "distance_to_camera"]` 였기 때문이다. 이후
+`e311dff`(2026-06-11)에서 같은 작성자가 **소나 경로는** z-depth 로 명시 복귀시켰다
+("standard pinhole unprojection"). 구분은 알고 있었고 TSDF 경로만 물려받은 것이다.
+
+**중요**: `distance_to_camera` 는 **UW 렌더에서 계속 옳다** — 감쇠 `exp(-d*ac)` 의
+광로 길이는 유클리드다(`UW_Camera_parallel.py:106`). 즉 키를 통째로 바꾸면 렌더가
+망가진다. 하나의 키를 두 용도가 나눠 쓴 것이 문제였다.
+
+**수정 (사용자 결정: 1번)**: annotator 를 추가하지 않고 **융합 직전에 화소별 변환**한다.
+```
+z = d_euclid / sqrt(1 + ((u-cx)/fx)^2 + ((v-cy)/fy)^2)
+```
+렌더 비용 0 이다. 이 프로젝트는 이미 렌더 자원 한계에 두 번 부딪혔으므로(§3) annotator
+추가를 피하는 편이 안전하다. 계수는 intrinsic·해상도에만 의존해 한 번 계산 후 캐시하고,
+전 env intrinsic 이 같으면 (1,H,W) 로 브로드캐스트한다(96 env 에서 30 MB 절약).
+
+계약을 명시했다: **`tsdf_fusion.fuse_depth` 는 언제나 z-depth 를 받는다.** Gazebo
+`rgbd_camera` 의 `depth_image` 는 처음부터 z-depth 라 배포는 변환이 필요 없다.
+
+**남은 것**: 학습 전이라 재학습 비용은 없지만, 실물체·GSO **베이스라인은 재측정**해야
+한다(이 수정으로 재구성 기하가 바뀐다). `env.py:408`/`env.py:919` 의 critic depth 관측은
+표현 선택이라 중립 — 일관성을 위해 바꿀지는 별건.
+
+### 15.3 NBV 결정 루프가 Gazebo 에서 돈다 (2026-09-10)
+
+산출물: `deploy/nbv_belief_node.py`(TSDF 믿음), `deploy/nbv_loop_probe.py`(결정 루프
+하네스), `deploy/make_gt_surface.py`(채점 분모), `envs/nbv_baselines.py`(공유 베이스라인).
+
+**공유 모듈 원칙을 지켰다** — 융합(`envs/tsdf_fusion.py`), 구면/look_at 기하, 베이스라인
+정책 모두 Isaac 과 **같은 코드**다. `eval_core.Policy` 도 `nbv_baselines` 에 위임한다.
+배포 스크립트가 하는 일은 배선뿐이다.
+
+**채점 분모 교차검증**: `make_gt_surface.py` 가 OBJ 에서 독립적으로 복셀화한 결과
+**467 voxel**. Isaac 실측 455~475 의 한가운데다. 볼륨 원점도 (-1.0007, -1.0003, -0.5335)
+로 belief 노드 파라미터와 소수 4자리까지 일치 — 격자 정렬이 맞았다.
+
+**제어 없이 도는 이유**: 재는 것이 belief/정책 배선이지 컨트롤러 성능이 아니다. 정적
+프로브를 `set_pose` 로 정확한 시점에 놓으면 pose 재현이 완벽해 coverage 곡선을
+`evaluate_nbv.py` 와 같은 조건에서 비교할 수 있다. 폐루프는 별도 단계다.
+
+**⚠ 화각을 맞춰야 비교가 성립한다**: 실기 카메라(69.0x54.6)는 Isaac 학습 카메라
+(47.2x36.3)의 **2.10배** 입체각을 덮는다. 그대로 융합하면 한 결정에 학습 때보다 훨씬
+많이 얻어 정책이 배운 "가면 얼마나 얻는가" 가 어긋난다. belief 노드에 학습 화각 crop
+(407x305, 주점 이동 포함)을 넣고 기본값으로 켰다.
+
+```
+crop 전  orbit@15 0.597,  random@15 0.557        <- 눈금이 다르다
+crop 후  orbit@15 0.347 / 0.475 / 0.523 (3 시드)
+         random@15 0.482 / 0.439 / 0.251 (3 시드)
+Isaac 참고(cov_q@15, 16env x 32ep)  random 0.530  orbit 0.368
+```
+
+**아직 비교라고 부르면 안 된다**: (1) 내 값은 cov_bin, Isaac 표는 cov_q (cov_bin >= cov_q),
+(2) 3 시드 vs 16env x 32ep — random 은 0.25~0.48 로 흩어진다, (3) **Isaac 쪽은 §15.2 의
+깊이 버그가 들어간 값**이라 재측정 전이다. 같은 자릿수라는 것까지만 말할 수 있다.
+
+**남은 Phase 4**: guidance `look_at` heading mode, 컨트롤러 폐루프, 학습 정책 노드
+(현재 베이스라인만), dwell 재정렬 서비스.
+
+### 15.4 실기 카메라 intrinsic 출처 확인 — **열려 있던 blocker 하나가 닫혔다** (2026-09-10)
+
+사용자 질문: "실기 FOV 는 calibration 결과에서 나온 것이 맞는가?"
+
+**파일**: `brov_ros2 runtime/calibration/camera_intrinsics.yaml` (2026-08-28).
+`checkerboard_calibration_node` 산출물(DEMO_RUNBOOK §6), **live 와 같은 640x480**,
+fx 465.518 / fy 465.319(0.04% 차 = 정사각 화소), cx 324.67 / cy 243.11(중심에서
+4.7·3.1 px), plumb_bob 왜곡 5개(k1 -0.011, k2 +0.072 로 작다).
+
+**문제였던 것**: 이 값이 **수중에서** 측정됐는지가 어디에도 기록돼 있지 않았다. 그리고
+brov_ros2 설계 문서 두 곳이 정확히 그것을 **미검증 필수 항목**으로 올려두고 있었다:
+
+- `NBV_RECONSTRUCTION_ROADMAP.md`: "최종 수중 housing/viewport 에서 calibration 하고
+  live 해상도와 일치하는지 확인"
+- `RVIZ_POOL_LOCALIZATION_ROADMAP.md`: "최종 housing 과 수중 환경, 실제 stream
+  해상도에서 수행한 intrinsic calibration"
+
+실기 세션 기록에도 수중 ArUco pool 정렬 성공 잔차가 없어 경험적 반증도 없었다.
+
+**걸려 있던 크기** (평면 포트면 수중 유효초점거리가 n=1.333 배 늘어난다):
+
+| 가설 | fx | HFOV | VFOV | crop 창 | 한 시점 입체각 |
+|---|---|---|---|---|---|
+| A) 수중 캘리브 | 465.5 | 69.0 deg | 54.6 deg | 407x305 | 1.051 sr |
+| B) 공기중 캘리브 | 620.5 | 54.6 deg | 42.3 deg | 542x407 | 0.665 sr |
+
+B 였다면 마커 거리 추정이 1.333 배 과소, 입체각이 1.58 배 차이, 학습 대비 fx 배율이
+1.27x -> 1.69x 로 바뀌어 §15.3 의 화각 정합 분석과 재학습 권고가 전부 다시 계산돼야 했다.
+
+**사용자 확인 (2026-09-10)**: (1) **수중에서 수행한 calibration** (2) 엔드캡은 **돔**.
+
+돔 포트는 입사동이 곡률 중심 근처면 굴절이 거의 상쇄되므로 공기/수중 차이가 작다 —
+두 답이 **독립적으로 같은 결론**을 가리키고, 작은 왜곡 계수도 여기에 맞는다.
+
+**-> 가설 A 확정.** HFOV 69.0 / VFOV 54.6, crop 창 407x305 그대로 유효.
+위 두 로드맵 문서의 해당 blocker 항목은 닫아도 된다(내용 갱신은 별건).
+
+### 15.5 이제 결정 가능해진 것 — 학습 카메라
+
+§15.3 의 분석이 A 전제로 성립하므로, 학습 카메라 선택이 확정 가능하다.
+
+| | 설정 | fx | FOV | 렌더 비용 | gamma=1 |
+|---|---|---|---|---|---|
+| **(가)** | 407x305, focal 24 / aperture 20.985 | 465.5 | 47.2 deg | **1.62x** | 2.22 m |
+| (나) | 640x480 (실기와 완전 일치, crop 불요) | 465.5 | 69.0 deg | **4.00x** | 2.22 m |
+| (다) | 320x240 @ FOV 69 | 232.8 | 69.0 deg | 1.00x | 1.11 m — **탈락** |
+
+어느 쪽이든 `nbuv_px_per_voxel_edge` 를 **21 -> 26.6** 으로 올려야 gamma=1 거리가
+1.75 m 에 남는다. 그러지 않으면 시점 상자 [1.4, 2.0] 전체가 해상도 요구를 충족해
+해상도 압력이 사라지고 **psi_max 고착**(run03/04 의 실패 모드)이 돌아온다.
+
+(나)의 부수 이득: 한 결정에 2.1 배를 보므로 **결정 수가 줄어 미션이 짧아진다** —
+§12.8 의 "EKF 가 7 초에 죽는다" 를 감안하면 미션 단축은 그 자체로 값이 있다.
+
+**묶어야 하는 것**: 이 결정은 §15.2 깊이 수정 · §12.0 물체 z 정정(-3.0 -> -3.125)과
+**한 번에** 들어가야 베이스라인 재측정을 한 번만 한다. 학습 전이라 지금이 가장 싸다.
+
+### 15.6 (나) 적용 + 렌더 스케일링 실측 (2026-09-10, 로컬 RTX 4080 SUPER 16 GB)
+
+**적용한 설정 변경 3건** (학습 시작 전이라 무료):
+
+```
+envs/scene_cfg.py   카메라 320x240 / aperture 20.955  ->  640x480 / aperture 32.9955
+                    fx 366.5 -> 465.518 (실기 수중 캘리브값), HFOV 47.2 -> 69.0 도
+envs/scene_cfg.py   물체 z  -3.0 -> -3.125   (seafloor 상면에 접지)
+envs/env.py         rock_local z -3.0 -> -3.125  (구면 중심은 물체 원점과 **항상 같아야** 한다)
+envs/env_cfg.py     nbuv_px_per_voxel_edge  21.0 -> 26.6
+```
+
+**렌더 스케일링** (`tools/measure_render_scaling.py` 신설):
+
+| env | 해상도 | 화소 | 결정당 | VRAM | 죽은 카메라 |
+|---|---|---|---|---|---|
+| 16 | 320x240 | 76.8k | 1.309 s | 5583 MiB | 0 |
+| 16 | 640x480 | 307.2k | 1.368 s | 6607 MiB | 0 |
+| 32 | 320x240 | 76.8k | 1.597 s | 6183 MiB | 0 |
+| 32 | 640x480 | 307.2k | 1.806 s | 8500 MiB | 0 |
+
+```
+시간   16 env 1.05x,  32 env 1.13x      <- 화소가 4배인데 5~13% 뿐
+VRAM   +64 MiB/env (16),  +72 MiB/env (32)
+```
+
+**시간이 거의 안 느는 이유**: 병목이 렌더가 아니라 물리다(`decimation=500` -> 결정당 500
+서브스텝). `defer_uw_render=True` 로 UW 렌더가 결정당 1 회만 도는 것도 여기서 값을 한다
+(§10 의 4.87 배 개선이 지금 이득으로 돌아온다).
+
+**실제 비용은 VRAM**: env 당 약 +70 MiB. 두 점 선형 적합:
+
+```
+640x480  VRAM ~ 3.5 GB + 0.155 GB/env
+320x240  VRAM ~ 5.0 GB + 0.037 GB/env
+```
+
+기존 96 env 를 640x480 으로 유지하려면 **약 18 GB** 가 필요하다. 서버 GPU 용량 확인 필요.
+부족하면 env 를 줄이는데, §3 이 지적한 대로 **env 수 = 물체 다양성**이라 그것이 진짜 대가다
+(128 env 로 학습하면 700 개가 아니라 128 개 물체만 등장한다).
+
+**죽은 카메라 0개** — §3 의 진짜 한계였던 descriptor set / per-view 컬링 슬롯 문제는
+TiledCamera 전환으로 해결돼 있고, 4 배 화소에서도 재발하지 않았다.
+
+**판정**: (나) 진행에 렌더 비용상 걸림돌 없음. 남은 미지수는 서버 VRAM 뿐이다.
+
+**주의**: 로컬에서 잰 것은 **절대 상한이 아니라 스케일링**이다. 서버는 자기 VRAM 을
+위 적합식에 넣어 env 수를 정하면 된다. 서버(kriso)에는 이 세션에서 SSH 접근이 안 되므로
+학습·베이스라인 재측정은 **서버 측 Claude 로 인계**한다.
+
+### 15.7 신 카메라 석고틀 베이스라인 (2026-09-10, Gazebo GT depth, 실기 화각 crop 없음)
+
+**배경**: `nbuv_px_per_voxel_edge` 를 21→26.6 으로 올리려던 분석이 local minimum 이라는
+지적을 받았다(사용자). 되짚으면: 신 카메라(fx 465.5, HFOV 69.0)는 시점 상자 [1.4, 2.0]
+전체에서 품질비 >= 0.96 을 주므로 **거리는 품질에 거의 무관**해졌다. 그걸 "psi_max 고착
+위험" 으로 읽고 보상 손잡이로 거리 압력을 다시 만들려 한 것은, 보상이 재구성과 **어긋나게**
+만드는 일이었다 — 과거 실패(exp 모델의 관대함)의 정반대 방향 reward hacking. 배포 관점
+(§12.8, EKF 7초)에서도 결정 수를 줄이는 원거리 정책이 오히려 맞다.
+-> `px_per_voxel = 21` 확정. 거리 선호는 물리가 정하게 둔다.
+
+**진짜 질문**: 이 카메라로는 과업이 너무 쉬워져 orbit 이 이미 답인가?
+석고틀 · sweep 100 결정 = ceiling · orbit/random 40 결정 x 3 시드 · cov_bin.
+
+```
+ceiling (sweep@100)  0.964      (§11.6 관측가능표면 0.988, 구 카메라 sweep 0.937 과 일관)
+
+정책      @3     @5    @10    @15    @20    @25    @30    @39   ceiling 대비 @39
+orbit   0.272  0.368  0.534  0.590  0.605  0.619  0.637  0.652    0.68   <- @20 이후 포화
+random  0.254  0.365  0.510  0.586  0.675  0.754  0.802  0.861    0.89   <- 계속 상승
+random - orbit  @15 -0.004   @20 +0.069   @25 +0.136   @30 +0.165   @39 +0.208
+```
+
+**판정: 과업은 여전히 성립한다.** orbit 은 ceiling 의 68% 에서 굳고 random 은 89% 까지
+오르며 아직 상승 중이다. 간격 +0.21 은 GSO 에서 잰 0.25(§2), 구 카메라 석고틀 0.35(§11.6)
+와 같은 자릿수다. 화각이 넓어져 orbit 이 더 많이 얻었지만(구 0.373 -> 신 0.652) 고정
+고리 하나로는 이 물체를 다 못 본다는 구조는 그대로다.
+
+**그러므로 RL 이 배울 것은 거리가 아니라 시점 다양성(방위·앙각·가려짐)이다.** 거리 압력을
+인위로 만들 이유가 없다.
+
+주의: (1) cov_bin 이지 cov_q 가 아니다 (2) 3 시드 (3) sweep 은 시작 phi 가 하한 근처면
+앞 4 고리가 같은 고리가 되어 @48 까지 0.358 로 평평했다 — ceiling(최댓값)에는 영향 없음.

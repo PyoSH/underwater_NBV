@@ -144,6 +144,18 @@ def _parser() -> argparse.ArgumentParser:
         help="Reject samples above this Gazebo ENU world z [m].",
     )
     parser.add_argument(
+        "--bottom-lock-max-tilt-deg",
+        type=float,
+        default=180.0,
+        help=(
+            "Reject samples whose vehicle tilt from vertical exceeds this angle, "
+            "modelling a Janus DVL losing bottom lock. The real Water Linked head "
+            "is a downward 4-beam array; past some tilt the beams stop returning a "
+            "usable bottom. Default 180 keeps the historical behaviour (never trips) "
+            "so existing step_2 runs are unaffected -- step_3 sweeps this."
+        ),
+    )
+    parser.add_argument(
         "--duration-s", type=float, default=0.0, help="0 means run until stopped."
     )
     parser.add_argument(
@@ -181,6 +193,7 @@ class DvlInjector(Node):
         self.sent_count = 0
         self.rangefinder_sent_count = 0
         self.invalid_count = 0
+        self.last_tilt_deg = 0.0
         self.start_monotonic = time.monotonic()
 
         self.master = mavutil.mavlink_connection(
@@ -239,6 +252,17 @@ class DvlInjector(Node):
             f"connection={args.connection}"
         )
 
+    @staticmethod
+    def _tilt_from_vertical_deg(q_xyzw: np.ndarray) -> float:
+        """차체 +Z 축과 world +Z 축 사이 각 [deg].
+
+        R[2,2] = 1 - 2(x^2 + y^2) 이므로 회전행렬을 다 만들 필요가 없다.
+        수평이면 0, 90도 기수 하향이면 90.
+        """
+        x, y = float(q_xyzw[0]), float(q_xyzw[1])
+        r22 = 1.0 - 2.0 * (x * x + y * y)
+        return math.degrees(math.acos(max(-1.0, min(1.0, r22))))
+
     def _invalidate(self, reason: str, clear: bool = False) -> None:
         self.invalid_count += 1
         self.valid_pub.publish(Bool(data=False))
@@ -289,6 +313,19 @@ class DvlInjector(Node):
         q_norm = float(np.linalg.norm(values[3:7]))
         if not 0.99 <= q_norm <= 1.01:
             self._invalidate(f"invalid quaternion norm {q_norm:.6f}", clear=True)
+            return False
+        # 자세 의존 bottom lock (2026-09-10, step_3).
+        # look_at 자세는 차체 pitch = -(90 - phi) 라 저-phi 시점에서 크게 기운다.
+        # GT 주입은 자세와 무관하게 항상 유효해서 "마커도 DVL 도 없는 구간"을
+        # Gazebo 가 아예 시험하지 못했다. 여기서 그 구간을 만든다.
+        tilt_deg = self._tilt_from_vertical_deg(values[3:7])
+        self.last_tilt_deg = tilt_deg
+        if tilt_deg > self.args.bottom_lock_max_tilt_deg:
+            self._invalidate(
+                f"bottom lock lost at tilt {tilt_deg:.1f} deg "
+                f"(> {self.args.bottom_lock_max_tilt_deg:.1f})",
+                clear=True,
+            )
             return False
         world_z = float(message.pose.pose.position.z)
         if not (
@@ -406,6 +443,7 @@ class DvlInjector(Node):
                 time.time_ns() * 1e-9,
                 sample.altitude_m,
                 1.0 if rangefinder_sent else 0.0,
+                self.last_tilt_deg,
             ]
             self.sample_pub.publish(Float64MultiArray(data=row))
             self.valid_pub.publish(Bool(data=True))

@@ -416,6 +416,24 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
     # R_min = (px/edge)^2 / voxel^2 [px/m^2]. 21 px @ voxel 10 cm이면
     # f=366 px 카메라에서 gamma=1이 되는 거리 d_req = f*voxel/px = **1.75 m**
     # (계획의 대표 관측거리). 이 값이 곧 "얼마나 가까이"의 정의다.
+    # 2026-09-10 **열린 질문 — 측정으로 정한다.** 카메라를 실기와 일치시키며
+    # fx 366.5 -> 465.518 로 올랐다. 이 파라미터는 두 가지로 읽히고, f 가 바뀌는
+    # 순간 정반대 답을 낸다:
+    #   (해석 1) N 은 과업 사양("voxel 을 몇 px 로 봐야 하는가"). 센서가 좋아졌으면
+    #            **거리 한계가 멀어져야** 하고 N 은 그대로다 -> 21 유지, gamma=1 @ 2.22 m
+    #   (해석 2) N 은 "얼마나 가까이"를 정하는 눈금(도입 커밋 98f56ad 원주석이
+    #            "계획의 대표 관측거리 1.75 m" 에 맞춰 21 을 골랐다고 적고 있다)
+    #            -> 같은 의도를 유지하려면 N = 465.518*0.10/1.75 = 26.6
+    # 어느 쪽도 원리에서 유도된 값이 아니다. 게다가 N=21 은 GSD 4.76 mm 를 요구하는데
+    # 지도 해상도(voxel)는 100 mm 다 — 기하적으로는 voxel 당 2~4 px 면 족하므로,
+    # N 은 기하 분해능이 아니라 NBUV 의 **광도 평균화 표본 수**에 가깝다
+    # (그래서 nbuv_res_gain_max=4.0 으로 평균화 이득에 캡이 있다).
+    #
+    # 판정 기준: `tools/measure_view_tradeoff.py` 를 새 카메라로 재측정해
+    #   물러남 손익 = (한 시점 관측 voxel 배수) x (품질비)  가 1 을 넘는가.
+    #   넘으면 거리 압력이 필요하다(N 상향 또는 다른 기제).
+    #   1 아래면 21 을 그대로 두고, 카메라 개선이 정당하게 더 먼 관측거리를 사준 것이다.
+    # 화각도 2.10 배 넓어졌으므로 "물러나면 3.04 배 더 본다"던 배수 자체가 줄었을 것이다.
     nbuv_px_per_voxel_edge: float = 21.0
     nbuv_res_penalty_eta: float = 10.0     # gamma<1 벌의 세기 (NBUV eta=10)
     nbuv_res_gain_max: float = 4.0         # gamma>1 평균화 이득 상한 (NBUV는 무제한 — 우리는 근접 과보상을 막기 위해 캡)
@@ -556,6 +574,16 @@ class NBVBROVEnvCfg(DirectRLEnvCfg):
 
     # ── 평가 모드 (고정 시작 구면좌표) ──
     eval_mode: bool = False
+    # False면 리셋 때 물체의 자세·스케일을 랜덤화하지 않는다(스폰 pose·실제 크기
+    # 유지). 실수조 표적처럼 **고정된 실물체**를 sim에서 평가할 때 쓴다 —
+    # 시작 시점(θ,φ,ψ)은 그대로 랜덤이므로 eval_mode(시점까지 고정)와 다르다.
+    randomize_object_pose: bool = True
+    # 관측 가능 표면 마스크 (2026-09-10, 계획 §11.7-4). sweep 베이스라인이 저장한
+    # `observable_mask.npy`(bool, vol_dim) 경로. 주면 GT 표면 voxel을 이 마스크로
+    # 걸러 coverage 분모가 "feasible box에서 볼 수 있는 표면"이 된다 — 실물체의
+    # 하향 면(30%)처럼 원리적으로 못 보는 표면이 성공 임계값을 왜곡하지 않도록.
+    # 고정 자세 단일 물체(randomize_object_pose=False)에서만 유효하다.
+    observable_mask_path: str | None = None
     eval_theta: float = 0.0
     eval_phi: float = math.radians(45)
     eval_psi: float = 4.5

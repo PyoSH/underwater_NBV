@@ -39,3 +39,4 @@ step_3_NBV_BROV/debug_images
 step_3_NBV_BROV/checkpoints
 step_3_NBV_BROV/eval_out
 .idea
+.pytest_cache/

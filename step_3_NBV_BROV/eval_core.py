@@ -19,6 +19,7 @@ import numpy as np
 import torch
 
 from algorithm.algo_nbv_continuous import Actor
+from envs.nbv_baselines import BaselinePolicy
 
 
 def _quat_angle(q_a: torch.Tensor, q_b: torch.Tensor) -> torch.Tensor:
@@ -49,9 +50,12 @@ class Policy:
         #   zero:    지도가 아예 없는 경우.
         self._ablate_map = ablate_map
 
-        if name in ("random", "hold", "orbit", "approach"):
+        self._baseline = None
+        if name in ("random", "hold", "orbit", "approach", "sweep"):
+            self._baseline = BaselinePolicy(name, seed=seed, device=device)
             self.kind = name
             self.actor = None
+            self._sweep_t = 0
             return
 
         ckpt = torch.load(name, map_location=device)
@@ -92,26 +96,11 @@ class Policy:
 
     @torch.no_grad()
     def act(self, obs, n_env: int, a_dim: int) -> torch.Tensor:
-        if self.kind == "hold":
-            return torch.zeros(n_env, a_dim, device=self._device)
-        if self.kind == "approach":
-            # **근접 고착 베이스라인** — psi를 하한까지 밀어붙이고 거기 머문다.
-            # 2026-09-02 Stage 2 평가에서 학습 정책이 실제로 수렴한 행동이고,
-            # 당시 전역 Q_sat 정규화에서는 이것만으로 orbit을 이겼다. (A)
-            # voxel별 정규화가 그 구멍을 막았는지 재는 **회귀 테스트**다:
-            # approach가 orbit을 넘으면 정규화가 새고 있다는 뜻이다.
-            a = torch.zeros(n_env, a_dim, device=self._device)
-            a[:, 2] = -1.0
-            return a
-        if self.kind == "orbit":
-            # 방위각만 최대 속도로 — step_1의 Manual Orbit 대응
-            a = torch.zeros(n_env, a_dim, device=self._device)
-            a[:, 0] = 1.0
-            return a
-        if self.kind == "random":
-            return torch.rand(
-                (n_env, a_dim), generator=self._gen, device=self._device
-            ) * 2.0 - 1.0
+        # 베이스라인 구현은 `envs/nbv_baselines.py` 에 있다 — Gazebo 배포 루프가
+        # **같은 코드**를 쓴다(2026-09-10 분리). 두 곳이 갈라지면 "같은 결정 수
+        # random 대비" 라는 판정 기준이 무의미해진다.
+        if self._baseline is not None:
+            return self._baseline.act(n_env, a_dim)
         vox = obs["vox_actor"]
         if self._ablate_map == "shuffle":
             perm = torch.randperm(vox.shape[0], generator=self._gen, device=self._device)
@@ -135,6 +124,26 @@ def run_policy(env, policy: Policy, n_episodes: int, seed: int, out_dir: Path) -
     torch.manual_seed(seed)
     np.random.seed(seed)
     obs, _ = env.reset()
+
+    # ── 관측 가능 표면 마스크 (2026-09-10, 계획 §11.7-4) ─────────────────────
+    # sweep 정책은 feasible box의 (θ,φ,ψ) 격자를 결정론적으로 지나가므로, 에피소드가
+    # 끝날 때 남은 `weight>0 ∧ surf`의 **합집합**이 "이 box에서 볼 수 있는 표면"이다.
+    # 리셋이 볼륨을 지우기 전에 잡아야 하므로 `_reset_idx`를 감싼다. 초기 reset()
+    # 뒤에 거는 이유: 그 전에는 앞 정책이 남긴 지도가 섞인다. 고정 자세 단일
+    # 물체(randomize_object_pose=False)에서만 의미가 있다 — 전 env가 같은 voxel 프레임.
+    seen_union = None
+    orig_reset_idx = env._reset_idx
+    if policy.kind == "sweep":
+        seen_union = torch.zeros_like(env._surf_vol[0])
+
+        def _accumulate(ids):
+            ids = torch.as_tensor(ids, device=device)
+            seen_union.logical_or_(((env._weight_vol[ids] > 0) & env._surf_vol[ids]).any(dim=0))
+
+        def _reset_idx_hooked(ids):
+            _accumulate(ids)
+            return orig_reset_idx(ids)
+        env._reset_idx = _reset_idx_hooked
 
     ep_rows: list[dict] = []
     step_rows: list[dict] = []
@@ -239,6 +248,19 @@ def run_policy(env, policy: Policy, n_episodes: int, seed: int, out_dir: Path) -
     def m(key, rows=ep_rows):
         vals = [r[key] for r in rows if isinstance(r[key], float) and math.isfinite(r[key])]
         return float(np.mean(vals)) if vals else float("nan")
+
+    if seen_union is not None:
+        _accumulate(torch.arange(E, device=device))   # 미완 에피소드의 살아있는 지도
+        env._reset_idx = orig_reset_idx
+        np.save(out_dir / "observable_mask.npy", seen_union.cpu().numpy())
+        # 같은 고정 자세라도 env마다 GT 표면 voxel이 ±2% 다르다(CAD의 평면이 voxel
+        # 경계에 놓여 float 잡음으로 뒤집힘) → 합집합 크기는 분모가 아니다. 분모는
+        # env별 `surf_e ∧ mask`이고, 그 비율이 "관측 가능 비율"이다.
+        surf = env._surf_vol
+        frac = ((seen_union & surf).flatten(1).sum(1).float() / surf.flatten(1).sum(1).clamp(min=1))
+        print(f"[eval] 관측 가능 표면(env별 mask∧surf / surf): 평균 {frac.mean():.3f}"
+              f" 최소 {frac.min():.3f} 최대 {frac.max():.3f} | 합집합 {int(seen_union.sum())} voxel"
+              f" → {out_dir / 'observable_mask.npy'} (--observable_mask 로 분모에 적용)")
 
     return dict(
         policy=tag,

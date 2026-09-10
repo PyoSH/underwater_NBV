@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="apriltag_16h5_id2">
+    <static>true</static>
+    <!-- 모델 원점 = 거치판 바닥면 중앙.
+         plaster_mold rim 상단(로컬 z=0.933) 위에 얹으므로 태그면은 로컬 z=0.9415.
+         판 1.15 x 0.75 는 트레이 개구 1.000 x 0.600 을 사방 0.075 m 덮는다.
+         rim 외곽은 x[-0.6425, 0.5375] y[+-0.4975] 이라 +x 쪽 걸침 폭은 0.0375 m.
+         판은 물체와 같은 yaw 로 놓아야 회전한 개구를 덮는다 (world 에서 yaw 45deg). -->
+    <link name="link">
+      <visual name="plate">
+        <pose>0 0 0.004 0 0 0</pose>
+        <geometry><box><size>1.15 0.75 0.008</size></box></geometry>
+        <material>
+          <ambient>0.90 0.90 0.90 1</ambient>
+          <diffuse>0.95 0.95 0.95 1</diffuse>
+          <specular>0.05 0.05 0.05 1</specular>
+        </material>
+      </visual>
+      <!-- 태그: quiet zone 포함 0.560 m 평면. 검은 테두리 한 변 0.420 m.
+           UV 를 직접 쓴 메쉬라 렌더러의 box UV 규약에 의존하지 않는다
+           (거울상이면 검출 자체가 실패하므로). -->
+      <visual name="tag">
+        <pose>0 0 0.0085 0 0 0</pose>
+        <geometry>
+          <mesh><uri>model://apriltag_16h5_id2/meshes/apriltag_16h5_id2.obj</uri></mesh>
+        </geometry>
+      </visual>
+      <collision name="plate">
+        <pose>0 0 0.004 0 0 0</pose>
+        <geometry><box><size>1.15 0.75 0.008</size></box></geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>
