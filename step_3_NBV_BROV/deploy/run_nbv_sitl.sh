@@ -28,6 +28,8 @@ usage: run_nbv_sitl.sh <run_dir> [옵션]
   --policy NAME       폐루프 정책 (hold|approach|sweep|orbit|random, 기본 random)
   --decisions N       폐루프 결정 수 (기본 10)
   --seed N            폐루프 시드 (기본 0)
+  (GUI 는 호스트에서 deploy/run_gz_gui_host.sh — GPU 가속 sidecar 컨테이너. 이 컨테이너 안에서는
+   NVIDIA GL 이 없어 창이 검게 뜬다.)
 USAGE
   exit 2
 }
@@ -77,6 +79,8 @@ BROV_INSTALL=$BROV_SOURCE/install_mk2
 [[ "$CONTROL" == "1" ]] && BROV_INSTALL=$BROV_SOURCE/install
 SEABED_Z=-2.7
 export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-42}
+# gz-transport partition 고정: 호스트의 GUI sidecar(run_gz_gui_host.sh)가 같은 값으로 붙는다
+export GZ_PARTITION=${GZ_PARTITION:-nbv_sitl}
 
 GZ_PID=; ARDUSUB_PID=; MAVPROXY_PID=; BRIDGE_PID=; DVL_PID=; DVL2_PID=; CAM_PID=; BAG_PID=; EKF_PID=; BELIEF_PID=; LAUNCH_PID=; LOC_PID=
 stop_group() { local p=${1:-} s=${2:-INT}; [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null && kill -"$s" -- -"$p" 2>/dev/null || true; }
@@ -130,7 +134,7 @@ python3 "$DEPLOY/make_rov_with_camera.py" --out "$DEPLOY/models/bluerov2_heavy" 
   echo "duration_s=$DURATION_S"
   echo "dvl_duration_s=$DVL_DURATION_S"
   echo "dvl_restart_after_s=$DVL_RESTART_AFTER_S"
-  echo "control=$CONTROL policy=$POLICY decisions=$DECISIONS seed=$SEED camera_rate_hz=$CAM_RATE"
+  echo "control=$CONTROL policy=$POLICY decisions=$DECISIONS seed=$SEED camera_rate_hz=$CAM_RATE gz_partition=$GZ_PARTITION"
   echo "camera_body_xyz=$CAM_GZ_X,$CAM_Y,$CAM_Z cam_x_shift=$CAM_X_SHIFT"
   echo "brov_install=$BROV_INSTALL"
   sha256sum "$WORLD" "$PARAMS" "$DVL_INJECTOR" "$DEPLOY/nbv_camera_pipeline.py" \

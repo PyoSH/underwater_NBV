@@ -1719,3 +1719,31 @@ CPU·포트 점유 없음). `pkill -f` 패턴이 docker exec 셸의 명령줄과
 침범한다 — `psi_min_safe(φ)` 가 φ 41° 에서 1.61 m 로 볼록해 그 능선을 가로지르기 때문.
 `arc_split` 은 중간점 ψ 를 `psi_min_safe(φ)+0.02` 로 들어 올려(경계 위 두 점의 chord 는
 볼록성 때문에 항상 안으로 처진다) 최소 조각 수를 찾는다: 위 사례 3조각, 여유 +0.06/+0.01/+0.01.
+
+### 16.4 Gazebo GUI 로 폐루프 관측 (2026-09-11)
+
+**절차** (터미널 2개):
+```bash
+# 1) 컨테이너: SITL + brov 스택 + 정책 노드 (헤드리스 서버)
+docker exec bluerov2_sitl bash /tmp/start_closed_loop.sh random 8 0     # policy decisions seed
+#    = cd /tmp/nbv_deploy && run_nbv_sitl.sh <run_dir> --control 1 --policy random --decisions 8 ...
+# 2) 호스트: GPU 가속 GUI sidecar (서버가 뜬 뒤 아무 때나; ROV follow 자동)
+step_3_NBV_BROV/deploy/run_gz_gui_host.sh          # 끝내기: run_gz_gui_host.sh stop
+```
+GUI 구성(`deploy/nbv_gui.config`): 3D 뷰(수조 안 시점, ROV follow offset −2.5,−1.5,+1.0) + 왼쪽에
+ROV 카메라 영상 패널(`/brov/camera/image`). Entity Tree 에 pool / water_surface / plaster_mold /
+apriltag_16h5_id2 / bluerov2_heavy 가 보이면 서버에 붙은 것이다.
+
+**왜 sidecar 인가** — 두 시도가 실패했다:
+| 시도 | 결과 | 원인 |
+|---|---|---|
+| SITL 컨테이너 안에서 `gz sim -g` | 창은 뜨지만 **전부 검정**(패널조차 없음). llvmpipe·DRI3 off 도 같음 | 호스트 X 서버가 NVIDIA 드라이버인데 컨테이너에 NVIDIA GL 이 없어 Qt Quick 의 GL 컨텍스트가 안 잡힘("failed to create drawable") |
+| 호스트의 `gz` | 사용 불가 | 호스트는 Fortress(ignition-gazebo6), 서버는 Garden — transport/msgs 비호환 |
+| **같은 이미지 + `--runtime nvidia --gpus all` + `NVIDIA_DRIVER_CAPABILITIES=all`** | 정상(GL_RENDERER = RTX 4080 SUPER) | host 네트워크 + `GZ_PARTITION=nbv_sitl`(서버·GUI 동일) 로 gz-transport 자동 발견 |
+
+**부수 발견**: (1) GUI 가 서버에 붙는 순간 scene broadcast 로 서버가 ~0.2 s 멈춰 MAVLink attitude 가
+0.22 s 비고 실기용 0.2 s 게이트에 fault → SITL safety 만 att 0.6 / pos 1.0 / truth 0.6 s 로 완화.
+(2) `deploy/models/plaster_mold` 의 mesh 는 저장소 `robots/data/real_object` 로 가는 상대 심링크라
+deploy 만 마운트하면 "Unable to find file" — sidecar 는 저장소 루트를 마운트한다.
+(3) 관측 run(random, 8 결정): 홉 5–18 s, pos_err ≤6 cm, att ≤2.7°, cov 0.235 → 0.54 — GUI 를 붙여도
+RTF 97 % 로 §16.3 결과와 같다.
