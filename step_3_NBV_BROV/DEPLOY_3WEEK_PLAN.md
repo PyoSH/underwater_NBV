@@ -1571,3 +1571,48 @@ random - orbit  @15 -0.004   @20 +0.069   @25 +0.136   @30 +0.165   @39 +0.208
 
 주의: (1) cov_bin 이지 cov_q 가 아니다 (2) 3 시드 (3) sweep 은 시작 phi 가 하한 근처면
 앞 4 고리가 같은 고리가 되어 @48 까지 0.358 로 평평했다 — ceiling(최댓값)에는 영향 없음.
+
+## 16. Phase 4 — 정책 → 제어 배선 (2026-09-10)
+
+사용자 지시: 구현 순서 ① guidance `look_at`(자세) 모드 → ② controller 폐루프. ①은 완료.
+
+### 16.1 ① 완료 — 자세가 미션 계약을 타고 guidance 까지 간다 (brov_ros2 `feature/nbv-pool-object`)
+
+**설계 결정 (핵심 셋)**
+1. **guidance 는 look-at 을 계산하지 않는다.** `attitude_at_waypoint` 모드는 waypoint 마다
+   pool Z-up FLU 쿼터니언 **하나를 받아서** `random_at_waypoint` 의 slew/dwell/도착/lap
+   기계를 그대로 재사용한다. 자세는 정책 노드가 공유 모듈 `envs/tsdf_fusion.look_at_quat`
+   로 만든다 — sim 과 배포가 1° 도 어긋날 수 없게.
+2. **새 메시지 타입 없음.** v3 계약 `brov_pool_position_mission_v3` 은 draft `Path` 의
+   orientation 을 **그대로 자세표로** 쓴다(지금까지는 항등만 허용). 정규화·부호 정준화
+   (w>=0, q 와 -q 가 같은 hash) 뒤 `canonical_plan_json["waypoint_attitude"]` 에
+   slew/허용오차/dwell/duration/lap 한계와 함께 hash 에 묶인다 → **look-at 목표가 바뀌면
+   다른 plan**. v2 가 random 메타데이터를 나르던 채널 그대로.
+3. **`orientation_support_enabled=true` 는 v3 에서만, v3 는 반드시.** v1/v2 는 위치 전용으로
+   그대로 fail-closed. `loop` 는 작성자 선택(NBV 한 홉 = 2점 개방 경로, loop=false).
+
+**안전층**: obs_node 게이트는 v3 에 키 정확 일치·heading mode·표 길이·단위 norm 을 요구하고,
+v2 와 **같은** `max_random_attitude_*` 천장(slew 0.5 rad/s, 허용오차 0.35, dwell>=0.5 s,
+duration<=180 s, laps<=1)을 적용한다 — 같은 slew 기계이므로 같은 물리 한계.
+
+**파일**: `brov_base/guidance.py`(WaypointAttitudeConfig, 모드), `brov_mission/core.py`
+(v3 상수·`WaypointAttitudeSettings`·`attitudes_wxyz_from_xyzw`·`validate_draft_geometry(
+orientation_mode="unit")`·canonical), `mission_manager_node.py`(draft 별 자세표 바인딩,
+active_path_pool 에 자세 실어 발행), `obs_node.py`(v3 파서·게이트·로더),
+`brov_bringup/config/mission_manager_nbv_pose.yaml`(6x10x3 수조, 안전상자 z 0.3~2.4,
+2점, 홉 <= 3.3 m, slew 10°/s, dwell 2 s = 촬영창).
+
+**검증**: brov_base **211 passed**, brov_mission **74 passed**(rclpy e2e 11 건 — v3 pose
+draft 를 validate→commit 해 canonical 에 자세표가 실리는 것까지). 실행법(함정): 저장소
+루트에서 pytest 하면 `brov_mission/` 폴더가 모듈을 가려 ImportError — **패키지 디렉터리
+안에서** overlay(`/opt/ros/humble` + `brov_ros2/install`) source 후 `pytest test`.
+컨테이너 `bluerov2_sitl` 은 저장소를 bind mount 하므로 호스트 편집이 즉시 보인다.
+
+### 16.2 ② 남은 것 — controller 폐루프 (GT pose)
+
+- 정책 노드: (θ,φ,ψ) → base_link 위치(구 중심 = 물체 원점 = 바닥면, §12) + `look_at_quat`
+  → 2점 pose draft 발행 → validate/commit → obs_node 가 guidance 에 싣는 흐름.
+- 도착·dwell 종료 신호를 **촬영 트리거**로 쓴다(dwell 2 s = 자세 안정 후 depth 1 프레임 융합).
+- `gazebo_truth` 피드백으로 PID 폐루프 확인: 도착 반경 0.10 m, 자세 5°.
+- launch: `sim2swim_demo.launch.py` 프로파일 표에 nbv_pose 항목(§16.1 yaml) 추가 — ②에서
+  스택을 조립할 때 함께.

@@ -79,12 +79,12 @@ class NbvBeliefNode(Node):
         p("vol_dim", [20, 20, 20])
         p("max_pose_age_s", 0.30)
         p("surface_mask_path", "")   # GT 표면 voxel 마스크(.npy). 있으면 coverage 채점
-        # 융합을 **학습 화각**으로 자를지. 실기 카메라(69.0x54.6)는 Isaac 학습
-        # 카메라(47.2x36.3)의 **2.10배** 입체각을 덮는다 — 그대로 융합하면 한 결정에
-        # 학습 때보다 훨씬 많이 얻어, 정책이 배운 "가면 얼마나 얻는가" 가 어긋난다.
-        # 기본 True(학습과 정합). False 로 두면 데이터를 다 쓰되 눈금이 달라진다.
-        p("crop_to_sim_fov", True)
-        p("sim_hfov_deg", 47.2)
+        # 융합을 **구 학습 화각**으로 자를지. 학습 카메라가 실기 카메라와 같은
+        # 640x480 / fx 465.5 (69.0x54.6 deg) 로 바뀌었으므로(정본 §15.5 (나), 2026-09-10)
+        # 기본은 **자르지 않는다** — 자르면 오히려 정책이 배운 "가면 얼마나 얻는가"
+        # 눈금이 어긋난다. True 는 구 카메라(47.2x36.3) 체크포인트를 돌릴 때만.
+        p("crop_to_sim_fov", False)
+        p("sim_hfov_deg", 47.2)   # 구 학습 카메라 — crop_to_sim_fov=True 일 때만 쓰인다
         p("sim_vfov_deg", 36.3)
 
         g = lambda n: self.get_parameter(n).value

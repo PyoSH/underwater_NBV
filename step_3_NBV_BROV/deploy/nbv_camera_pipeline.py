@@ -26,7 +26,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
 
-from uw_render import crop_to_sim_fov, uw_render_bgr
+from uw_render import uw_render_bgr
 
 FX_EFFECTIVE = 465.5181034880913     # 태그 교정으로 확인한 렌더 실효 초점거리
 
@@ -142,8 +142,9 @@ class NbvCameraPipeline(Node):
         self.pub_img.publish(out)
         self.pub_info.publish(self._camera_info(msg.header.stamp, w, h))
 
-        crop = crop_to_sim_fov(bgr, FX_EFFECTIVE)
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        # 정책 입력은 전체 화면 — 학습 카메라가 실기와 같은 화각(69.0x54.6)이 됐다
+        # (정본 §15.5 (나)). 구 체크포인트용 crop 은 uw_render.crop_to_sim_fov 에 남아 있다.
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         small = cv2.resize(gray, (self._obs, self._obs), interpolation=cv2.INTER_AREA)
         self.pub_obs.publish(to_imgmsg(small, "mono8", header))
 
