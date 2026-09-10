@@ -28,7 +28,7 @@ import numpy as np
 import rclpy
 import torch
 from brov_interfaces.msg import ResolvedMission
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from nav_msgs.msg import Odometry, Path as PathMsg
 from rclpy.node import Node
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
@@ -112,6 +112,9 @@ class PolicyLoop(Node):
         self.create_subscription(String, "/brov/mission/status",
                                  self._on_manager_status, LATCHED)
         self.pub_draft = self.create_publisher(PathMsg, "/brov/mission/draft_path", 1)
+        # RViz 용 (nbv_viz_node): 정책이 낸 현재 목표 pose 와 이번 홉의 waypoint 열 (pool 프레임)
+        self.pub_target = self.create_publisher(PoseStamped, "/brov/nbv/target_pose", LATCHED)
+        self.pub_hop = self.create_publisher(PoseArray, "/brov/nbv/hop_waypoints", LATCHED)
         self.cli = {n: self.create_client(Trigger, t) for n, t in {
             "validate": "/brov/mission/validate", "commit": "/brov/mission/commit",
             "prepare": "/brov/prepare_control", "arm": "/brov/arm_control",
@@ -188,6 +191,23 @@ class PolicyLoop(Node):
             while time.monotonic() - t1 < retry_sleep:
                 self.spin()
         return False, last
+
+    def publish_viz_target(self, target_pool, q_wxyz, hop_wps=None, hop_atts=None) -> None:
+        """정책 출력(base_link 목표 + look-at 자세)을 RViz 노드에 알린다. 제어에는 쓰이지 않는다."""
+        ps = PoseStamped()
+        ps.header.stamp = self.get_clock().now().to_msg(); ps.header.frame_id = "pool"
+        ps.pose.position.x, ps.pose.position.y, ps.pose.position.z = (float(v) for v in target_pool)
+        w, x, y, z = q_wxyz
+        ps.pose.orientation.x, ps.pose.orientation.y, ps.pose.orientation.z, ps.pose.orientation.w = float(x), float(y), float(z), float(w)
+        self.pub_target.publish(ps)
+        pa = PoseArray(); pa.header = ps.header
+        for p_, q_ in zip(hop_wps or [], hop_atts or []):
+            pose = Pose()
+            pose.position.x, pose.position.y, pose.position.z = (float(v) for v in p_)
+            w, x, y, z = q_
+            pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = float(x), float(y), float(z), float(w)
+            pa.poses.append(pose)
+        self.pub_hop.publish(pa)
 
     def fresh_pool_pose(self, max_age=0.5):
         if self._pool_pose is None or time.monotonic() - self._pool_pose[0] > max_age:
@@ -368,6 +388,8 @@ def main() -> int:
         sph_cur = spherical_from_pool(p_cur_train)
         hop_len = float(np.linalg.norm(target - p_cur_train))
         status = "ok"; n_wp = 0; mission_id = ""; fly_s = 0.0
+        q_target = look_at_wxyz(target)
+        node.publish_viz_target(base_gz_from_train(target, q_target, a.cam_x_shift), q_target)
         if hop_len < a.min_hop_m:
             status = "hold"     # 정책이 제자리를 골랐다 — sim 의 PID 유지와 같다
         else:
@@ -382,6 +404,7 @@ def main() -> int:
                 wps = [p_cur] + [base_gz_from_train(w, q, a.cam_x_shift) for w, q in zip(wps_train, atts)]
                 atts = [q0] + atts
                 n_wp = len(wps)
+                node.publish_viz_target(wps[-1], atts[-1], wps, atts)
                 resolved, msg = node.commit_hop(wps, atts, a.manager_params)
                 if resolved is None:
                     status = f"commit_fail:{msg}"

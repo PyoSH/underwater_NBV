@@ -82,7 +82,7 @@ export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-42}
 # gz-transport partition 고정: 호스트의 GUI sidecar(run_gz_gui_host.sh)가 같은 값으로 붙는다
 export GZ_PARTITION=${GZ_PARTITION:-nbv_sitl}
 
-GZ_PID=; ARDUSUB_PID=; MAVPROXY_PID=; BRIDGE_PID=; DVL_PID=; DVL2_PID=; CAM_PID=; BAG_PID=; EKF_PID=; BELIEF_PID=; LAUNCH_PID=; LOC_PID=
+GZ_PID=; ARDUSUB_PID=; MAVPROXY_PID=; BRIDGE_PID=; DVL_PID=; DVL2_PID=; CAM_PID=; BAG_PID=; EKF_PID=; BELIEF_PID=; LAUNCH_PID=; LOC_PID=; ARUCO_PID=
 stop_group() { local p=${1:-} s=${2:-INT}; [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null && kill -"$s" -- -"$p" 2>/dev/null || true; }
 cleanup() {
   echo "[nbv-sitl] 정리"
@@ -92,7 +92,7 @@ cleanup() {
     done
   fi
   for sig in INT TERM KILL; do
-    for p in "$BAG_PID" "$LOC_PID" "$LAUNCH_PID" "$BELIEF_PID" "$EKF_PID" "$CAM_PID" "$DVL2_PID" "$DVL_PID" "$BRIDGE_PID" "$MAVPROXY_PID" "$ARDUSUB_PID" "$GZ_PID"; do
+    for p in "$BAG_PID" "$ARUCO_PID" "$LOC_PID" "$LAUNCH_PID" "$BELIEF_PID" "$EKF_PID" "$CAM_PID" "$DVL2_PID" "$DVL_PID" "$BRIDGE_PID" "$MAVPROXY_PID" "$ARDUSUB_PID" "$GZ_PID"; do
       stop_group "$p" "$sig"
     done
     sleep 1
@@ -239,6 +239,8 @@ setsid ros2 bag record -o "$RUN_DIR/bag" \
   /brov/observation /brov/thruster_pwm /brov/control_active /brov/mission_complete \
   /brov/localization/status /brov/localization/odometry_pool /brov/mission/resolved \
   /brov/mission/active_path_pool /brov/debug/q_desired_zup /brov/debug/pos_mission \
+  /brov/aruco/visible /brov/aruco/robot_pose_pool /brov/nbv/target_pose /brov/nbv/hop_waypoints \
+  /brov/nbv/recon_voxels /brov/nbv/recon_mesh /tf /tf_static \
   > "$RUN_DIR/bag.log" 2>&1 &
 BAG_PID=$!
 
@@ -270,6 +272,13 @@ if [[ "$CONTROL" == "1" ]]; then
   timeout 2 ros2 topic echo --once /brov/odometry/local_with_session > "$RUN_DIR/odom_session_first.txt"
   setsid python3 "$DEPLOY/nbv_truth_localization.py" > "$RUN_DIR/truth_localization.log" 2>&1 &
   LOC_PID=$!
+  # 비전 마커 인식(실기 aruco 노드 그대로, RViz 인식 표시용). SITL 카메라는 x 0.30 이므로
+  # base->camera 외부 파라미터만 덮어쓴다. 제어에는 쓰이지 않는다(truth localization 이 pool 을 소유).
+  setsid ros2 run brov_perception aruco_pose_node --ros-args \
+    --params-file "$BROV_SOURCE/brov_perception/config/aruco_pool_object.yaml" \
+    -p "base_to_camera_xyz:=[$CAM_GZ_X,$CAM_Y,$CAM_Z]" \
+    > "$RUN_DIR/aruco.log" 2>&1 &
+  ARUCO_PID=$!
   for _ in $(seq 1 40); do
     timeout 1 ros2 topic echo --once /brov/localization/valid 2>/dev/null | grep -q "data: true" && break
     sleep 0.25

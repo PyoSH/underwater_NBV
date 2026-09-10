@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- 호스트에서 컨테이너(host 네트워크) ROS 그래프를 볼 때 Fast-DDS 가 같은 PC 라고 판단해
+     shared-memory 전송을 고르면 /dev/shm 이 공유되지 않아 discovery 만 되고 데이터가 안 온다.
+     이 프로파일은 UDPv4 만 쓰게 한다 (FASTRTPS_DEFAULT_PROFILES_FILE 로 지정). -->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>udp_only</transport_id>
+      <type>UDPv4</type>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="udp_only_participant" is_default_profile="true">
+    <rtps>
+      <userTransports><transport_id>udp_only</transport_id></userTransports>
+      <useBuiltinTransports>false</useBuiltinTransports>
+    </rtps>
+  </participant>
+</profiles>

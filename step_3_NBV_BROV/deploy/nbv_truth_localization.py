@@ -36,7 +36,8 @@ import uuid
 import numpy as np
 import rclpy
 from brov_interfaces.msg import AlignedOdometry, LocalizationStatus, OdometrySession
-from geometry_msgs.msg import Transform
+from geometry_msgs.msg import Transform, TransformStamped
+from tf2_ros import TransformBroadcaster
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
@@ -141,6 +142,8 @@ class TruthLocalizationNode(Node):
         self.create_subscription(Odometry, str(g("truth_topic")), self._on_truth,
                                  qos_profile_sensor_data)
         self.create_timer(float(g("status_period_s")), self._publish_status)
+        # pool→odom TF: 실기 pool_alignment_node 가 내는 것과 같은 규약 (RViz 가 base_link 를 pool 에서 본다)
+        self._tf = TransformBroadcaster(self)
         self.get_logger().warning(
             "SIMULATION ONLY: pool localization is Gazebo truth with a fixed "
             f"^pool T_odom (R_z(+90 deg), t={self._xf.t.tolist()})")
@@ -213,6 +216,11 @@ class TruthLocalizationNode(Node):
         al.odometry_session_id = self._session
         al.alignment_id = self._alignment_id
         self._pub_aligned.publish(al)
+        ts = TransformStamped(); ts.header.stamp = o.header.stamp
+        ts.header.frame_id = self._pool; ts.child_frame_id = self._odom
+        ts.transform.translation.x, ts.transform.translation.y, ts.transform.translation.z = (float(v) for v in self._xf.t)
+        ts.transform.rotation.x, ts.transform.rotation.y, ts.transform.rotation.z, ts.transform.rotation.w = self._xf.q_xyzw
+        self._tf.sendTransform(ts)
 
     def _invalidate(self, reason: str) -> None:
         if self._state != LocalizationStatus.INVALID or self._reason != reason:

@@ -133,6 +133,26 @@ class NbvBeliefNode(Node):
         self.pub_vox = self.create_publisher(Float32MultiArray, "/brov/nbv/vox_actor", 1)
         self.pub_sph = self.create_publisher(Float32MultiArray, "/brov/nbv/spherical", 1)
         self.pub_st = self.create_publisher(String, "/brov/nbv/belief_status", 1)
+        # RViz 복원 표시 (pool 프레임). (a) 관측된 occupied voxel 큐브, (b) marching-cubes mesh.
+        # (b) 는 scikit-image 가 있을 때만 — 없으면 (a) 만 낸다 (deploy/REQUIREMENTS.md).
+        from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+        from visualization_msgs.msg import Marker
+        self._Marker = Marker
+        latched = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
+                             reliability=ReliabilityPolicy.RELIABLE,
+                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.pub_recon_vox = self.create_publisher(Marker, "/brov/nbv/recon_voxels", latched)
+        self.pub_recon_mesh = self.create_publisher(Marker, "/brov/nbv/recon_mesh", latched)
+        p("recon_frame", "pool")
+        p("recon_world_to_pool_z", 2.7)   # pool = gz world + (0,0,2.7)
+        self._recon_frame = str(g("recon_frame"))
+        self._recon_dz = float(g("recon_world_to_pool_z"))
+        try:
+            from skimage import measure as _sk_measure
+            self._marching_cubes = _sk_measure.marching_cubes
+        except Exception as exc:   # noqa: BLE001
+            self._marching_cubes = None
+            self.get_logger().warning(f"scikit-image 없음 — mesh 복원 표시 생략 (voxel 큐브만): {exc}")
         self.create_subscription(CameraInfo, str(g("info_topic")), self._on_info,
                                  qos_profile_sensor_data)
         self.create_subscription(Image, str(g("depth_topic")), self._on_depth,
@@ -248,6 +268,7 @@ class NbvBeliefNode(Node):
         obs = int((self._weight > 0).sum())
         occ = int(((self._weight > 0) & (self._tsdf <= 0)).sum())
         self._publish_state()
+        self._publish_recon()
         raw = self._depth
         finite = torch.isfinite(raw) & (raw > 0)
         frac = float(finite.float().mean())
@@ -285,11 +306,55 @@ class NbvBeliefNode(Node):
         self._weight = torch.zeros(1, *self._vol_dim)
         self._fused = 0
         self._publish_state()
+        self._publish_recon()
         resp.success = True
         resp.message = "볼륨 초기화"
         return resp
 
     # ── 출력 ──
+    def _publish_recon(self) -> None:
+        """관측된 TSDF 를 RViz 마커로: occupied voxel 큐브 + (가능하면) zero-level mesh."""
+        Marker = self._Marker
+        now = self.get_clock().now().to_msg()
+        origin = (self._vol_origin[0].numpy() + np.array([0.0, 0.0, self._recon_dz])).astype(np.float64)
+        tsdf = self._tsdf[0].numpy(); w = self._weight[0].numpy()
+        observed = w > 0
+        occ = observed & (tsdf <= 0.0)
+        from geometry_msgs.msg import Point
+        vox = Marker(); vox.header.frame_id = self._recon_frame; vox.header.stamp = now
+        vox.ns = "recon_voxels"; vox.id = 0; vox.action = Marker.ADD; vox.type = Marker.CUBE_LIST
+        vox.scale.x = vox.scale.y = vox.scale.z = self._vox * 0.92
+        vox.pose.orientation.w = 1.0
+        vox.color.r, vox.color.g, vox.color.b, vox.color.a = 0.95, 0.6, 0.2, 0.85
+        idx = np.argwhere(occ)
+        centers = origin + (idx + 0.5) * self._vox
+        vox.points = [Point(x=float(c[0]), y=float(c[1]), z=float(c[2])) for c in centers]
+        if not vox.points:
+            vox.action = Marker.DELETE
+        self.pub_recon_vox.publish(vox)
+
+        mesh = Marker(); mesh.header.frame_id = self._recon_frame; mesh.header.stamp = now
+        mesh.ns = "recon_mesh"; mesh.id = 0; mesh.type = Marker.TRIANGLE_LIST; mesh.action = Marker.ADD
+        mesh.scale.x = mesh.scale.y = mesh.scale.z = 1.0; mesh.pose.orientation.w = 1.0
+        mesh.color.r, mesh.color.g, mesh.color.b, mesh.color.a = 0.75, 0.75, 0.8, 1.0
+        pts = []
+        if self._marching_cubes is not None and occ.any() and (observed & (tsdf > 0)).any():
+            try:
+                # 미관측(=1.0) 영역은 mask 로 제외해 볼륨 경계에 가짜 면이 생기지 않게 한다
+                verts, faces, _, _ = self._marching_cubes(
+                    tsdf.astype(np.float32), level=0.0,
+                    spacing=(self._vox, self._vox, self._vox), mask=observed)
+                verts = verts + origin + self._vox * 0.5
+                for f in faces:
+                    for vi in f:
+                        v = verts[vi]; pts.append(Point(x=float(v[0]), y=float(v[1]), z=float(v[2])))
+            except (ValueError, RuntimeError) as exc:
+                self.get_logger().warning(f"marching cubes 실패: {exc}")
+        mesh.points = pts
+        if not pts:
+            mesh.action = Marker.DELETE
+        self.pub_recon_mesh.publish(mesh)
+
     def _publish_state(self) -> None:
         ch = tf.vox_actor_channels(self._tsdf, self._weight)
         self.pub_vox.publish(pack("vox", ch[0].numpy()))

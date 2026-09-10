@@ -1747,3 +1747,28 @@ apriltag_16h5_id2 / bluerov2_heavy 가 보이면 서버에 붙은 것이다.
 deploy 만 마운트하면 "Unable to find file" — sidecar 는 저장소 루트를 마운트한다.
 (3) 관측 run(random, 8 결정): 홉 5–18 s, pos_err ≤6 cm, att ≤2.7°, cov 0.235 → 0.54 — GUI 를 붙여도
 RTF 97 % 로 §16.3 결과와 같다.
+
+### 16.5 RViz 미션 진행 시각화 (2026-09-11, 사용자 요청)
+
+사용자 결정: 로봇은 **Pose(축)** 만(SLAM 식), 복원은 voxel 큐브 + marching-cubes mesh **둘 다**, 의존성 문서화
+(`deploy/REQUIREMENTS.md`, laptop 로컬 실행 전제), aruco 노드를 폐루프에 부착, 초기 pose = 에피소드 첫 prepare 시점,
+목표 이력 10개(alpha 1.0→0.15), 노드는 brov_viz 에.
+
+```bash
+# 컨테이너: docker exec bluerov2_sitl bash /tmp/start_closed_loop.sh random 25 3
+# 호스트:   deploy/run_rviz_host.sh      (nbv_viz_node + rviz2, 끝내기 ... stop)
+#           deploy/run_gz_gui_host.sh    (선택, Gazebo GUI)
+```
+| 표시 | 구현 |
+|---|---|
+| 물체 좌표계·mesh | TF `pool→object`(항등), `plaster_mold.obj` MESH_RESOURCE |
+| 비전 마커 좌표계·인식 | TF `pool→apriltag_16h5_2`(survey 값), 판 초록/회색 + 라벨 ← `/brov/aruco/visible`; SITL 은 aruco 노드를 카메라 파이프라인에 부착(base→camera x 0.30 override) |
+| 초기/현재 pose | `/brov/viz/initial_pose`(첫 NBV 목표 수신 시 latch), `/brov/viz/robot_pose` + 카메라 절두체 + 궤적 |
+| NBV 목표 | 정책 노드 → `/brov/nbv/target_pose`, `/brov/nbv/hop_waypoints` → 초록 구(현재) + 감쇠 이력 + 호 중간점 |
+| 복원 | belief 노드 → `/brov/nbv/recon_voxels`(CUBE_LIST), `/brov/nbv/recon_mesh`(skimage marching_cubes, mask=관측) |
+
+**발견** (모두 문서화): (1) 호스트 rviz2 는 셸의 `LD_LIBRARY_PATH`(cuda/gazebo-11)·conda 를 물려받으면 GL 컨텍스트 실패 →
+깨끗한 환경. (2) 호스트↔컨테이너는 Fast-DDS SHM 때문에 discovery 만 되고 데이터가 안 옴 → UDPv4 전용 프로파일.
+(3) 컨테이너 cv2 5.0: `cv2.aruco.detectMarkers`/`estimatePoseSingleMarkers` 없음, cv_bridge KeyError → aruco 노드를
+`ArucoDetector`·`solvePnP(IPPE_SQUARE)`·numpy 변환 fallback 으로 양쪽 API 호환. (4) `brov_perception` 도 overlay 복사본이었음
+→ clean symlink 재빌드. (5) 마커 인식은 look-at 자세에서 시점에 따라 깜빡인다(§12.7 가시성 8.9~21 % 와 일관).
