@@ -106,6 +106,9 @@ parser.add_argument("--camera_path", type=str, default="tiled",
                     help="렌더 경로. **학습과 반드시 같아야 한다** — 두 경로는 "
                          "화면 밝기가 다르고(그리고 tiled는 env 수에 따라서도 "
                          "달라진다), 정책 입력이 그레이스케일이라 직접 영향받는다")
+parser.add_argument("--egocentric_vox", action="store_true",
+                    help="학습 때 --egocentric_vox를 썼다면 반드시 같이 줄 것.\n"
+                         "관측 프레임이 다르면 정책이 학습 때 본 적 없는 입력을 받는다.")
 parser.add_argument("--ablate_map", type=str, default="none",
                     choices=("none", "shuffle", "zero"),
                     help="지도 절제 시험: shuffle=env끼리 voxel 관측을 뒤섞음(입력 분포 유지,\n"
@@ -136,6 +139,7 @@ def main() -> int:
     cfg = NBVBROVEnvCfg()
     cfg.scene.num_envs = args.num_envs
     cfg.use_tiled_camera = (args.camera_path == "tiled")
+    cfg.vox_egocentric = args.egocentric_vox
     if args.quality_model is not None:
         cfg.quality_model = args.quality_model
     if args.normal_source is not None:
