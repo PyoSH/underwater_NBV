@@ -167,3 +167,20 @@ def test_arc_split_single_chord_when_far():
 def test_shortest_theta_delta_wraps():
     assert gf.shortest_theta_delta(math.radians(350.0), math.radians(10.0)) == pytest.approx(math.radians(20.0))
     assert gf.shortest_theta_delta(math.radians(10.0), math.radians(350.0)) == pytest.approx(-math.radians(20.0))
+
+
+def test_start_slightly_inside_envelope_is_allowed_when_chord_moves_away():
+    """도착 오차로 시작점이 경계 안쪽 2 cm 여도, 멀어지는 chord 는 통과 (run #13 reject_chord)."""
+    phi = math.radians(43.0)
+    psi_edge = gf.psi_min_safe(phi)
+    a = (math.radians(337.0), phi, psi_edge - 0.02)          # 경계 안쪽
+    b = (math.radians(338.0), math.radians(55.0), 1.90)      # 유효, 더 먼 시점
+    assert gf.is_valid(*b)[0]
+    p0, p1 = gf.view_position(*a), gf.view_position(*b)
+    assert not gf.segment_is_clear(p0, p1)                    # 엄격 규칙은 거부
+    assert gf.segment_is_clear(p0, p1, start_inside_ok=True)  # 완화 규칙은 허용
+    pts, k = gf.arc_split(a, b)
+    assert pts is not None and k == 1
+    # 그러나 물체 쪽으로 파고드는 chord 는 여전히 거부
+    c = (math.radians(337.0), phi, psi_edge - 0.30)
+    assert not gf.segment_is_clear(p0, gf.view_position(*c), start_inside_ok=True)

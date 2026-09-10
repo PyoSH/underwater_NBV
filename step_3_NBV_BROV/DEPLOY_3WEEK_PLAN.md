@@ -1659,6 +1659,12 @@ launch    brov_bringup/launch/nbv_pose_sitl.launch.py (+ safety_nbv_sitl.yaml, m
 | #11 | 4/4 도착(≤1.7 cm / ≤2.4°), edge capture 유효 100 %, 관측 voxel 420→703 — 그러나 홉 2 가 60 s 상한 | 자세 오차는 1–3° 로 내내 안정인데 body rate 가 2 s 창마다 12–38°/s 로 튐: model PID 의 T200 deadband relay(`minimum_active_pwm ≥ 0.075` 는 계약 강제) × gz 저복원모멘트 limit cycle. 각속도 게이트 11.5°/s 가 dwell 을 계속 리셋 | "정착" 은 자세·위치 게이트가 맡고 각속도 게이트는 limit-cycle 포락 위(0.70 rad/s, SITL 안전 상한 동반). 후속: guidance 에 저역통과 rate 게이트(계약 확장) |
 | #12 | cov_bin NaN | belief 는 마스크를 읽고 0.2334 를 냈는데 정책 노드 파서가 `"0.2334; depth …"` 전체를 float 로 변환 | 파서 수정 |
 
+| #13 | 게이트 0.70 rad/s: 홉 18/6/8/7/5/12 s (run #12: 40/30/8/29/13/62 s), 그러나 홉 7–8 `reject_chord` | 시작점(측정 pose)이 도착 오차만큼 포락 경계 **안쪽**이면 첫 chord 의 s=0 표본이 항상 음수 → 영원히 거부 | `segment_is_clear(start_inside_ok)`: 첫 chord 는 시작점보다 나빠지지 않으면(멀어지기만 하면) 허용, 물체 쪽으로 파고드는 chord 는 여전히 거부. 시험 1건 |
+
+게이트 trade-off (run #12 vs #13): 각속도 게이트를 포락 위로 올리면 홉이 5–18 s 로 학습 결정 주기(5 s)에
+가까워지는 대신 edge 위치 오차가 7 mm → 3–6 cm (허용 0.15 m 안). 학습도 5 s 고정 뒤 잔류 운동이 있는
+상태로 촬영하므로 후자가 학습 분포에 더 가깝다 → 0.70 채택.
+
 **② 실측 — controller 폐루프 (run #9 bag, GT pose, model-based PID, RTF 0.94)**
 ```
 hop  n_wp  len[m]  arrive<0.15m[s sim]  진입후 최대이탈[m]  종점오차          dur[s sim]  pwm max
@@ -1692,6 +1698,18 @@ run #12 (8 결정)   pos_err[m]  att_err[deg]  fly[s wall, RTF≈0.95]   융합 
   run #13 은 게이트 0.70 rad/s 로 재측정.
 - 남은 차이(학습 env 대비): 학습은 5 s 고정 뒤 촬영, 배포는 도착+정착+dwell 2 s. 결정당 시간이
   길어질 뿐 관측 분포(정착된 pose 의 프레임)는 같다 — 정본 §16.2 의 결정 그대로.
+
+**② 최종 (run #14, random, 8 결정, 게이트 0.70 + geofence start_inside_ok): 8/8**
+```
+hop        1     2     3     4     5     6(호4점)  7     8
+fly [s]   18     7     7     7     5    13        5     7      ← 학습 결정 주기 5 s 에 근접 (첫 홉만 1.1 m + 160° 회전)
+pos_err   0.9   5.9   4.3   5.8   2.8   5.0      5.7   5.2 cm  (허용 15 cm)
+att_err   2.7   2.2   2.2   1.7   1.7   1.7      1.7   2.7 °   (허용 10°)
+cov_bin  .266  .341  .394  .501  .505  .533     .550  .578
+```
+② 완료 판정: v3 pose 미션 → guidance(hold) → model PID → 도착·정착 → edge capture → belief 융합 →
+다음 결정의 전 루프가 GT pose 위에서 닫힌다. 남은 것은 ③ 정책 관측 조립(image + vox_actor +
+(θ,φ,ψ)_actual → TorchScript 정책, checkpoint 대기)과 실기 추정기(§13/§14).
 
 컨테이너 메모: PID 1 이 `sleep infinity` 라 종료된 ardusub/mavproxy 가 zombie 로 남는다(수십 개,
 CPU·포트 점유 없음). `pkill -f` 패턴이 docker exec 셸의 명령줄과 겹치면 셸이 자기를 죽이므로

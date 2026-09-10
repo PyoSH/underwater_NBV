@@ -191,8 +191,24 @@ def segment_clearance(p0, p1, samples: int = 33) -> float:
     return best
 
 
-def segment_is_clear(p0, p1) -> bool:
-    return segment_clearance(p0, p1) >= 0.0
+def segment_is_clear(p0, p1, start_inside_ok: bool = False) -> bool:
+    """chord 가 물체 포락을 비끼는가.
+
+    start_inside_ok: 첫 chord 의 시작점은 **측정 pose** 라 도착 오차(수 cm)만큼 포락 경계
+    안쪽일 수 있다(run #13 실측 → reject_chord). 그 경우 시작점 자체의 여유는 묻지 않고,
+    chord 위 어느 점도 시작점보다 나빠지지 않으면(멀어지기만 하면) 통과시킨다.
+    """
+    if not start_inside_ok:
+        return segment_clearance(p0, p1) >= 0.0
+    c0 = clearance_to_object(math.hypot(p0[0], p0[1]), p0[2]) - REACH_TOWARD_OBJ_M
+    floor = min(0.0, c0)
+    samples = 33
+    for i in range(1, samples):
+        t = i / (samples - 1)
+        x = p0[0] + t * (p1[0] - p0[0]); y = p0[1] + t * (p1[1] - p0[1]); z = p0[2] + t * (p1[2] - p0[2])
+        if clearance_to_object(math.hypot(x, y), z) - REACH_TOWARD_OBJ_M < floor - 1e-9:
+            return False
+    return True
 
 
 def shortest_theta_delta(theta0: float, theta1: float) -> float:
@@ -230,6 +246,7 @@ def arc_split(sph0, sph1, max_pieces: int = 6):
                 ps = max(ps, psi_min_safe(ph) + ARC_LIFT_MARGIN_M)
             pts.append((th, ph, ps))
         chain = [view_position(*sph0)] + [view_position(*s) for s in pts]
-        if all(segment_is_clear(chain[i], chain[i + 1]) for i in range(len(chain) - 1)):
+        if all(segment_is_clear(chain[i], chain[i + 1], start_inside_ok=(i == 0))
+               for i in range(len(chain) - 1)):
             return pts, k
     return None, max_pieces
